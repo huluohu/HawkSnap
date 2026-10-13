@@ -16,26 +16,13 @@ declare global {
 export default function OverlayWindow() {
   const [display, setDisplay] = useState<Display | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // 覆盖层窗口常驻复用（Plan B Task 1）：页面生命周期跨越多轮捕获，此标志每轮 payload
+  // 到达时复位，保证 hawk://overlay-shown 每轮捕获重发一次（bench 门闩按轮与 hotkey 配对）。
   const shownRef = useRef(false);
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    listen<Display[]>("hawk://overlay-ready", (e) => {
-      const mine = e.payload.find((d) => `overlay-${d.displayId}` === window.__LABEL__);
-      if (mine) setDisplay(mine);
-    }).then((un) => {
-      if (disposed) un();
-      else unlisten = un;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
-  // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用
-  const { phase, rect, pointerHandlers, confirm } = useSelection({
+  // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用。
+  // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
+  const { phase, rect, pointerHandlers, confirm, reset } = useSelection({
     width: display?.width ?? 0, height: display?.height ?? 0,
     onConfirm: async (r: SelRect) => {
       if (!display) return;
@@ -43,7 +30,8 @@ export default function OverlayWindow() {
         const outcome = await invoke<{ copied: boolean; savedTo: string | null }>("finish_capture", {
           req: { displayId: display.displayId, rect: r, copy: true, save: true },
         });
-        // 发 capture-done 并关闭本窗口（Rust 侧按 displayId 直接关，见 Task 9 裁定 2）
+        // 发 capture-done 并隐藏本窗口（Rust 侧按 displayId 隐藏，见 Task 9 裁定 2；
+        // Plan B Task 1 起常驻复用：隐藏而非关闭，窗口由 start_capture_flow 复用）
         await invoke("emit_capture_done", { displayId: display.displayId, outcome });
       } catch (err) {
         // spec §9：失败不允许静默。覆盖层窗口不是横幅宿主，经全局事件把错误送到
@@ -54,7 +42,7 @@ export default function OverlayWindow() {
     },
     onCancel: () => {
       // display 未到（overlay-ready 三连发全丢）时，从建窗注入的 __LABEL__（格式
-      // overlay-{id}）同步解析 displayId，保证 Esc 始终能关窗，不留僵尸覆盖层。
+      // overlay-{id}）同步解析 displayId，保证 Esc 始终能隐藏窗口，不留僵尸覆盖层。
       const labelId = window.__LABEL__?.match(/^overlay-(\d+)$/)?.[1];
       const id = display?.displayId ?? Number(labelId);
       if (!Number.isFinite(id)) return; // 无 display 且 label 缺失，无从取消
@@ -62,7 +50,29 @@ export default function OverlayWindow() {
     },
   });
 
-  // 冻结帧 + 遮罩 + 选区：rect/display 变化时重绘
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<Display[]>("hawk://overlay-ready", (e) => {
+      const mine = e.payload.find((d) => `overlay-${d.displayId}` === window.__LABEL__);
+      if (mine) {
+        setDisplay(mine);          // 新对象身份必触发重绘 effect
+        reset();                   // 新一轮捕获：清选区与 in-flight 守卫
+        shownRef.current = false;  // 每轮捕获重发 overlay-shown（见上方 shownRef 注）
+      }
+    }).then((un) => {
+      if (disposed) un();
+      else unlisten = un;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [reset]);
+
+  // 冻结帧 + 遮罩 + 选区：rect/display 变化时重绘。常驻复用下每轮 payload 的 pngUrl
+  // 携带后端版本化文件名（capture_screens 按时间戳命名，Plan B Task 1 cache-bust），
+  // URL 变化即绕开 Webview 缓存，无需前端追加 query。
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !display) return;
@@ -88,7 +98,8 @@ export default function OverlayWindow() {
         ctx.fillStyle = "#0D1522";
         ctx.fillText(label, rect.x + rect.w - tw + 6, rect.y + rect.h + 20);
       }
-      // 首次画出冻结帧后回报一次（Rust 侧暂忽略，Task 11 接性能打点）
+      // 本轮冻结帧画出后回报一次（Rust 侧 mark_overlay_shown_once 只记每轮首个，
+      // 门闩与 hotkey 1:1 配对）；shownRef 已在下一轮 payload 到达时复位
       if (!shownRef.current) {
         shownRef.current = true;
         void emit("hawk://overlay-shown");

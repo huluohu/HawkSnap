@@ -14,7 +14,8 @@ export function useSelection(opts: {
   const start = useRef<Point | null>(null);
   // 确认在途标志：confirm 一旦触发即置位，防止 Enter 自动重复/双击在异步
   // finish_capture → emit_capture_done 链完成前再次确认（重复剪贴板写入、重复落盘）。
-  // 成功路径窗口随即关闭无需复位；失败/取消路径由 cancel() 复位。
+  // 覆盖层窗口常驻复用（hide 而非 close），故除 cancel() 外，新一轮 payload 到达时的
+  // reset() 也必须清掉本标志——否则上一轮失败/中断的在途守卫会砖死下一轮确认。
   const confirmingRef = useRef(false);
 
   const norm = (a: Point, b: Point): SelRect => ({
@@ -51,6 +52,15 @@ export function useSelection(opts: {
     setPhase("idle"); setRect(null); start.current = null; opts.onCancel?.();
   }, [opts]);
 
+  // 新一轮捕获（overlay-ready 新 payload 到达）时由页面调用：回到 idle、清选区，
+  // 并清 in-flight 守卫——与 cancel 的差异是不触发 onCancel（不关窗）。
+  const reset = useCallback(() => {
+    confirmingRef.current = false;
+    start.current = null;
+    setPhase("idle");
+    setRect(null);
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") cancel();
@@ -60,5 +70,5 @@ export function useSelection(opts: {
     return () => window.removeEventListener("keydown", onKey);
   }, [cancel, confirm]);
 
-  return { phase, rect, pointerHandlers, confirm, cancel };
+  return { phase, rect, pointerHandlers, confirm, cancel, reset };
 }

@@ -22,9 +22,9 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
     let f1 = Shortcut::new(None, Code::F1);
     let app2 = app.clone();
     // on_shortcut 注册快捷键并挂处理器（勿再单独 register：同一组合二次注册会被 macOS
-    // 以 eventHotKeyExistsErr 拒绝）。热键回调在主线程（Carbon 事件）触发，而
-    // start_capture_flow 里的 close() 在主线程会直接 panic（tauri-runtime-wry 禁止
-    // 在主线程处理 Close 消息），故整个流程放到独立线程执行，热键处理立即返回。
+    // 以 eventHotKeyExistsErr 拒绝）。热键回调在主线程（Carbon 事件）触发，而窗口
+    // 建窗/关窗类操作禁止在主线程做（tauri-runtime-wry 在主线程处理 Close 消息会直接
+    // panic），故整个流程放到独立线程执行，热键处理立即返回。
     gs.on_shortcut(f1, move |_app, _shortcut, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
             let app = app2.clone();
@@ -236,17 +236,22 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     crate::perf::mark_hotkey();
     let displays = tauri::async_runtime::block_on(commands::capture_screens(app.clone()))?;
     crate::perf::mark("grab_done"); // 抓屏成功返回
+    // Plan B Task 1（G3-1）：覆盖层窗口常驻复用——首轮 build（webview 冷加载 ~267ms），
+    // 之后每轮仅 set_position/set_size/show，页面由 overlay-ready 的新 payload 重绘，
+    // 砍掉每轮的冷加载段。show/hide/set_position 都是投递给主线程事件循环的消息，
+    // 非主线程调用安全（close 特殊，见 hide_overlay 注）。
     for d in &displays {
         let label = format!("overlay-{}", d.display_id);
-        if let Some(w) = app.get_webview_window(&label) { let _ = w.close(); }
-        // close() 是投递给主线程事件循环的异步消息：旧窗口经 Destroyed 事件注销前，
-        // 重建同 label 窗口会报 WindowLabelAlreadyExists。轮询等待注销完成（上限 500ms，
-        // 超时则让 build 报错并走 capture-error，不会卡死）。
-        let mut waited = 0u32;
-        while app.get_webview_window(&label).is_some() && waited < 500 {
-            std::thread::sleep(Duration::from_millis(5));
-            waited += 5;
+        if let Some(w) = app.get_webview_window(&label) {
+            // 复用：窗口与页面常驻，仅更新几何并显示。页面经 overlay-ready 的新 payload 重绘。
+            let _ = w.set_position(tauri::LogicalPosition::new(d.x as f64, d.y as f64));
+            let _ = w.set_size(tauri::LogicalSize::new(d.width as f64, d.height as f64));
+            let _ = w.show();
+            let _ = w.set_focus();
+            continue;
         }
+        // 首建路径（防御：复用模式下同 label 不会重建，除非窗口被外部强关）。
+        // 旧实现的 close 旧窗 + 500ms 轮询等注销块已删除——复用模式下不存在“重建活 label”。
         // query 让前端 main.tsx 按 ?window=overlay 路由到覆盖层页面（dev 走 SPA fallback，
         // 生产 tauri 对 dist 亦以 index.html 兜底）
         let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("overlay?window=overlay".into()))
@@ -260,7 +265,7 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
         let _ = win.eval(&format!("window.__LABEL__='overlay-{}';", d.display_id));
         let _ = win.set_focus();
     }
-    crate::perf::mark("overlay_created"); // 全部覆盖层窗口 build 完成（每轮截图一次，便于脚本按索引配对）
+    crate::perf::mark("overlay_created"); // 覆盖层窗口就绪（build 或复用 show 完成；每轮一次，便于脚本按索引配对）
     // overlay-ready 在窗口 overlay 路由的前端挂载前可能先到（首次 emit 会丢）。
     // 简化实现：共发 3 次、间隔 150ms，前端以收到的最后一次为准（Task 9 契约）。
     // 重复发送放在独立线程，避免热键处理被拖慢 450ms。
@@ -279,25 +284,27 @@ use crate::commands;
 
 // —— Task 9 薄命令 ——
 
-/// 覆盖层取消：直接关闭对应窗口（capture-error 事件链未覆盖此路径，无需 emit）。
+/// 覆盖层取消：隐藏对应窗口（capture-error 事件链未覆盖此路径，无需 emit）。
 #[tauri::command]
 pub async fn cancel_capture(app: AppHandle, display_id: u64) -> Result<(), String> {
-    close_overlay(&app, display_id)
+    hide_overlay(&app, display_id)
 }
 
 /// 覆盖层确认完成：广播 capture-done（payload = outcome，契约不变）后按 displayId
-/// 直接关闭发起窗口。CaptureOutcome 不携带 displayId，无法走“setup 监听再关窗”链，
+/// 隐藏发起窗口。CaptureOutcome 不携带 displayId，无法走“setup 监听再关窗”链，
 /// 故由本命令自带目标（Task 9 裁定 2，跳过 setup 监听）。
 #[tauri::command]
 pub async fn emit_capture_done(app: AppHandle, display_id: u64, outcome: commands::CaptureOutcome) -> Result<(), String> {
     app.emit("hawk://capture-done", &outcome).map_err(|e| e.to_string())?;
-    close_overlay(&app, display_id)
+    hide_overlay(&app, display_id)
 }
 
-fn close_overlay(app: &AppHandle, display_id: u64) -> Result<(), String> {
+/// 常驻复用：隐藏而非关闭，窗口由 start_capture_flow 复用（Plan B Task 1）。命令在
+/// 异步运行时线程执行（非主线程），hide() 是投递给主线程事件循环的消息，安全
+/// （close 须避开主线程，见 register_hotkeys 注；此处本就非主线程，hide 更无此顾虑）。
+fn hide_overlay(app: &AppHandle, display_id: u64) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(&format!("overlay-{display_id}")) {
-        // 命令在异步运行时线程执行（非主线程），close() 安全（见 register_hotkeys 注释）
-        w.close().map_err(|e| e.to_string())?;
+        w.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
 }

@@ -48,10 +48,22 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
     let mut out = Vec::with_capacity(frames.len());
     let mut frame_meta = FRAME_META.lock().unwrap();
     for f in frames {
-        let file = cache.join(format!("{}.png", f.display_id));
+        // Plan B Task 1 cache-bust：覆盖层窗口常驻复用后页面不再重载，同路径覆盖写会命中
+        // Webview 的 URL 缓存而显示上一轮旧帧，故文件名带毫秒时间戳强制每轮重新加载
+        // （asset 协议对 query 参数不可靠，版本化文件名是确定性方案；仍在 $CACHE/** scope 内）。
+        // 写入前删除上一轮同 display 的冻结帧，缓存目录不随轮数增长。
+        if let Some(prev) = frame_meta.get(&f.display_id) {
+            let _ = std::fs::remove_file(&prev.png_path);
+        }
+        let file = cache.join(format!(
+            "{}-{}.png",
+            f.display_id,
+            chrono::Local::now().timestamp_millis()
+        ));
         std::fs::write(&file, &f.png).map_err(|e| e.to_string())?;
-        // 冻结帧的 scale 供 finish_capture 做逻辑→物理换算（brief Step 4 注记）
-        frame_meta.insert(f.display_id, FrameMeta { scale: f.scale });
+        // 冻结帧的 scale 供 finish_capture 做逻辑→物理换算；png_path 供 finish_capture
+        // 读取（文件名版本化后无法再按 display_id 拼名，Plan B Task 1）
+        frame_meta.insert(f.display_id, FrameMeta { scale: f.scale, png_path: file.clone() });
         out.push(DisplayPayload {
             display_id: f.display_id, x: f.x, y: f.y,
             width: f.width, height: f.height, scale: f.scale,
@@ -62,19 +74,16 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
 }
 
 #[tauri::command]
-pub async fn finish_capture(
-    app: AppHandle, req: FinishReq,
-) -> Result<CaptureOutcome, String> {
+pub async fn finish_capture(req: FinishReq) -> Result<CaptureOutcome, String> {
     // Task 11 评审 Finding 1：前端 invoke 即确认时刻，在函数首行打点（stage: confirm）。
     // G3 的确认→剪贴板耗时 = clipboard_done - confirm；旧口径 overlay_shown→clipboard_done
     // 混入了人工框选时间，无法作为 ≤100ms 目标的证据。
     crate::perf::mark("confirm");
-    // 1) 读冻结帧
-    let cache = app.path().cache_dir().map_err(|e| e.to_string())?.join("hawksnap/grabs");
-    let png = std::fs::read(cache.join(format!("{}.png", req.display_id))).map_err(|e| e.to_string())?;
-    // 2) 逻辑→物理裁剪
+    // 1) 读冻结帧（文件名版本化后不能按 display_id 拼名，路径经 FRAME_META 取当轮写路径）
     let frame_meta = FRAME_META.lock().unwrap();
-    let scale = frame_meta.get(&req.display_id).map(|m| m.scale).ok_or("display not captured")?;
+    let meta = frame_meta.get(&req.display_id).ok_or("display not captured")?;
+    let png = std::fs::read(&meta.png_path).map_err(|e| e.to_string())?;
+    let scale = meta.scale;
     let physical = to_physical_rect(&req.rect, scale);
     let cropped = crop_png(&png, &physical).map_err(|e| e.to_string())?;
     // 3) 剪贴板
@@ -108,7 +117,7 @@ use std::sync::{LazyLock, Mutex};
 use std::collections::HashMap;
 // HashMap::new 非 const fn，static 用 LazyLock 包装（调用处 FRAME_META.lock() 语法不变）
 static FRAME_META: LazyLock<Mutex<HashMap<u64, FrameMeta>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-#[derive(Clone, Copy)] struct FrameMeta { scale: f64 }
+#[derive(Clone)] struct FrameMeta { scale: f64, png_path: std::path::PathBuf }
 
 fn dirs_picture_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures/HawkSnap"))

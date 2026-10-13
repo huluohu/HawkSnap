@@ -45,6 +45,19 @@ describe("useSelection", () => {
     expect(onConfirm).toHaveBeenCalledWith({ x: 100, y: 100, w: 100, h: 100 });
   });
 
+  it("reset returns to idle and clears in-flight guard", () => {
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600 }));
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 10, clientY: 10 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: 60, clientY: 40 } as PointerEvent));
+    act(() => result.current.cancel()); // cancel 内部也会 reset
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 5, clientY: 5 } as PointerEvent));
+    act(() => result.current.reset());
+    expect(result.current.phase).toBe("idle");
+    expect(result.current.rect).toBeNull();
+    // reset 后 confirm 可以再次触发（in-flight 守卫被清）
+    expect(() => result.current.confirm()).not.toThrow();
+  });
+
   it("confirm is re-entrancy guarded while a confirm is in flight", () => {
     // 回归：phase 在异步 finish 链期间保持 selected，Enter 自动重复不得再次触发 onConfirm
     const onConfirm = vi.fn();
