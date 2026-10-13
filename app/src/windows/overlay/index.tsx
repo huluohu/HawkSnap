@@ -39,15 +39,26 @@ export default function OverlayWindow() {
     width: display?.width ?? 0, height: display?.height ?? 0,
     onConfirm: async (r: SelRect) => {
       if (!display) return;
-      const outcome = await invoke<{ copied: boolean; savedTo: string | null }>("finish_capture", {
-        req: { displayId: display.displayId, rect: r, copy: true, save: true },
-      });
-      // 发 capture-done 并关闭本窗口（Rust 侧按 displayId 直接关，见 Task 9 裁定 2）
-      await invoke("emit_capture_done", { displayId: display.displayId, outcome });
+      try {
+        const outcome = await invoke<{ copied: boolean; savedTo: string | null }>("finish_capture", {
+          req: { displayId: display.displayId, rect: r, copy: true, save: true },
+        });
+        // 发 capture-done 并关闭本窗口（Rust 侧按 displayId 直接关，见 Task 9 裁定 2）
+        await invoke("emit_capture_done", { displayId: display.displayId, outcome });
+      } catch (err) {
+        // spec §9：失败不允许静默。覆盖层窗口不是横幅宿主，经全局事件把错误送到
+        // 主窗口的 capture-error 横幅（ACL core:default 含 event emit）。
+        console.error("finish_capture failed", err);
+        void emit("hawk://capture-error", String(err));
+      }
     },
     onCancel: () => {
-      if (!display) return; // overlay-ready 未到时无可取消的窗口，避免 displayId=undefined
-      void invoke("cancel_capture", { displayId: display.displayId });
+      // display 未到（overlay-ready 三连发全丢）时，从建窗注入的 __LABEL__（格式
+      // overlay-{id}）同步解析 displayId，保证 Esc 始终能关窗，不留僵尸覆盖层。
+      const labelId = window.__LABEL__?.match(/^overlay-(\d+)$/)?.[1];
+      const id = display?.displayId ?? Number(labelId);
+      if (!Number.isFinite(id)) return; // 无 display 且 label 缺失，无从取消
+      void invoke("cancel_capture", { displayId: id });
     },
   });
 

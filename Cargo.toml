@@ -16,3 +16,12 @@ serde = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+# profile 只在 workspace 根生效（app/src-tauri 里写会被 cargo 忽略）。
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

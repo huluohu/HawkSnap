@@ -4,7 +4,7 @@ mod perf;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // 2.4.x 起插件不再提供自由函数 init()，改用 Builder::new().build()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -69,6 +69,16 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // 托盘常驻：最后一个窗口关闭（用户点红绿灯叉）只应关窗，不应退出整个应用。
+    // ExitRequested 的 code=None 表示“最后一个窗口关闭”这类用户交互触发的退出请求，
+    // 一律阻止；托盘“退出”走 app.exit(0)，以 code=Some(0) 到达，不匹配本分支，正常退出。
+    // （ExitRequested 标注 #[non_exhaustive]，模式需带 `..`。）
+    app.run(|_app, event| {
+        if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
+            api.prevent_exit();
+        }
+    });
 }
