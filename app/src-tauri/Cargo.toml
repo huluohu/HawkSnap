@@ -33,3 +33,9 @@ arboard = "3"
 chrono = "0.4"
 # finish_capture 通过 image::load_from_memory 解码裁剪结果（brief 代码所需）
 image.workspace = true
+
+# 媒体键 F1 兼容（Task 13）：NSEvent 全局监听 systemDefined（亮度下键）事件。
+# 0.3.2 已在依赖树（wry）中，features 只增不改版本。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"] }
+block2 = "0.6"

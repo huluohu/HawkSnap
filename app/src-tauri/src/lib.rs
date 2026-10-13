@@ -1,6 +1,7 @@
 mod commands;
 mod overlay;
 mod perf;
+mod single_instance;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -14,6 +15,18 @@ pub fn run() {
             overlay::hotkey_error
         ])
         .setup(|app| {
+            // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
+            // 守卫泄漏为 'static，锁覆盖进程全生命周期（进程退出由内核释放）。
+            // 第二实例拿不到锁 → 提示并立即退出，不再初始化任何窗口/托盘。
+            match single_instance::acquire_lock_at(&std::env::temp_dir().join("hawksnap.lock")) {
+                Ok(guard) => std::mem::forget(guard),
+                Err(_) => {
+                    eprintln!("[hawksnap] 另一实例正在运行");
+                    app.handle().exit(0);
+                    return Ok(());
+                }
+            }
+
             // Task 11 埋点：前端首帧画出冻结帧后回报 hawk://overlay-shown（无 payload）。
             // 多显示器时每窗口各发一次，mark_overlay_shown_once 只记每轮首个（评审 Finding 2a）。
             {
@@ -28,6 +41,15 @@ pub fn run() {
                 eprintln!("[hawksnap] 热键注册失败: {err}");
                 use tauri::Emitter;
                 let _ = app.emit("hawk://hotkey-error", err);
+            }
+
+            // 媒体键兼容（Task 13）：macOS 默认 F1=亮度键（fnState 未开启时物理 F1 不发
+            // keycode 122），监听 systemDefined 的亮度下键走与 F1 相同的截图流程；
+            // 监听不可用（未授予辅助功能）时降级并按需经 hotkey-error 通道发「提示：」，
+            // 绝不阻塞启动。
+            #[cfg(target_os = "macos")]
+            if let Err(err) = overlay::register_media_key_f1(app.handle()) {
+                eprintln!("[hawksnap] 媒体键监听注册失败: {err}");
             }
 
             // 托盘常驻：截图入口 + 退出。
