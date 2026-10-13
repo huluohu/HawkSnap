@@ -14,6 +14,9 @@ pub enum CropError {
 pub fn crop_png(png: &[u8], physical: &Rect) -> Result<Vec<u8>, CropError> {
     let img = image::load_from_memory(png).map_err(|_| CropError::Decode)?;
     let (sw, sh) = (img.width() as i32, img.height() as i32);
+    if physical.w > i32::MAX as u32 || physical.h > i32::MAX as u32 {
+        return Err(CropError::OutOfBounds);
+    }
     if physical.x < 0 || physical.y < 0
         || physical.right() > sw || physical.bottom() > sh { return Err(CropError::OutOfBounds); }
     let cropped = img.crop_imm(
@@ -44,6 +47,12 @@ mod tests {
         let out = crop_png(&solid_png(4, 4, [255, 0, 0, 255]), &Rect { x: 1, y: 1, w: 2, h: 2 }).unwrap();
         let img = image::load_from_memory(&out).unwrap();
         assert_eq!((img.width(), img.height()), (2, 2));
+    }
+
+    #[test]
+    fn out_of_bounds_on_overflowing_width() {
+        let e = crop_png(&solid_png(4, 4, [0, 0, 0, 255]), &Rect { x: 0, y: 0, w: u32::MAX, h: 4 });
+        assert!(matches!(e, Err(CropError::OutOfBounds)));
     }
 
     #[test]
