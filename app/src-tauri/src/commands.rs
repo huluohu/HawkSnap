@@ -83,6 +83,9 @@ pub async fn finish_capture(
         cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: rgba.into() })
             .map_err(|e| e.to_string())?;
         copied = true;
+        // Task 11 埋点：clipboard_done 仅在 req.copy=true 路径打点（M1 流程恒为 true）。
+        // 不对称属预期：若未来支持“仅保存”，该阶段会缺行，bench 配对时按索引 zip 截断。
+        crate::perf::mark("clipboard_done");
     }
     // 4) 保存
     let mut saved_to = None;

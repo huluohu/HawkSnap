@@ -1,5 +1,6 @@
 mod commands;
 mod overlay;
+mod perf;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -13,6 +14,15 @@ pub fn run() {
             overlay::hotkey_error
         ])
         .setup(|app| {
+            // Task 11 埋点：前端首帧画出冻结帧后回报 hawk://overlay-shown（无 payload），
+            // 此处监听并打 overlay_shown 点（每窗口一次，多显示器时每屏各触发一次）。
+            {
+                use tauri::Listener;
+                let _id = app.listen("hawk://overlay-shown", move |_event| {
+                    crate::perf::mark("overlay_shown");
+                });
+            }
+
             // 热键注册失败不中止启动（spec §9：允许无热键启动，但必须给用户可见反馈）。
             if let Err(err) = overlay::register_hotkeys(app.handle()) {
                 eprintln!("[hawksnap] 热键注册失败: {err}");

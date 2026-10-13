@@ -55,7 +55,10 @@ pub fn hotkey_error() -> Option<String> {
 
 // 必须在非主线程调用（register_hotkeys 已保证；Task 10 的托盘入口同样需要放到线程里）。
 pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
+    // Task 11 埋点：热键/托盘共用此入口，首行即触发时刻（stage: hotkey）
+    crate::perf::mark("hotkey");
     let displays = tauri::async_runtime::block_on(commands::capture_screens(app.clone()))?;
+    crate::perf::mark("grab_done"); // 抓屏成功返回
     for d in &displays {
         let label = format!("overlay-{}", d.display_id);
         if let Some(w) = app.get_webview_window(&label) { let _ = w.close(); }
@@ -80,6 +83,7 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
         let _ = win.eval(&format!("window.__LABEL__='overlay-{}';", d.display_id));
         let _ = win.set_focus();
     }
+    crate::perf::mark("overlay_created"); // 全部覆盖层窗口 build 完成（每轮截图一次，便于脚本按索引配对）
     // overlay-ready 在窗口 overlay 路由的前端挂载前可能先到（首次 emit 会丢）。
     // 简化实现：共发 3 次、间隔 150ms，前端以收到的最后一次为准（Task 9 契约）。
     // 重复发送放在独立线程，避免热键处理被拖慢 450ms。
