@@ -4,7 +4,7 @@ members = ["app/src-tauri", "crates/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 
 [workspace.dependencies]
 hawksnap-core = { path = "crates/hawksnap-core" }
