@@ -9,6 +9,10 @@ use tauri::{AppHandle, Manager};
 pub struct DisplayPayload {
     pub display_id: u64, pub x: i32, pub y: i32,
     pub width: u32, pub height: u32, pub scale: f64, pub frame_url: String,
+    /// 截图流程代数（终审 wave）：start_capture_flow 每轮分配（FLOW_SEQ 单调递增）
+    /// 并覆写——capture_screens 先填 0 占位，emit 前统一改为本轮代数。前端按 flow
+    /// 丢弃旧代迟到补发（overlay-ready 300ms 补发线程 vs 新一轮的竞态）。
+    pub flow: u64,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +98,7 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
             display_id: f.display_id, x: f.x, y: f.y,
             width: f.width, height: f.height, scale: f.scale,
             frame_url: format!("hawk-grab://{}", file.display()),
+            flow: 0, // 占位：start_capture_flow 在 emit 前统一覆写为本轮代数（见结构体注）
         });
     }
     Ok(out)
@@ -188,6 +193,21 @@ pub(crate) fn captured_display_frames() -> Vec<DisplayFrame> {
         .collect()
 }
 
+/// 流程结束释放整帧 RGBA（终审 wave，G2）：hide_all_overlays 在全部覆盖层隐藏后调用
+/// ——把每个条目的 rgba 换成空 Arc，释放 ~24-59MB/屏的整帧钉住内存（此前它常驻至
+/// 下一轮 capture_screens 覆盖，是空载残余内存的主力，抵消了 G2 缓解措施）。
+/// frame_path 刻意保留：下一轮 capture_screens 删除上一轮冻结帧文件仍需要它。
+/// 释放后的条目再走 finish_capture 会因空 rgba 裁剪失败，报「display not captured」
+/// 式错误——可接受：本函数恰在没有任何覆盖层能确认的时刻执行（能确认的覆盖层都已
+/// 隐藏），确认链在该时刻必然已经完成或已越过代际守卫被作废。锁内只做 Arc 替换
+/// （纯赋值、无 IO），锁窗口极短，不与 try_lock 的 hover 主线程路径冲突。
+pub fn release_captures() {
+    let mut captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
+    for meta in captures.values_mut() {
+        meta.rgba = std::sync::Arc::new(Vec::new());
+    }
+}
+
 fn dirs_picture_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures/HawkSnap"))
 }
@@ -224,9 +244,34 @@ mod tests {
         let p = DisplayPayload {
             display_id: 7, x: 0, y: 0, width: 100, height: 50, scale: 2.0,
             frame_url: "hawk-grab:///tmp/a.raw".into(),
+            flow: 1,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"frameUrl\":\"hawk-grab:///tmp/a.raw\""));
         assert!(!s.contains("pngUrl"), "旧字段不得残留");
+    }
+
+    #[test]
+    fn release_captures_drops_rgba_keeps_frame_path() {
+        // 终审 wave（G2）：release_captures 把每个条目的 rgba 换成空 Arc（内存释放），
+        // frame_path 原样保留（下一轮 capture_screens 删除上一轮冻结帧仍需要）。
+        // 直操 CAPTURES：测试模块同文件，私有静态可达；测试尾部清空，不留跨测污染。
+        CAPTURES.lock().unwrap().insert(
+            42,
+            CaptureMeta {
+                x: 0, y: 0, width: 100, height: 50, scale: 2.0,
+                width_px: 200, height_px: 100,
+                rgba: std::sync::Arc::new(vec![1, 2, 3]),
+                frame_path: std::path::PathBuf::from("/tmp/hs-test.raw"),
+            },
+        );
+        release_captures();
+        {
+            let captures = CAPTURES.lock().unwrap();
+            let meta = captures.get(&42).unwrap();
+            assert!(meta.rgba.is_empty(), "rgba 必须被释放为空 Arc");
+            assert_eq!(meta.frame_path, std::path::PathBuf::from("/tmp/hs-test.raw"));
+        }
+        CAPTURES.lock().unwrap().remove(&42);
     }
 }

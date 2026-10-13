@@ -112,6 +112,17 @@ fn reap_tick(app: &tauri::AppHandle) {
         // 二次复核：快照与 close 之间窗口可能重新可见（新截图流程恰在此毫秒级窗口
         // 启动极罕见，但「绝不回收可见窗口」是无条件红线）。Err 视为不可确认，跳过。
         if matches!(w.is_visible(), Ok(false)) {
+            // 修复（终审 wave，close vs 在途 show 竞态）：overlay-* 额外要求悬停总闸
+            // 为 false 才准 close——总闸只在 start_capture_flow 窗口就绪后置 true、
+            // hide_all_overlays 后落 false，恰补住「is_visible 快照读作隐藏，但新一轮
+            // 流程刚 post 了 show、尚未置总闸/尚未被系统渲染为可见」的毫秒级窗口。在途
+            // show 时 close 会与新流程赛跑（竞态销毁刚复用的窗口）。countdown 前缀不同，
+            // 不受此门影响，仍按 ttl 原样回收。
+            if label.starts_with("overlay-")
+                && crate::overlay::ANY_OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                continue;
+            }
             let _ = w.close(); // 已消失/关闭失败均 best-effort，下轮按需重走首建
         }
     }

@@ -8,6 +8,12 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 // 必丢；错误同时落入此静态，前端挂载时经 hotkey_error 命令拉取补显（读取即清除）。
 static HOTKEY_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
+/// 截图流程代数（单调递增）：每轮 start_capture_flow 分配一个新代数并写入该轮全部
+/// DisplayPayload.flow。overlay-ready 的 300ms 补发线程在每次发射前重查此值——已有
+/// 更新一代启动则旧代补发自弃（否则快速连按 F1 时旧轮迟到补发会以陈旧 payload 覆盖
+/// 新轮显示，且陈旧 raw 文件已被下一轮删除，画布冻结）。
+static FLOW_SEQ: AtomicU64 = AtomicU64::new(0);
+
 // —— Plan B Task 5：智能吸附 AX 悬停探测 ——
 
 /// 悬停探测总闸：是否有任一覆盖层可见。start_capture_flow 在窗口就绪后置 true；
@@ -180,6 +186,7 @@ mod hover {
 pub struct DisplayPayloadForTest {
     pub display_id: u64, pub x: i32, pub y: i32,
     pub width: u32, pub height: u32, pub scale: f64, pub frame_url: String,
+    pub flow: u64,
 }
 
 pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
@@ -397,10 +404,18 @@ pub fn hotkey_error() -> Option<String> {
 
 // 必须在非主线程调用（register_hotkeys 已保证；Task 10 的托盘入口同样需要放到线程里）。
 pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
+    // 修复（终审 wave）：手动 F1 撞上进行中的延时截图倒计时时，先置中止旗标再走本流程
+    // ——延时 worker 的轮询循环每 ≤50ms 检查 DELAY_ABORT，见真即隐藏倒计时窗、清
+    // DELAY_ACTIVE、直接返回（跳过它自己到点的 start_capture_flow）。否则倒计时归零与
+    // 手动 F1 各触发一轮截图，用户连得两轮覆盖层。只置旗标不等待：中止由 worker 单点
+    // 负责（与 cancel_delayed_capture 同款分工），本流程立即继续。
+    if DELAY_ACTIVE.load(Ordering::SeqCst) {
+        DELAY_ABORT.store(true, Ordering::SeqCst);
+    }
     // Task 11 埋点：热键/托盘共用此入口，首行即触发时刻（stage: hotkey）；
     // mark_hotkey 同时武装 overlay_shown 单发门闩（多显示器只记首个 shown，与 hotkey 1:1）
     crate::perf::mark_hotkey();
-    let displays = tauri::async_runtime::block_on(commands::capture_screens(app.clone()))?;
+    let mut displays = tauri::async_runtime::block_on(commands::capture_screens(app.clone()))?;
     crate::perf::mark("grab_done"); // 抓屏成功返回
     // Plan B Task 1（G3-1）：覆盖层窗口常驻复用——首轮 build（webview 冷加载 ~267ms），
     // 之后每轮仅 set_position/set_size/show，页面由 overlay-ready 的新 payload 重绘，
@@ -438,11 +453,26 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     // overlay-ready 在窗口 overlay 路由的前端挂载前可能先到（首次 emit 会丢）。
     // 简化实现：共发 3 次、间隔 150ms，前端以收到的最后一次为准（Task 9 契约）。
     // 重复发送放在独立线程，避免热键处理被拖慢 450ms。
+    //
+    // 修复（终审 wave，代数守卫）：本轮分配新代数写入全部 payload。补发线程 spawn 时
+    // 捕获 my_flow，每次发射前重查 FLOW_SEQ——期间用户已触发新一轮（代数已推进）→
+    // 旧代剩余补发自弃。若无此守卫，快速连按 F1 时旧轮迟到补发会以陈旧 payload 覆盖
+    // 新轮显示，而陈旧 payload 的 raw 文件已被新一轮 capture_screens 删除（画布冻结），
+    // 且 payload 到达触发的 reset() 会杀掉用户新一轮进行中的拖拽。前端按 payload.flow
+    // 丢弃旧代（index.tsx 的 maxFlowRef），双端防线互补。
+    let flow = FLOW_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    for d in displays.iter_mut() {
+        d.flow = flow;
+    }
     let app2 = app.clone();
     let repeats = displays.clone();
+    let my_flow = flow;
     std::thread::spawn(move || {
         for _ in 0..2 {
             std::thread::sleep(Duration::from_millis(150));
+            if FLOW_SEQ.load(Ordering::SeqCst) != my_flow {
+                return; // 已有更新一代流程启动：本线程的剩余补发全部作废
+            }
             let _ = app2.emit("hawk://overlay-ready", repeats.clone());
         }
     });
@@ -494,6 +524,13 @@ fn hide_all_overlays(app: &AppHandle) -> Result<(), String> {
         }
     }
     ANY_OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+    // 修复（终审 wave，G2）：流程到此结束（本时刻起没有任何覆盖层能再确认），释放
+    // CAPTURES 钉住的整帧 RGBA（~24-59MB/屏）——此前它常驻至下一轮覆盖，是空载残余
+    // 内存的主力。frame_path 保留（下一轮 capture_screens 删除上一轮冻结帧仍需要）。
+    // 释放后对已释放条目调 finish_capture 会拿到空 rgba 而报「display not captured」
+    // 式错误——可接受：本函数恰在没有任何覆盖层能确认的时刻执行，唯一能走到该错误的
+    // 是早已越过代际守卫的僵尸链。锁内只做 Arc 替换，无 IO，锁窗口极短。
+    commands::release_captures();
     last_err.map_or(Ok(()), Err)
 }
 
@@ -840,11 +877,15 @@ mod tests {
         let p = DisplayPayloadForTest {
             display_id: 7, x: 0, y: 0, width: 100, height: 50, scale: 2.0,
             frame_url: "hawk-grab:///tmp/a.raw".into(),
+            flow: 3,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"displayId\":7"));
         // Task 2b：冻结帧改为原始 RGBA 文件，payload 字段随之更名 pngUrl → frameUrl
         assert!(s.contains("\"frameUrl\":\"hawk-grab:///tmp/a.raw\""));
+        // 修复（终审 wave）：payload 携带流程代数（单词字段 camelCase 无操作），
+        // 前端按 flow 丢弃旧代迟到补发（代数守卫）
+        assert!(s.contains("\"flow\":3"));
     }
 
     #[test]

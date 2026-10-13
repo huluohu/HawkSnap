@@ -7,7 +7,7 @@ import type { Rect } from "./geometry";
 import { toLocalHover, type HoverFrame } from "./hover";
 import { barPosition } from "./actionBar";
 
-type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string };
+type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string; flow: number };
 
 // window.__LABEL__ 由 Rust 侧建窗后 eval 注入（overlay.rs），用于认领自己的 DisplayPayload
 declare global {
@@ -54,6 +54,11 @@ export default function OverlayWindow() {
   // 用户新触发一轮会复用本窗口，旧链的迟到延续若不拦截，会用 emit_capture_done 把新一轮
   // 刚 show 的窗口藏掉（用户看到窗口闪现即消失），其失败也会误报在新一轮上。
   const flowRef = useRef(0);
+  // 已见最大 payload 代数（终审 wave）：Rust 每轮流程分配单调递增的 flow 写入 payload，
+  // 300ms 补发线程可能在新一轮已启动后才发射旧代 payload——旧代迟到补发若放行，会用
+  // raw 文件已被新一轮删除的陈旧 payload 重绘（画布冻结）并 reset() 杀掉在途拖拽。
+  // payload.flow < maxFlow 直接丢弃；等值（同代补发）放行（首发射丢时的补显仍依赖它）。
+  const maxFlowRef = useRef(0);
   // Task 4 磁吸候选（display 本地坐标）：每轮 payload 到达时经 snap_candidates 拉取一次
   // （窗口在两轮之间会变化，必须逐轮刷新），首帧置空避免用到上一轮的陈旧候选。
   const candidatesRef = useRef<Rect[]>([]);
@@ -108,6 +113,10 @@ export default function OverlayWindow() {
     listen<Display[]>("hawk://overlay-ready", (e) => {
       const mine = e.payload.find((d) => `overlay-${d.displayId}` === window.__LABEL__);
       if (mine) {
+        // 代数守卫（终审 wave）：旧代迟到 payload 直接丢弃（见 maxFlowRef 注），
+        // 绝不 setDisplay / reset。等值放行：同代的三连发补显仍生效。
+        if (mine.flow < maxFlowRef.current) return;
+        maxFlowRef.current = mine.flow;
         setDisplay(mine);          // 新对象身份必触发重绘 effect
         reset();                   // 新一轮捕获：清选区与 in-flight 守卫
         setHoverRect(null);        // 新一轮：清上一轮的悬停框（否则 idle 态会画陈旧高亮）
