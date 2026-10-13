@@ -134,21 +134,16 @@ mod hover {
         // 坐标，与 AxFrame/AXPosition 同一坐标系。勿用 NSEvent 的 mouseLocation /
         // locationInWindow（bottom-left 原点——brief 明言的坐标陷阱）。
         let Some((cx, cy)) = cursor_position() else { return };
-        // AX 查询 inline（裁定 2 的 DECISION）；任何失败 → 走窗口级回退。回退链
-        // （controller 裁定 1）：元素 → 在屏窗口点命中（visible_window_rects 的全局
-        // 逻辑 rect 里取包含光标且面积最小者，role 标 AXWindow 便于区分高亮来源）→
-        // 仍无则 None。None 同样 emit（前端以 null 清除高亮）。回退是增强而非关键路径：
-        // CGWindowList 拉取失败按空候选处理（与 snap_candidates 同款降级），绝不 panic
-        // 打断 hover 链。
-        let frame = hawksnap_platform_mac::ax::element_at_point(cx, cy)
-            .map(super::AxFrameJson::from)
-            .or_else(|| {
-                let rects = super::visible_window_rects().unwrap_or_default();
-                super::window_hit(&rects, cx, cy).map(|r| super::AxFrameJson {
-                    x: r.x, y: r.y, w: r.w, h: r.h, role: "AXWindow".into(),
-                })
-            });
-        let _ = app.emit("hawk://hover", frame);
+        // 悬停回退链（Task 6 修复，决策收敛于 resolve_hover）：元素命中先验 pid——
+        // 外来进程直通；本进程自命中（覆盖层是最顶层鼠标接受窗）或探测失败 → 窗口级
+        // 点命中 → 仍无则 None。None 同样 emit（前端以 null 清除高亮）。回退是增强而非
+        // 关键路径：CGWindowList 拉取失败按空候选处理（与 snap_candidates 同款降级），
+        // 绝不 panic 打断 hover 链。pid 在 resolve_hover 内消费，emit 前剥除
+        // （AxFrameJson 契约不变）。
+        let element = hawksnap_platform_mac::ax::element_at_point_with_pid(cx, cy);
+        let windows = super::visible_window_rects().unwrap_or_default();
+        let frame = super::resolve_hover(element, &windows, cx, cy, super::own_pid());
+        let _ = app.emit("hawk://hover", frame.map(super::AxFrameJson::from));
     }
 
     /// 当前光标位置（全局逻辑坐标，top-left 原点）。
@@ -513,6 +508,27 @@ fn window_hit(rects: &[RectLog], x: f64, y: f64) -> Option<RectLog> {
         })
 }
 
+/// 悬停回退链的纯决策（Task 6 修复，controller 裁定）：外来进程的元素命中直通；
+/// 元素为本进程（覆盖层悬停自命中——覆盖层恰是此刻最顶层鼠标接受窗，system-wide
+/// 探测会返回自身整屏框，若直通将常驻全屏高亮、单击全选整屏，且窗口回退成死代码）
+/// 或探测失败 → 回退窗口级点命中（role 标 AXWindow）；两者皆空 → None（前端清除高亮）。
+fn resolve_hover(
+    element: Option<(hawksnap_platform_mac::ax::AxFrame, i32)>,
+    windows: &[RectLog], x: f64, y: f64, own_pid: i32,
+) -> Option<hawksnap_platform_mac::ax::AxFrame> {
+    match element {
+        Some((f, pid)) if pid != own_pid => Some(f),
+        _ => window_hit(windows, x, y).map(|w| hawksnap_platform_mac::ax::AxFrame {
+            x: w.x, y: w.y, w: w.w, h: w.h, role: "AXWindow".into(),
+        }),
+    }
+}
+
+/// 本进程 pid 按 AX 的 pid_t（i32）域取值（实际 pid 值远小于 i32::MAX，u32→i32 直接转）。
+fn own_pid() -> i32 {
+    std::process::id() as i32
+}
+
 /// 全部在屏 layer==0 窗口的逻辑坐标 rect（排除自身 pid 的覆盖层窗口）。display 过滤
 /// 在前端做（只有它知道自身 display 边界），display_id 参数预留。空结果 = Ok(vec![])，
 /// 绝不以 Err 打断截图流程（磁吸是增强，不是关键路径）。
@@ -639,6 +655,49 @@ mod tests {
         assert_eq!(some, r#"{"x":1.0,"y":2.0,"w":3.0,"h":4.0,"role":"AXButton"}"#);
         let none = serde_json::to_string(&None::<AxFrameJson>).unwrap();
         assert_eq!(none, "null");
+    }
+
+    #[test]
+    fn resolve_hover_prefers_foreign_pid_element() {
+        // 修复（controller 裁定）：外来进程的元素命中直通——窗口候选不参与、不覆盖
+        let windows = vec![RectLog { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 }];
+        let own = i32::from(u16::MAX); // 任一稳定 pid 值即可（纯逻辑不查真实 pid）
+        let el = hawksnap_platform_mac::ax::AxFrame {
+            x: 10.0, y: 10.0, w: 40.0, h: 20.0, role: "AXButton".into(),
+        };
+        let got = resolve_hover(Some((el.clone(), own + 1)), &windows, 20.0, 20.0, own).unwrap();
+        assert_eq!(got, el);
+    }
+
+    #[test]
+    fn resolve_hover_own_pid_element_falls_through_to_window_hit() {
+        // 自命中（覆盖层自身是此刻最顶层鼠标接受窗，system-wide 探测会返回本进程的
+        // 整屏框）：丢弃该元素框，回退窗口级命中（取面积最小者）
+        let windows = vec![
+            RectLog { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 },
+            RectLog { x: 100.0, y: 100.0, w: 400.0, h: 300.0 },
+        ];
+        let own = i32::from(u16::MAX);
+        let own_fullscreen = hawksnap_platform_mac::ax::AxFrame {
+            x: 0.0, y: 0.0, w: 1512.0, h: 982.0, role: "AXGroup".into(),
+        };
+        let hit = resolve_hover(Some((own_fullscreen, own)), &windows, 200.0, 200.0, own).unwrap();
+        assert_eq!((hit.w, hit.h, hit.role), (400.0, 300.0, "AXWindow".to_string()));
+    }
+
+    #[test]
+    fn resolve_hover_none_element_uses_window_hit() {
+        // 无元素命中（探测失败/未授权等）→ 纯窗口回退
+        let windows = vec![RectLog { x: 5.0, y: 5.0, w: 50.0, h: 40.0 }];
+        let hit = resolve_hover(None, &windows, 20.0, 20.0, 1).unwrap();
+        assert_eq!((hit.x, hit.y, hit.w, hit.h), (5.0, 5.0, 50.0, 40.0));
+        assert_eq!(hit.role, "AXWindow");
+    }
+
+    #[test]
+    fn resolve_hover_both_miss_returns_none() {
+        // 元素与窗口皆未命中 → None（前端清除高亮）
+        assert!(resolve_hover(None, &[], 5.0, 5.0, 1).is_none());
     }
 
     #[test]

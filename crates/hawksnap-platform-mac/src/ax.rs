@@ -3,7 +3,7 @@
 //! 绑定选型（任务裁定 6 的选型点）：**不引入 `accessibility` crate**（eiz/accessibility
 //! 0.1.6，2023-11 后无更新，且会携带 core-foundation 0.9 / objc2 0.5 旧主版本与树内
 //! 0.10 / 0.6 并存），改用对 HIServices（经 ApplicationServices 汇出）C API 的裸 extern
-//! 声明——与 overlay.rs 媒体键模块的 `AXIsProcessTrusted` 裸声明同一模式，共 5 个函数。
+//! 声明——与 overlay.rs 媒体键模块的 `AXIsProcessTrusted` 裸声明同一模式，共 6 个函数。
 //! 属性名（"AXRole"/"AXPosition"/"AXSize"）按 CFEqual 匹配，新建同内容 CFString 即命中
 //! 系统常量（与 Task 4 的 kCGWindow* 键同一手法），无需引用 extern static。
 
@@ -56,6 +56,8 @@ mod ffi {
             y: f32,
             element_out: *mut AXUIElementRef,
         ) -> i32;
+        /// 元素所属进程 pid（pid_t = i32）；返回 AXError（i32），0 = 成功。
+        pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
         /// 返回 +1 引用的属性值（CFString / AXValue / ...）；返回 AXError，0 = 成功。
         pub fn AXUIElementCopyAttributeValue(
             element: AXUIElementRef,
@@ -115,10 +117,17 @@ unsafe fn copy_attr(element: ffi::AXUIElementRef, name: &str) -> Option<core_fou
     Some(unsafe { CFType::wrap_under_create_rule(out) })
 }
 
-/// 查询屏幕坐标 (x, y)（top-left 原点全局逻辑坐标）处的 AX 元素。
+/// 查询屏幕坐标 (x, y)（top-left 原点全局逻辑坐标）处的 AX 元素（不带 pid）。
 /// 任何一步失败（未授权 / 无元素 / 属性缺失 / 类型不符）→ None，绝不 panic。
-#[cfg(target_os = "macos")]
 pub fn element_at_point(x: f64, y: f64) -> Option<AxFrame> {
+    element_at_point_with_pid(x, y).map(|(f, _)| f)
+}
+
+/// 同 [`element_at_point`]，另带元素所属进程 pid：overlay 自命中识别用（Task 6 修复——
+/// 悬停时覆盖层恰是全系统最顶层的鼠标接受窗，system-wide 探测会命中本应用并返回
+/// 整屏框，调用方需按 pid 排除自身后回退窗口级命中）。
+#[cfg(target_os = "macos")]
+pub fn element_at_point_with_pid(x: f64, y: f64) -> Option<(AxFrame, i32)> {
     use core_foundation::base::{CFType, CFTypeRef, TCFType};
     use core_foundation::string::CFString;
     use core_graphics::geometry::{CGPoint, CGSize};
@@ -177,12 +186,19 @@ pub fn element_at_point(x: f64, y: f64) -> Option<AxFrame> {
         Some(s) => s.to_string(),
         None => return None, // 角色不是 CFString（异常系统状态）→ None
     };
-    Some(AxFrame { x: pos.x, y: pos.y, w: sz.width, h: sz.height, role })
+    // 所属 pid：pid_t = i32，出参本地变量。非 0（理论罕见：元素存活但进程信息不可得）
+    // → None，让调用方走窗口级回退。
+    // SAFETY: element_ref 为仍持有的合法 AXUIElement；pid 指向本地 i32。
+    let mut pid: i32 = 0;
+    if unsafe { ffi::AXUIElementGetPid(element_ref, &mut pid) } != 0 {
+        return None;
+    }
+    Some((AxFrame { x: pos.x, y: pos.y, w: sz.width, h: sz.height, role }, pid))
 }
 
 /// 非 macOS 平台：无 AX 可言，恒 None（悬停链路缺席；拖拽框选不经过本函数）。
 #[cfg(not(target_os = "macos"))]
-pub fn element_at_point(_x: f64, _y: f64) -> Option<AxFrame> {
+pub fn element_at_point_with_pid(_x: f64, _y: f64) -> Option<(AxFrame, i32)> {
     None
 }
 
