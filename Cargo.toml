@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["app/src-tauri", "crates/*"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0-alpha.1"
+
+[workspace.dependencies]
+hawksnap-core = { path = "crates/hawksnap-core" }
+image = "0.25"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }

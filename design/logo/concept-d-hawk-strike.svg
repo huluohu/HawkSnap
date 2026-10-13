@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="HawkSnap 概念D：鹰击截图框">
+  <defs>
+    <linearGradient id="d-bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22405F"/>
+      <stop offset="1" stop-color="#0C1624"/>
+    </linearGradient>
+    <linearGradient id="d-swoosh" x1="96" y1="96" x2="360" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD54F"/>
+      <stop offset="1" stop-color="#FF8A00"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#d-bg)"/>
+  <rect x="84" y="84" width="344" height="344" rx="30" stroke="#FFFFFF" stroke-width="7" opacity="0.55" fill="none"/>
+  <g stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.4">
+    <line x1="142" y1="190" x2="188" y2="212"/>
+    <line x1="204" y1="238" x2="242" y2="257"/>
+    <line x1="254" y1="278" x2="282" y2="292"/>
+  </g>
+  <path d="M 96 96 C 216 118 312 204 350 318 C 306 236 214 162 130 150 Z" fill="url(#d-swoosh)"/>
+  <circle cx="354" cy="318" r="26" fill="#FF8A00"/>
+  <path d="M 354 318 C 382 322 398 342 396 370 C 392 355 379 347 362 345 Z" fill="#0D1522"/>
+  <circle cx="359" cy="309" r="6.5" fill="#0D1522"/>
+  <g stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" opacity="0.95">
+    <line x1="400" y1="362" x2="420" y2="362"/>
+    <line x1="410" y1="352" x2="410" y2="372"/>
+  </g>
+</svg>

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="HawkSnap 概念A：鹰眼取景框">
+  <defs>
+    <linearGradient id="a-bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22405F"/>
+      <stop offset="1" stop-color="#0C1624"/>
+    </linearGradient>
+    <radialGradient id="a-glow" cx="0.5" cy="0.53" r="0.34">
+      <stop offset="0" stop-color="#FFB020" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#FFB020" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="a-iris" cx="0.42" cy="0.38" r="0.8">
+      <stop offset="0" stop-color="#FFE08A"/>
+      <stop offset="0.55" stop-color="#FFB020"/>
+      <stop offset="1" stop-color="#EF7A00"/>
+    </radialGradient>
+    <clipPath id="a-eyeclip">
+      <path d="M 138 272 C 172 216 340 216 374 272 C 340 328 172 328 138 272 Z"/>
+    </clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#a-bg)"/>
+  <rect width="512" height="512" rx="112" fill="url(#a-glow)"/>
+  <g stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" fill="none" opacity="0.96">
+    <path d="M 100 176 L 100 132 Q 100 100 132 100 L 176 100"/>
+    <path d="M 336 100 L 380 100 Q 412 100 412 132 L 412 176"/>
+    <path d="M 412 336 L 412 380 Q 412 412 380 412 L 336 412"/>
+    <path d="M 176 412 L 132 412 Q 100 412 100 380 L 100 336"/>
+  </g>
+  <path d="M 122 202 Q 256 136 390 202" stroke="#FFC24D" stroke-width="20" stroke-linecap="round" fill="none"/>
+  <path d="M 138 272 C 172 216 340 216 374 272 C 340 328 172 328 138 272 Z" fill="url(#a-iris)"/>
+  <g clip-path="url(#a-eyeclip)" stroke="#C96A00" stroke-width="5" stroke-linecap="round" opacity="0.45">
+    <line x1="256" y1="228" x2="256" y2="204"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(30 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(60 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(90 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(120 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(150 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(180 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(210 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(240 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(270 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(300 256 272)"/>
+    <line x1="256" y1="228" x2="256" y2="204" transform="rotate(330 256 272)"/>
+  </g>
+  <circle cx="256" cy="272" r="38" fill="#0D1522"/>
+  <circle cx="240" cy="256" r="12" fill="#FFFFFF" opacity="0.92"/>
+  <circle cx="272" cy="288" r="5" fill="#FFFFFF" opacity="0.45"/>
+</svg>

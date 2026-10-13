@@ -1,0 +1,9 @@
+[package]
+name = "hawksnap-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+image.workspace = true
+thiserror.workspace = true
+serde.workspace = true

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+.DS_Store
+*.png.tmp
+.superpowers/
+.video_agent/
+app/src-tauri/gen/schemas/
