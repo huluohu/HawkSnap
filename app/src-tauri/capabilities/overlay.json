@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "Capability for capture overlay windows (overlay-{displayId}); covers event listen/emit used by the overlay page",
+  "windows": ["overlay-*"],
+  "permissions": [
+    "core:default"
+  ]
+}

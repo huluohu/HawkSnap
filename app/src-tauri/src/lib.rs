@@ -8,7 +8,8 @@ pub fn run() {
         // 2.4.x 起插件不再提供自由函数 init()，改用 Builder::new().build()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            commands::capture_screens, commands::finish_capture
+            commands::capture_screens, commands::finish_capture,
+            overlay::cancel_capture, overlay::emit_capture_done
         ])
         .setup(|app| {
             overlay::register_hotkeys(app.handle())?;

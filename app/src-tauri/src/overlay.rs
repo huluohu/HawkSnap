@@ -48,12 +48,17 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(5));
             waited += 5;
         }
-        let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("overlay".into()))
+        // query 让前端 main.tsx 按 ?window=overlay 路由到覆盖层页面（dev 走 SPA fallback，
+        // 生产 tauri 对 dist 亦以 index.html 兜底）
+        let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("overlay?window=overlay".into()))
             .position(d.x as f64, d.y as f64)
             .inner_size(d.width as f64, d.height as f64)
             .decorations(false).transparent(true).always_on_top(true)
             .skip_taskbar(true).resizable(false)
             .build().map_err(|e| e.to_string())?;
+        // 注入窗口 label：页面加载前 wry 会把 eval 暂存到 pending_scripts，导航完成后执行，
+        // 故此处注入不惧与首帧加载竞态；display_id 为 u64，无需转义。
+        let _ = win.eval(&format!("window.__LABEL__='overlay-{}';", d.display_id));
         let _ = win.set_focus();
     }
     // overlay-ready 在窗口 overlay 路由的前端挂载前可能先到（首次 emit 会丢）。
@@ -71,6 +76,31 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
 }
 
 use crate::commands;
+
+// —— Task 9 薄命令 ——
+
+/// 覆盖层取消：直接关闭对应窗口（capture-error 事件链未覆盖此路径，无需 emit）。
+#[tauri::command]
+pub async fn cancel_capture(app: AppHandle, display_id: u64) -> Result<(), String> {
+    close_overlay(&app, display_id)
+}
+
+/// 覆盖层确认完成：广播 capture-done（payload = outcome，契约不变）后按 displayId
+/// 直接关闭发起窗口。CaptureOutcome 不携带 displayId，无法走“setup 监听再关窗”链，
+/// 故由本命令自带目标（Task 9 裁定 2，跳过 setup 监听）。
+#[tauri::command]
+pub async fn emit_capture_done(app: AppHandle, display_id: u64, outcome: commands::CaptureOutcome) -> Result<(), String> {
+    app.emit("hawk://capture-done", &outcome).map_err(|e| e.to_string())?;
+    close_overlay(&app, display_id)
+}
+
+fn close_overlay(app: &AppHandle, display_id: u64) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(&format!("overlay-{display_id}")) {
+        // 命令在异步运行时线程执行（非主线程），close() 安全（见 register_hotkeys 注释）
+        w.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
