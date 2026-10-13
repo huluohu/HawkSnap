@@ -2,6 +2,7 @@
 extern crate self as hawksnap_platform_mac;
 
 use hawksnap_core::capture::{CaptureError, ScreenFrame, ScreenGrabber};
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 
 pub struct XcapGrabber;
 
@@ -28,8 +29,14 @@ impl ScreenGrabber for XcapGrabber {
                 } else { CaptureError::Backend(e.to_string()) }
             })?;
             let mut png = Vec::new();
+            // 快速压缩（Fast + NoFilter）：整帧 Retina PNG 编码从数百 ms 降到 ~10ms 级，
+            // 满足热键→覆盖层 ≤150ms 预算；产物仍是合法 PNG。
             image::DynamicImage::ImageRgba8(img)
-                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .write_with_encoder(PngEncoder::new_with_quality(
+                    &mut std::io::Cursor::new(&mut png),
+                    CompressionType::Fast,
+                    FilterType::NoFilter,
+                ))
                 .map_err(|e| CaptureError::Backend(e.to_string()))?;
             out.push(ScreenFrame {
                 display_id: m.id().map_err(backend)? as u64,
