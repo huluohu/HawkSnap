@@ -1,4 +1,5 @@
 mod commands;
+mod overlay;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -9,6 +10,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture
         ])
+        .setup(|app| {
+            overlay::register_hotkeys(app.handle())?;
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
