@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export type SelRect = { x: number; y: number; w: number; h: number };
 export type Phase = "idle" | "dragging" | "selected";
+// 确认动作：Enter/双击缺省复制；保存是浮条上的显式按钮（Plan B Task 3 语义裁定）。
+export type ConfirmAction = "copy" | "save";
 
 type Point = { clientX: number; clientY: number };
 
 export function useSelection(opts: {
   width: number; height: number;
-  onConfirm?: (r: SelRect) => void; onCancel?: () => void;
+  onConfirm?: (r: SelRect, action: ConfirmAction) => void; onCancel?: () => void;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [rect, setRect] = useState<SelRect | null>(null);
@@ -40,11 +42,13 @@ export function useSelection(opts: {
     },
   };
 
-  const confirm = useCallback(() => {
+  // action 缺省 "copy"：Enter（keydown 监听）与 dblclick（canvas onDoubleClick）都不带
+  // 动作参数，走复制；"save" 仅由浮条按钮显式传入。
+  const confirm = useCallback((action: ConfirmAction = "copy") => {
     if (confirmingRef.current) return;
     if (phase !== "selected" || !rect || rect.w < 2 || rect.h < 2) return;
     confirmingRef.current = true;
-    opts.onConfirm?.(rect);
+    opts.onConfirm?.(rect, action);
   }, [phase, rect, opts]);
 
   const cancel = useCallback(() => {

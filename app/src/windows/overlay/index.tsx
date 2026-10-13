@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
-import { useSelection, type SelRect } from "./useSelection";
+import { useSelection, type SelRect, type ConfirmAction } from "./useSelection";
+import { barPosition } from "./actionBar";
 
 type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string };
 
@@ -56,12 +57,12 @@ export default function OverlayWindow() {
   // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
   const { phase, rect, pointerHandlers, confirm, reset } = useSelection({
     width: display?.width ?? 0, height: display?.height ?? 0,
-    onConfirm: async (r: SelRect) => {
+    onConfirm: async (r: SelRect, action: ConfirmAction) => {
       if (!display) return;
       const myFlow = flowRef.current;
       try {
         const outcome = await invoke<{ copied: boolean; savedTo: string | null }>("finish_capture", {
-          req: { displayId: display.displayId, rect: r, copy: true, save: true },
+          req: { displayId: display.displayId, rect: r, copy: action === "copy", save: action === "save" },
         });
         // 代际守卫：finish_capture 在途期间新一轮 payload 已到（flowRef 已自增）→ 本链
         // 已被作废，绝不 emit_capture_done（否则 hide 掉新一轮刚显示的窗口）。
@@ -191,9 +192,35 @@ export default function OverlayWindow() {
 
   if (!display) return null;
   return (
-    <canvas ref={canvasRef}
-      style={{ position: "fixed", inset: 0, cursor: "crosshair" }}
-      {...pointerHandlers}
-      onDoubleClick={() => confirm()} />
+    <>
+      <canvas ref={canvasRef}
+        style={{ position: "fixed", inset: 0, cursor: "crosshair" }}
+        {...pointerHandlers}
+        onDoubleClick={() => confirm()} />
+      {/* 选区确认浮条：canvas 的兄弟节点（fixed 定位）。pointer/dblclick 处理器都只挂在
+          canvas 元素上，浮条内的 mousedown/双击按构造不进入选区状态机——既不清选区也不
+          触发拖拽/双击确认。Enter 缺省 confirm() = "copy"（语义裁定：保存须显式点按钮）。 */}
+      {phase === "selected" && rect && (
+        <div style={{ position: "fixed", display: "flex", gap: 8, alignItems: "center",
+          ...barPosition(rect, display.width, display.height),
+          background: "#0D1522", border: "1px solid #22405F", borderRadius: 8,
+          padding: "6px 10px", zIndex: 10 }}>
+          <button type="button" onClick={() => confirm("copy")}
+            style={{ padding: "4px 12px", background: "#22405F", color: "#FFFFFF",
+              border: "1px solid #22405F", borderRadius: 6,
+              fontSize: 13, cursor: "pointer" }}>复制</button>
+          <button type="button" onClick={() => confirm("save")}
+            style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
+              border: "1px solid #22405F", borderRadius: 6,
+              fontSize: 13, cursor: "pointer" }}>保存</button>
+          {["贴图", "标注", "OCR", "GIF"].map((t) => (
+            <button key={t} type="button" disabled title="即将推出"
+              style={{ padding: "4px 8px", background: "transparent", color: "#D8E2EE",
+                border: "1px solid #22405F", borderRadius: 6, opacity: 0.4,
+                fontSize: 13, cursor: "not-allowed" }}>{t}</button>
+          ))}
+        </div>
+      )}
+    </>
   );
 }

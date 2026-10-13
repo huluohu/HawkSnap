@@ -41,8 +41,8 @@ describe("useSelection", () => {
     act(() => result.current.pointerHandlers.onPointerDown({ clientX: 500, clientY: 500 } as PointerEvent));
     act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
     expect(result.current.rect).toEqual({ x: 100, y: 100, w: 100, h: 100 });
-    act(() => result.current.confirm()); // dblclick 到来时的 confirm 路径
-    expect(onConfirm).toHaveBeenCalledWith({ x: 100, y: 100, w: 100, h: 100 });
+    act(() => result.current.confirm()); // dblclick 到来时的 confirm 路径（缺省动作 = 复制）
+    expect(onConfirm).toHaveBeenCalledWith({ x: 100, y: 100, w: 100, h: 100 }, "copy");
   });
 
   it("reset returns to idle and clears in-flight guard", () => {
@@ -92,5 +92,15 @@ describe("useSelection", () => {
       result.current.confirm(); // 在途（链未结束）的第二次确认
     });
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirm forwards the requested action", () => {
+    const onConfirm = vi.fn();
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600, onConfirm }));
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 10, clientY: 10 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: 60, clientY: 40 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
+    act(() => result.current.confirm("save"));
+    expect(onConfirm).toHaveBeenCalledWith({ x: 10, y: 10, w: 50, h: 30 }, "save");
   });
 });
