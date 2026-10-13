@@ -57,7 +57,7 @@ mod tests {
         let frames = g.grab_all().unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!((frames[0].width, frames[0].height), (100, 50)); // 逻辑尺寸
-        assert_eq!(frames[0].png.len() > 8, true); // 是 PNG 字节
+        assert!(frames[0].png.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])); // 是 PNG 字节
     }
 
     #[test]
