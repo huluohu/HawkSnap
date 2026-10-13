@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "countdown",
+  "description": "Capability for the delayed-capture countdown window (label `countdown`); covers event listen (hawk://countdown) and command invoke (countdown_remaining / cancel_delayed_capture) used by the countdown page",
+  "windows": ["countdown"],
+  "permissions": [
+    "core:default"
+  ]
+}

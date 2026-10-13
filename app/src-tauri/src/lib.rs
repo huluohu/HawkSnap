@@ -12,7 +12,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture,
             overlay::cancel_capture, overlay::emit_capture_done,
-            overlay::hotkey_error, overlay::snap_candidates
+            overlay::hotkey_error, overlay::snap_candidates,
+            overlay::start_delayed_capture, overlay::cancel_delayed_capture,
+            overlay::countdown_remaining
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
@@ -59,15 +61,28 @@ pub fn run() {
                 eprintln!("[hawksnap] 悬停探测注册失败: {err}");
             }
 
-            // 托盘常驻：截图入口 + 退出。
+            // 托盘常驻：截图入口 + 延时截图子菜单（Plan B Task 8）+ 退出。
             {
                 use tauri::{
-                    menu::{Menu, MenuItem},
+                    menu::{Menu, MenuItem, Submenu},
                     tray::TrayIconBuilder,
                 };
                 let shot = MenuItem::with_id(app, "shot", "截图 (F1)", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "退出 HawkSnap", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&shot, &quit])?;
+                // spec §3.1：延时截图 1/2/3/5 秒可选 + 「取消倒计时」恒可用（非活动期
+                // 调用返回 Err，调用方 eprintln 吞掉——不做动态 enable/disable，省去
+                // 菜单项状态的跨线程同步）。
+                let delay_1 = MenuItem::with_id(app, "delay-1", "1 秒", true, None::<&str>)?;
+                let delay_2 = MenuItem::with_id(app, "delay-2", "2 秒", true, None::<&str>)?;
+                let delay_3 = MenuItem::with_id(app, "delay-3", "3 秒", true, None::<&str>)?;
+                let delay_5 = MenuItem::with_id(app, "delay-5", "5 秒", true, None::<&str>)?;
+                let delay_cancel =
+                    MenuItem::with_id(app, "delay-cancel", "取消倒计时", true, None::<&str>)?;
+                let delay_menu = Submenu::with_id_and_items(
+                    app, "delay-submenu", "延时截图", true,
+                    &[&delay_1, &delay_2, &delay_3, &delay_5, &delay_cancel],
+                )?;
+                let menu = Menu::with_items(app, &[&shot, &delay_menu, &quit])?;
                 TrayIconBuilder::with_id("main")
                     .icon(
                         app.default_window_icon()
@@ -86,6 +101,25 @@ pub fn run() {
                                     let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
                                 }
                             });
+                        }
+                        // 延时入口：线程派发同 shot（start_delayed_capture 建窗禁主线程）；
+                        // 失败（门闩占用/建窗失败）与 shot 同口径走 capture-error。
+                        id @ ("delay-1" | "delay-2" | "delay-3" | "delay-5") => {
+                            let secs = id.trim_start_matches("delay-").parse::<u64>().unwrap_or(0);
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = overlay::start_delayed_capture(app.clone(), secs) {
+                                    let _ =
+                                        tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                                }
+                            });
+                        }
+                        "delay-cancel" => {
+                            // 纯原子置位，主线程直调安全（不建窗/关窗）；非活动期为良性
+                            // 竞态（裁定 5），eprintln 吞掉。
+                            if let Err(e) = overlay::cancel_delayed_capture() {
+                                eprintln!("[hawksnap] 取消倒计时: {e}");
+                            }
                         }
                         "quit" => app.exit(0),
                         _ => {}
