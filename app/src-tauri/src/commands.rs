@@ -160,6 +160,14 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
         let path = save_path_for(&dir, &frontmost_app_name().unwrap_or_else(|| "HawkSnap".into()), ext);
         std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
         saved_to = Some(path.to_string_lossy().into_owned());
+        // C4 保存即入库：缩略图落盘 + history::record。历史是旁路（裁定）：整条链任一步
+        // 失败只 eprintln，绝不影响保存本身的成败——闭包包住全部步骤统一降级。
+        // 剪贴板-only 捕获（copy=true, save=false）无落盘文件，不入库（完整版再议
+        // 临时文件方案）；w/h 记物理像素（physical），app 暂记 "HawkSnap"——frontmost
+        // 检测尚未接入（见 frontmost_app_name 注），接入后同步替换此处。
+        if let Err(e) = record_history(&app, &path, &dir, &cropped, &physical) {
+            eprintln!("[hawksnap] 历史记录失败: {e}");
+        }
     }
     Ok(CaptureOutcome { copied, saved_to })
 }
@@ -225,11 +233,48 @@ pub fn release_captures() {
     }
 }
 
+/// C4：保存成功后的历史入库链（缩略图生成 → thumbs/<stem>.png 落盘 → history::record）。
+/// 独立成函数便于整体 `?` 短路：任一步失败即 Err，由调用方 eprintln 降级（历史是旁路，
+/// 不回滚、不重试、不影响 CaptureOutcome）。
+fn record_history(
+    app: &AppHandle,
+    path: &std::path::Path,
+    dir: &std::path::Path,
+    cropped: &[u8],
+    physical: &Rect,
+) -> Result<(), String> {
+    let (thumb_rgba, tw, th) =
+        hawksnap_core::crop::rgba_thumbnail(cropped, physical.w, physical.h, 320)
+            .map_err(|e| e.to_string())?;
+    let thumbs_dir = dir.join("thumbs");
+    std::fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "shot".into());
+    let thumb_path = thumbs_dir.join(format!("{stem}.png"));
+    let thumb_png = rgba_to_png(&thumb_rgba, tw, th).map_err(|e| e.to_string())?;
+    std::fs::write(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
+    crate::history::record(
+        app,
+        &path.to_string_lossy(),
+        &thumb_path.to_string_lossy(),
+        physical.w as i64,
+        physical.h as i64,
+        "HawkSnap",
+    )?;
+    Ok(())
+}
+
 fn dirs_picture_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures/HawkSnap"))
 }
 
-fn frontmost_app_name() -> Option<String> { None /* Plan B 接 window 检测后替换 */ }
+/// 前台应用名：恒 None（占位）。原「Plan B 接 window 检测后替换」的说法已过时——
+/// window/AX 检测在 Plan B 落地时只做了悬停高亮与磁吸候选，未包含 frontmost 名称
+/// 查询；保存文件名与历史 app 字段（C4）暂用 "HawkSnap"。接入点：CGWindowListCopyWindowInfo
+/// 的 kCGWindowOwnerName（与 Task 4 磁吸候选同源），接入后此处替换、历史入库同步取真名。
+fn frontmost_app_name() -> Option<String> { None }
 
 #[cfg(test)]
 mod tests {
