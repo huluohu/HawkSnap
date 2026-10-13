@@ -19,6 +19,10 @@ export default function OverlayWindow() {
   // 覆盖层窗口常驻复用（Plan B Task 1）：页面生命周期跨越多轮捕获，此标志每轮 payload
   // 到达时复位，保证 hawk://overlay-shown 每轮捕获重发一次（bench 门闩按轮与 hotkey 配对）。
   const shownRef = useRef(false);
+  // 捕获轮次（代际守卫）：每轮 payload 到达即自增。confirm 链（finish_crop 数百 ms）在途时
+  // 用户新触发一轮会复用本窗口，旧链的迟到延续若不拦截，会用 emit_capture_done 把新一轮
+  // 刚 show 的窗口藏掉（用户看到窗口闪现即消失），其失败也会误报在新一轮上。
+  const flowRef = useRef(0);
 
   // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用。
   // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
@@ -26,14 +30,20 @@ export default function OverlayWindow() {
     width: display?.width ?? 0, height: display?.height ?? 0,
     onConfirm: async (r: SelRect) => {
       if (!display) return;
+      const myFlow = flowRef.current;
       try {
         const outcome = await invoke<{ copied: boolean; savedTo: string | null }>("finish_capture", {
           req: { displayId: display.displayId, rect: r, copy: true, save: true },
         });
+        // 代际守卫：finish_capture 在途期间新一轮 payload 已到（flowRef 已自增）→ 本链
+        // 已被作废，绝不 emit_capture_done（否则 hide 掉新一轮刚显示的窗口）。
+        if (flowRef.current !== myFlow) return;
         // 发 capture-done 并隐藏本窗口（Rust 侧按 displayId 隐藏，见 Task 9 裁定 2；
         // Plan B Task 1 起常驻复用：隐藏而非关闭，窗口由 start_capture_flow 复用）
         await invoke("emit_capture_done", { displayId: display.displayId, outcome });
       } catch (err) {
+        // 旧轮链的失败静默吞掉：横幅是全局事件，迟到的失败会误导新一轮的用户
+        if (flowRef.current !== myFlow) return;
         // spec §9：失败不允许静默。覆盖层窗口不是横幅宿主，经全局事件把错误送到
         // 主窗口的 capture-error 横幅（ACL core:default 含 event emit）。
         console.error("finish_capture failed", err);
@@ -58,6 +68,7 @@ export default function OverlayWindow() {
       if (mine) {
         setDisplay(mine);          // 新对象身份必触发重绘 effect
         reset();                   // 新一轮捕获：清选区与 in-flight 守卫
+        flowRef.current += 1;      // 代际自增：作废所有在途旧 confirm 链（见 flowRef 注）
         shownRef.current = false;  // 每轮捕获重发 overlay-shown（见上方 shownRef 注）
       }
     }).then((un) => {

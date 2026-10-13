@@ -58,6 +58,28 @@ describe("useSelection", () => {
     expect(() => result.current.confirm()).not.toThrow();
   });
 
+  it("reset clears the in-flight confirm guard so the next flow can confirm again", () => {
+    // 加强版（评审 Finding 2）：onConfirm 用永不 resolve 的 spy 模拟在途 finish 链——
+    // 若 delete 掉 reset() 里的 confirmingRef.current = false，第二次 confirm 会被
+    // 在途守卫拒绝（calledTimes 停在 1），本用例即失败，真正钉死「reset 清守卫」。
+    const onConfirm = vi.fn(() => new Promise(() => {}));
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600, onConfirm }));
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 10, clientY: 10 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: 60, clientY: 40 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
+    act(() => result.current.confirm());
+    expect(onConfirm).toHaveBeenCalledTimes(1); // 守卫已置位，链在途
+    act(() => result.current.reset());
+    expect(result.current.phase).toBe("idle");
+    expect(result.current.rect).toBeNull();
+    // 新一轮：完整拖选后 confirm 必须能再次触发（in-flight 守卫被清）
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 5, clientY: 5 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: 50, clientY: 40 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
+    act(() => result.current.confirm());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
   it("confirm is re-entrancy guarded while a confirm is in flight", () => {
     // 回归：phase 在异步 finish 链期间保持 selected，Enter 自动重复不得再次触发 onConfirm
     const onConfirm = vi.fn();
