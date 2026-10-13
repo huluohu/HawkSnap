@@ -3,6 +3,9 @@ name = "hawksnap-core"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 image.workspace = true
 thiserror.workspace = true

@@ -11,3 +11,6 @@ hawksnap-core = { path = "crates/hawksnap-core" }
 image = "0.25"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
