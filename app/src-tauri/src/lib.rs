@@ -3,6 +3,7 @@ mod history;
 mod idle_reaper;
 mod overlay;
 mod perf;
+mod pins;
 mod settings;
 mod single_instance;
 
@@ -19,7 +20,9 @@ pub fn run() {
             overlay::start_delayed_capture, overlay::cancel_delayed_capture,
             overlay::countdown_remaining,
             settings::get_settings, settings::set_settings,
-            history::history_list, history::history_delete
+            history::history_list, history::history_delete,
+            pins::pin_latest, pins::pin_set_opacity, pins::pin_zoom,
+            pins::pin_close, pins::pin_close_all
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
@@ -80,6 +83,10 @@ pub fn run() {
                 };
                 let shot = MenuItem::with_id(app, "shot", "截图 (F1)", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "退出 HawkSnap", true, None::<&str>)?;
+                // C5 贴图：关闭全部贴图恒可用（无贴图时调用为空操作，不做动态
+                // enable/disable——省去菜单项状态的跨线程同步，与延时子菜单同口径）。
+                let pin_close_all =
+                    MenuItem::with_id(app, "pin-close-all", "关闭全部贴图", true, None::<&str>)?;
                 // spec §3.1：延时截图 1/2/3/5 秒可选 + 「取消倒计时」恒可用（非活动期
                 // 调用返回 Err，调用方 eprintln 吞掉——不做动态 enable/disable，省去
                 // 菜单项状态的跨线程同步）。
@@ -93,7 +100,7 @@ pub fn run() {
                     app, "delay-submenu", "延时截图", true,
                     &[&delay_1, &delay_2, &delay_3, &delay_5, &delay_cancel],
                 )?;
-                let menu = Menu::with_items(app, &[&shot, &delay_menu, &quit])?;
+                let menu = Menu::with_items(app, &[&shot, &pin_close_all, &delay_menu, &quit])?;
                 TrayIconBuilder::with_id("main")
                     .icon(
                         app.default_window_icon()
@@ -131,6 +138,17 @@ pub fn run() {
                             if let Err(e) = overlay::cancel_delayed_capture() {
                                 eprintln!("[hawksnap] 取消倒计时: {e}");
                             }
+                        }
+                        // C5 贴图：关闭全部贴图。线程派发同 shot——on_menu_event 在主线程
+                        // 回调，而 pin_close_all 内部经 run_on_main_thread 触碰窗口对象，
+                        // 派发到独立线程保持回调体最小（与 shot 同一纪律）。
+                        "pin-close-all" => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = pins::pin_close_all(app.clone()) {
+                                    eprintln!("[hawksnap] 关闭全部贴图失败: {e}");
+                                }
+                            });
                         }
                         "quit" => app.exit(0),
                         _ => {}

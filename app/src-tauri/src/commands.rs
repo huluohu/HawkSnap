@@ -218,6 +218,30 @@ pub(crate) fn captured_display_frames() -> Vec<DisplayFrame> {
         .collect()
 }
 
+/// 贴图 pin 的图像来源第一级（C5）：CAPTURES 最近一轮的非空整帧。display_id 取最大者
+/// （多显示器无主次概念时稳定取一个）；release_captures 后 rgba 全为空 → None，调用方
+/// 落到剪贴板来源。锁内只做 Arc clone + 几何拷贝，不跨 IO。
+pub(crate) struct LatestCapture {
+    pub rgba: std::sync::Arc<Vec<u8>>,
+    pub w_px: u32,
+    pub h_px: u32,
+    pub scale: f64,
+}
+
+pub(crate) fn latest_capture_rgba() -> Option<LatestCapture> {
+    let captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
+    captures
+        .iter()
+        .filter(|(_, m)| !m.rgba.is_empty())
+        .max_by_key(|(id, _)| *id)
+        .map(|(_, m)| LatestCapture {
+            rgba: m.rgba.clone(),
+            w_px: m.width_px,
+            h_px: m.height_px,
+            scale: m.scale,
+        })
+}
+
 /// 流程结束释放整帧 RGBA（终审 wave，G2）：hide_all_overlays 在全部覆盖层隐藏后调用
 /// ——把每个条目的 rgba 换成空 Arc，释放 ~24-59MB/屏的整帧钉住内存（此前它常驻至
 /// 下一轮 capture_screens 覆盖，是空载残余内存的主力，抵消了 G2 缓解措施）。

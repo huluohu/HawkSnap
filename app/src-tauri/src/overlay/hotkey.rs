@@ -29,6 +29,8 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut};
     let gs = app.global_shortcut();
     let f1 = Shortcut::new(None, Code::F1);
+    // C7: settings.hotkey_pin —— 当前硬编码 "F2"（plan C5 裁定，C7 切到 settings）
+    let f2 = Shortcut::new(None, Code::F2);
     let app2 = app.clone();
     // on_shortcut 注册快捷键并挂处理器（勿再单独 register：同一组合二次注册会被 macOS
     // 以 eventHotKeyExistsErr 拒绝）。热键回调在主线程（Carbon 事件）触发，而窗口
@@ -44,6 +46,29 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
         let msg = format!("F1 注册失败（可能被占用）: {e}");
         // 除返回值外落入 pull 通道（HOTKEY_ERROR）：setup 期的 push emit 早于前端 listen 必丢
         *HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+        msg
+    })?;
+    // F2 贴图：注册失败语义与 F1 完全一致（on_shortcut 的 Err 向上传播由 setup 的
+    // hotkey-error 通道统一处理，同时落 pull 通道补 setup 期丢失；不单独做占用检查）。
+    // 回调线程派发同 F1：pin_latest 的窗口创建经 run_on_main_thread 交付主线程，
+    // 此处线程只为让热键回调立即返回。
+    let app2 = app.clone();
+    gs.on_shortcut(f2, move |_app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            let app = app2.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = crate::pins::pin_latest(app.clone()) {
+                    let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                }
+            });
+        }
+    })
+    .map_err(|e| {
+        let msg = format!("F2 注册失败（可能被占用）: {e}");
+        if HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            // F1 已有错误时保留 F1 的（首错优先，通道槽位只有一个）
+            *HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+        }
         msg
     })?;
     Ok(())

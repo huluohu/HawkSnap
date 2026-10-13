@@ -1763,6 +1763,11 @@ dependencies = [
  "core-graphics",
  "hawksnap-core",
  "image 0.25.10",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
  "xcap",
 ]
 

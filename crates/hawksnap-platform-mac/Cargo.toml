@@ -17,3 +17,20 @@ image.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"
+
+# C5 贴图：原生 NSWindow + NSImageView 窗口族（无 webview，G2 预算）。objc2 0.6 /
+# objc2-app-kit 0.3 / objc2-foundation 0.3 / objc2-core-graphics 0.3 均已在依赖树
+# （wry/tauri），features 只增不改版本。app-kit features：窗口族（NSWindow/NSView/
+# NSResponder/NSImageView/NSImage/NSCell[NSImageScaling]/NSGraphics[NSBackingStoreType]/
+# NSScreen[主屏坐标翻转]/NSEvent[滚轮+按键]/NSApplication）+ objc2-core-graphics
+# （NSImage 的 initWithCGImage 入口）；core-graphics 直连依赖补 CGDataProvider
+# （app-kit 的传递 features 不含它，而 CGImage::new 需要 CGDataProvider）。
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = { version = "0.3", features = ["CGColor", "CGColorSpace", "CGDataProvider", "CGImage"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSCell", "NSColor", "NSEvent", "NSGraphics", "NSImage",
+    "NSImageView", "NSResponder", "NSRunningApplication", "NSScreen",
+    "NSView", "NSWindow", "objc2-core-graphics",
+] }
