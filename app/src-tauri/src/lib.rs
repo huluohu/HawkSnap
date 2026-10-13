@@ -1,4 +1,5 @@
 mod commands;
+mod idle_reaper;
 mod overlay;
 mod perf;
 mod single_instance;
@@ -126,6 +127,13 @@ pub fn run() {
                     })
                     .build(app)?;
             }
+
+            // Plan B Task 9 应急（G2）：空闲覆盖层 webview 看护线程。Plan B Task 1 的
+            // 常驻复用让每个空闲 overlay-*/countdown webview 常驻 ~30MB，fresh-idle
+            // 实测 100.7MB 吃穿 G2 预算（spec §5 ≤80MB）——隐藏满 5 分钟未复用即
+            // close()，下次截图经 start_capture_flow 首建分支重建（一轮 webview 冷
+            // 加载离群值，不计入基准 P90 口径）。看护自身吞错，绝不影响截图主链路。
+            idle_reaper::spawn_watchdog(app.handle().clone());
 
             // macOS 专属 API：引用点与 API 同门控，非 macOS 平台无激活策略概念。
             #[cfg(target_os = "macos")]
