@@ -4,12 +4,40 @@ import { emit } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
 import { useSelection, type SelRect } from "./useSelection";
 
-type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; pngUrl: string };
+type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string };
 
 // window.__LABEL__ 由 Rust 侧建窗后 eval 注入（overlay.rs），用于认领自己的 DisplayPayload
 declare global {
   interface Window {
     __LABEL__?: string;
+  }
+}
+
+// 冻结帧（原始物理 RGBA）加载：fetch 为主通道；若 WKWebView 对 asset 协议 URL 的 fetch
+// 出现异常，降级 XHR responseType=arraybuffer（两者能力的最低公因数）。字节长度校验
+// 由调用方按 w*h*4 断言，两通道共用同一防线。
+async function fetchRaw(url: string): Promise<ArrayBuffer> {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.arrayBuffer();
+  } catch (err) {
+    console.warn("fetch raw frame failed, falling back to XHR", err);
+    return await new Promise<ArrayBuffer>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", url);
+      xhr.responseType = "arraybuffer";
+      xhr.onload = () => {
+        // 自定义 scheme 下 status 可能为 0；字节长度校验兜底，故 0 且有响应也算成功
+        if ((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0) {
+          resolve(xhr.response as ArrayBuffer);
+        } else {
+          reject(new Error(`XHR HTTP ${xhr.status}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("XHR network error"));
+      xhr.send();
+    });
   }
 }
 
@@ -81,23 +109,60 @@ export default function OverlayWindow() {
     };
   }, [reset]);
 
-  // 冻结帧 + 遮罩 + 选区：rect/display 变化时重绘。常驻复用下每轮 payload 的 pngUrl
+  // 冻结帧 + 遮罩 + 选区：rect/display 变化时重绘。常驻复用下每轮 payload 的 frameUrl
   // 携带后端版本化文件名（capture_screens 按时间戳命名，Plan B Task 1 cache-bust），
-  // URL 变化即绕开 Webview 缓存，无需前端追加 query。
+  // URL 变化即绕开 Webview 缓存，无需前端追加 query。Task 2b：帧为原始物理 RGBA 文件，
+  // fetch 字节后 putImageData 直写，不再经 <img> 的 PNG 解码。
+  // 原始字节按 frameUrl 缓存（记 Promise：首帧在途时选区已开始变化的重入共享同一次加载，
+  // 拖拽重绘零重复请求）。
+  const frameRef = useRef<{ url: string; load: Promise<ArrayBuffer> } | null>(null);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !display) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    canvas.width = display.width;
-    canvas.height = display.height;
-    const img = new Image();
-    img.onload = () => {
-      ctx.drawImage(img, 0, 0, display.width, display.height);
+    // 物理尺寸 = 逻辑 × scale（与 capture_screens/CaptureMeta 同一公式）
+    const pw = Math.round(display.width * display.scale);
+    const ph = Math.round(display.height * display.scale);
+    let disposed = false;
+
+    let load: Promise<ArrayBuffer>;
+    if (frameRef.current && frameRef.current.url === display.frameUrl) {
+      load = frameRef.current.load;
+    } else {
+      load = fetchRaw(convertFileSrc(display.frameUrl.replace("hawk-grab://", "")));
+      frameRef.current = { url: display.frameUrl, load };
+      // 加载失败清缓存项，下一轮 effect 可重试
+      load.catch(() => {
+        if (frameRef.current?.url === display.frameUrl) frameRef.current = null;
+      });
+    }
+
+    const draw = (buf: ArrayBuffer) => {
+      if (buf.byteLength !== pw * ph * 4) {
+        console.error(`冻结帧字节数不符：got ${buf.byteLength}, expect ${pw * ph * 4}`);
+        return;
+      }
+      const frame = new ImageData(new Uint8ClampedArray(buf), pw, ph);
+      // 背衬 = 物理像素，CSS 尺寸 = 逻辑像素：Retina 下逐像素清晰（顺带修复旧实现
+      // 逻辑画布被浏览器插值放大的发软问题）。重设 width/height 同时重置 ctx 状态。
+      canvas.width = pw;
+      canvas.height = ph;
+      canvas.style.width = `${display.width}px`;
+      canvas.style.height = `${display.height}px`;
+      // putImageData 不受 transform 影响（恰好物理 1:1 直写）；遮罩/选区/标注仍用逻辑
+      // 坐标，经 transform 映射到物理背衬。用 setTransform（而非 ctx.scale）保证 effect
+      // 因 rect 变化重跑时 transform 绝对重设，绝不叠加。
+      ctx.setTransform(display.scale, 0, 0, display.scale, 0, 0);
+      ctx.putImageData(frame, 0, 0);
       ctx.fillStyle = "rgba(0,0,0,0.35)";
       ctx.fillRect(0, 0, display.width, display.height);
       if (rect && rect.w >= 2 && rect.h >= 2) {
-        ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, rect.x, rect.y, rect.w, rect.h);
+        // 选区内恢复未加暗的原始像素（旧实现 drawImage 的等价物）：putImageData 的
+        // dirty-rect 形式同为设备像素，坐标须按 scale 换算
+        ctx.putImageData(frame, 0, 0,
+          Math.round(rect.x * display.scale), Math.round(rect.y * display.scale),
+          Math.round(rect.w * display.scale), Math.round(rect.h * display.scale));
         ctx.strokeStyle = "#FFB020";
         ctx.lineWidth = 2;
         ctx.strokeRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
@@ -116,7 +181,12 @@ export default function OverlayWindow() {
         void emit("hawk://overlay-shown");
       }
     };
-    img.src = convertFileSrc(display.pngUrl.replace("hawk-grab://", ""));
+    load.then((buf) => {
+      if (!disposed) draw(buf);
+    }).catch((err) => {
+      if (!disposed) console.error("冻结帧加载失败", err);
+    });
+    return () => { disposed = true; };
   }, [rect, display, phase]);
 
   if (!display) return null;

@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager};
 #[serde(rename_all = "camelCase")]
 pub struct DisplayPayload {
     pub display_id: u64, pub x: i32, pub y: i32,
-    pub width: u32, pub height: u32, pub scale: f64, pub png_url: String,
+    pub width: u32, pub height: u32, pub scale: f64, pub frame_url: String,
 }
 
 #[derive(Deserialize)]
@@ -53,29 +53,46 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
         // （asset 协议对 query 参数不可靠，版本化文件名是确定性方案；仍在 $CACHE/** scope 内）。
         // 写入前删除上一轮同 display 的冻结帧，缓存目录不随轮数增长。
         if let Some(prev) = captures.get(&f.display_id) {
-            let _ = std::fs::remove_file(&prev.png_path);
+            let _ = std::fs::remove_file(&prev.frame_path);
         }
+        // Task 2b 一次性兼容：清掉 Task 2a 及之前版本化方案写入的遗留 {id}-*.png，
+        // 前端已不再经 asset 协议加载 PNG，留着只会占缓存目录。
+        let legacy_prefix = format!("{}-", f.display_id);
+        if let Ok(entries) = std::fs::read_dir(&cache) {
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(&legacy_prefix) && name.ends_with(".png") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        // Task 2b（前端原始帧直通）：冻结帧不再编码 PNG，直接落盘整帧物理 RGBA，
+        // 前端 fetch 后经 putImageData 画出——省掉整帧 PNG 编码 + asset 协议侧 PNG 解码，
+        // h2o（created→shown）从 ~108ms 量级再砍一截。grabber 层的 ScreenFrame.png 编码
+        // 仍保留（core 契约 + 集成测试依赖），流程已不消费——是否从抓取路径移除属后续
+        // core 契约决策，此处仅注记。
         let file = cache.join(format!(
-            "{}-{}.png",
+            "{}-{}.raw",
             f.display_id,
             chrono::Local::now().timestamp_millis()
         ));
-        std::fs::write(&file, &f.png).map_err(|e| e.to_string())?;
+        std::fs::write(&file, &f.rgba).map_err(|e| e.to_string())?;
         // raw-RGBA 捕获缓存（Plan B Task 2）：物理尺寸按 (width*scale).round() 计算，
-        // finish_capture 直通行复制裁剪与剪贴板，全程不再读 PNG 文件。PNG 仅供前端
-        // asset 协议显示冻结帧；png_path 仅供下一轮删除上一轮冻结帧。
+        // finish_capture 直通行复制裁剪与剪贴板，全程不再读冻结帧文件。frame_path 仅供
+        // 下一轮删除上一轮冻结帧。
         let (pw, ph) = (
             (f.width as f64 * f.scale).round() as u32,
             (f.height as f64 * f.scale).round() as u32,
         );
         captures.insert(f.display_id, CaptureMeta {
             scale: f.scale, width_px: pw, height_px: ph,
-            rgba: std::sync::Arc::new(f.rgba.clone()), png_path: file.clone(),
+            rgba: std::sync::Arc::new(f.rgba.clone()), frame_path: file.clone(),
         });
         out.push(DisplayPayload {
             display_id: f.display_id, x: f.x, y: f.y,
             width: f.width, height: f.height, scale: f.scale,
-            png_url: format!("hawk-grab://{}", file.display()),
+            frame_url: format!("hawk-grab://{}", file.display()),
         });
     }
     Ok(out)
@@ -127,8 +144,9 @@ pub async fn finish_capture(req: FinishReq) -> Result<CaptureOutcome, String> {
 use std::sync::{LazyLock, Mutex};
 use std::collections::HashMap;
 // raw-RGBA 捕获缓存（Plan B Task 2，取代 FRAME_META）：每 display 存冻结帧的 scale、
-// 物理尺寸与整帧 RGBA（Arc 共享，finish_capture 锁外裁剪）。png_path 仅供下一轮
-// capture_screens 删除上一轮冻结帧文件（Task 1 版本化文件名方案仍生效）。
+// 物理尺寸与整帧 RGBA（Arc 共享，finish_capture 锁外裁剪）。frame_path 仅供下一轮
+// capture_screens 删除上一轮冻结帧文件（Task 2b 起为版本化 .raw 文件，Task 1 的
+// 版本化文件名 cache-bust 方案仍生效）。
 // HashMap::new 非 const fn，static 用 LazyLock 包装。
 static CAPTURES: LazyLock<Mutex<HashMap<u64, CaptureMeta>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Clone)]
@@ -137,7 +155,7 @@ struct CaptureMeta {
     width_px: u32,
     height_px: u32,
     rgba: std::sync::Arc<Vec<u8>>,
-    png_path: std::path::PathBuf, // 仅 capture_screens 删除上一轮冻结帧用
+    frame_path: std::path::PathBuf, // 仅 capture_screens 删除上一轮冻结帧用
 }
 
 fn dirs_picture_dir() -> Option<std::path::PathBuf> {
@@ -168,5 +186,17 @@ mod tests {
         let second = save_path_for(&dir, "Safari");
         assert_ne!(first, second, "重名时必须生成不同文件名");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn display_payload_serializes_frame_url() {
+        // Task 2b：冻结帧改发原始 RGBA，前端可见契约 pngUrl → frameUrl（唯一变更）
+        let p = DisplayPayload {
+            display_id: 7, x: 0, y: 0, width: 100, height: 50, scale: 2.0,
+            frame_url: "hawk-grab:///tmp/a.raw".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"frameUrl\":\"hawk-grab:///tmp/a.raw\""));
+        assert!(!s.contains("pngUrl"), "旧字段不得残留");
     }
 }

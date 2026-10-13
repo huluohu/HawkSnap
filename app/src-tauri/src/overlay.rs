@@ -13,7 +13,7 @@ static HOTKEY_ERROR: Mutex<Option<String>> = Mutex::new(None);
 #[serde(rename_all = "camelCase")]
 pub struct DisplayPayloadForTest {
     pub display_id: u64, pub x: i32, pub y: i32,
-    pub width: u32, pub height: u32, pub scale: f64, pub png_url: String,
+    pub width: u32, pub height: u32, pub scale: f64, pub frame_url: String,
 }
 
 pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
@@ -316,11 +316,13 @@ mod tests {
     #[test]
     fn payload_serializes_camel_case() {
         let p = DisplayPayloadForTest {
-            display_id: 7, x: 0, y: 0, width: 100, height: 50, scale: 2.0, png_url: "hawk-grab:///tmp/a.png".into(),
+            display_id: 7, x: 0, y: 0, width: 100, height: 50, scale: 2.0,
+            frame_url: "hawk-grab:///tmp/a.raw".into(),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"displayId\":7"));
-        assert!(s.contains("\"pngUrl\":\"hawk-grab:///tmp/a.png\""));
+        // Task 2b：冻结帧改为原始 RGBA 文件，payload 字段随之更名 pngUrl → frameUrl
+        assert!(s.contains("\"frameUrl\":\"hawk-grab:///tmp/a.raw\""));
     }
 }
 
