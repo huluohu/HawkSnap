@@ -1,6 +1,11 @@
 use serde::Serialize;
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+
+// 热键注册失败的 pull 通道：setup 阶段的 hawk://hotkey-error emit 早于前端 listen 注册，
+// 必丢；错误同时落入此静态，前端挂载时经 hotkey_error 命令拉取补显（读取即清除）。
+static HOTKEY_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 // 仅测试用：镜像 commands::DisplayPayload 的序列化契约（camelCase），供下方契约测试断言
 #[cfg_attr(not(test), allow(dead_code))]
@@ -30,8 +35,22 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
             });
         }
     })
-    .map_err(|e| format!("F1 注册失败（可能被占用）: {e}"))?;
+    .map_err(|e| {
+        let msg = format!("F1 注册失败（可能被占用）: {e}");
+        // 除返回值外落入 pull 通道（HOTKEY_ERROR）：setup 期的 push emit 早于前端 listen 必丢
+        *HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+        msg
+    })?;
     Ok(())
+}
+
+/// 拉取并清除最近一次热键注册错误（None = 无错误）；补上 setup 期早于前端 listen 的丢失。
+#[tauri::command]
+pub fn hotkey_error() -> Option<String> {
+    HOTKEY_ERROR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
 }
 
 // 必须在非主线程调用（register_hotkeys 已保证；Task 10 的托盘入口同样需要放到线程里）。

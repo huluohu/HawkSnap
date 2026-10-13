@@ -9,7 +9,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture,
-            overlay::cancel_capture, overlay::emit_capture_done
+            overlay::cancel_capture, overlay::emit_capture_done,
+            overlay::hotkey_error
         ])
         .setup(|app| {
             // 热键注册失败不中止启动（spec §9：允许无热键启动，但必须给用户可见反馈）。

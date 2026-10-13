@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 function App() {
@@ -7,7 +8,14 @@ function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    // Rust 侧热键注册失败时发出（spec §9：不允许静默失败）。非 Tauri 环境下降级为无提示。
+    // pull 通道：setup 期的 hawk://hotkey-error emit 早于 listen 注册必丢，挂载即向后端
+    // 拉取（后端读取即清除）。非 Tauri 环境下降级为无提示。
+    invoke<string | null>("hotkey_error")
+      .then((err) => {
+        if (!disposed && err) setHotkeyError(err);
+      })
+      .catch(() => {});
+    // push 通道：覆盖挂载后发生的注册失败（spec §9：不允许静默失败）。
     listen<string>("hawk://hotkey-error", (e) => setHotkeyError(e.payload))
       .then((un) => {
         if (disposed) un();
