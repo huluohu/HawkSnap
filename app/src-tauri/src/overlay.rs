@@ -134,10 +134,21 @@ mod hover {
         // 坐标，与 AxFrame/AXPosition 同一坐标系。勿用 NSEvent 的 mouseLocation /
         // locationInWindow（bottom-left 原点——brief 明言的坐标陷阱）。
         let Some((cx, cy)) = cursor_position() else { return };
-        // AX 查询 inline（裁定 2 的 DECISION）；任何失败 → None，None 同样 emit
-        // （前端以 null 清除高亮）。
-        let frame = hawksnap_platform_mac::ax::element_at_point(cx, cy);
-        let _ = app.emit("hawk://hover", frame.map(super::AxFrameJson::from));
+        // AX 查询 inline（裁定 2 的 DECISION）；任何失败 → 走窗口级回退。回退链
+        // （controller 裁定 1）：元素 → 在屏窗口点命中（visible_window_rects 的全局
+        // 逻辑 rect 里取包含光标且面积最小者，role 标 AXWindow 便于区分高亮来源）→
+        // 仍无则 None。None 同样 emit（前端以 null 清除高亮）。回退是增强而非关键路径：
+        // CGWindowList 拉取失败按空候选处理（与 snap_candidates 同款降级），绝不 panic
+        // 打断 hover 链。
+        let frame = hawksnap_platform_mac::ax::element_at_point(cx, cy)
+            .map(super::AxFrameJson::from)
+            .or_else(|| {
+                let rects = super::visible_window_rects().unwrap_or_default();
+                super::window_hit(&rects, cx, cy).map(|r| super::AxFrameJson {
+                    x: r.x, y: r.y, w: r.w, h: r.h, role: "AXWindow".into(),
+                })
+            });
+        let _ = app.emit("hawk://hover", frame);
     }
 
     /// 当前光标位置（全局逻辑坐标，top-left 原点）。
@@ -490,6 +501,18 @@ fn hide_overlay(app: &AppHandle, display_id: u64) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub struct RectLog { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
 
+/// Task 6 窗口级回退的点命中（纯逻辑，独立于 CGWindowList 可单测）：返回包含 (x, y)
+/// 且面积最小的窗口 rect——面积最小者胜出 controller 裁定，防止全屏级大窗（桌面/
+/// 壁纸残留）抢走普通应用窗口的命中；并列时取先出现者（稳定）。包含判定用半开区间
+/// [x, x+w)：右/下边缘上的点不属于该窗（标准 hit-test，相邻窗不双重命中）。
+fn window_hit(rects: &[RectLog], x: f64, y: f64) -> Option<RectLog> {
+    rects.iter().copied()
+        .filter(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+        .min_by(|a, b| {
+            (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
 /// 全部在屏 layer==0 窗口的逻辑坐标 rect（排除自身 pid 的覆盖层窗口）。display 过滤
 /// 在前端做（只有它知道自身 display 边界），display_id 参数预留。空结果 = Ok(vec![])，
 /// 绝不以 Err 打断截图流程（磁吸是增强，不是关键路径）。
@@ -616,6 +639,32 @@ mod tests {
         assert_eq!(some, r#"{"x":1.0,"y":2.0,"w":3.0,"h":4.0,"role":"AXButton"}"#);
         let none = serde_json::to_string(&None::<AxFrameJson>).unwrap();
         assert_eq!(none, "null");
+    }
+
+    #[test]
+    fn window_hit_prefers_smallest_containing_area() {
+        // Task 6 窗口级回退语义（controller 裁定 1）：包含光标点的候选中取面积最小者——
+        // 全屏级大窗（桌面/壁纸层残留）不得抢走普通应用窗口的命中。
+        let rects = vec![
+            RectLog { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 },    // 全屏窗
+            RectLog { x: 100.0, y: 100.0, w: 400.0, h: 300.0 }, // 普通窗（面积更小）
+        ];
+        // 点在两窗交集内 → 命中面积最小者（普通窗），而非首个/最大者
+        let hit = window_hit(&rects, 200.0, 200.0).unwrap();
+        assert_eq!((hit.x, hit.y, hit.w, hit.h), (100.0, 100.0, 400.0, 300.0));
+        // 点在所有窗之外 → None（handler 据此 emit null 清除高亮）
+        assert!(window_hit(&rects, 2000.0, 2000.0).is_none());
+        // 小窗右边缘上的点被小窗排除（半开区间 [x, x+w)，标准 hit-test），
+        // 但仍在全屏窗内 → 回退命中全屏窗
+        assert_eq!(window_hit(&rects, 500.0, 200.0).map(|r| (r.w, r.h)), Some((1512.0, 982.0)));
+        // 仅小窗时同一点 → None
+        let only_small = &[RectLog { x: 100.0, y: 100.0, w: 400.0, h: 300.0 }];
+        assert!(window_hit(only_small, 500.0, 200.0).is_none());
+        assert!(window_hit(only_small, 200.0, 400.0).is_none());
+        // 左/上边缘（含）属于该窗
+        assert!(window_hit(only_small, 100.0, 100.0).is_some());
+        // 空候选 → None
+        assert!(window_hit(&[], 1.0, 1.0).is_none());
     }
 }
 

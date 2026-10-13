@@ -57,6 +57,16 @@ export function useSelection(opts: {
     opts.onConfirm?.(rect, action);
   }, [phase, rect, opts]);
 
+  // Task 6 click-to-select 直选：跳过拖拽直接以给定 rect 进入 selected（动作浮条随之
+  // 出现）。不动 confirmingRef——在途守卫只由 confirm 链管理（controller 裁定 6）；
+  // 清 start.current 纯属卫生：selectRect 后 phase 已是 selected，拖拽 move 分支天然
+  // 短路，陈旧 start 无人再读（下一次 pointerdown 会整体覆盖）。
+  const selectRect = useCallback((r: SelRect) => {
+    start.current = null;
+    setRect(r);
+    setPhase("selected");
+  }, []);
+
   const cancel = useCallback(() => {
     confirmingRef.current = false;
     setPhase("idle"); setRect(null); start.current = null; opts.onCancel?.();
@@ -103,5 +113,5 @@ export function useSelection(opts: {
     return () => window.removeEventListener("keydown", onKey);
   }, [cancel, confirm, phase, opts]);
 
-  return { phase, rect, pointerHandlers, confirm, cancel, reset };
+  return { phase, rect, pointerHandlers, confirm, cancel, reset, selectRect };
 }

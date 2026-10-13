@@ -98,6 +98,13 @@ describe("useSelection", () => {
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
+  it("selectRect enters selected with the given rect", () => {
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600 }));
+    act(() => result.current.selectRect({ x: 5, y: 6, w: 100, h: 50 }));
+    expect(result.current.phase).toBe("selected");
+    expect(result.current.rect).toEqual({ x: 5, y: 6, w: 100, h: 50 });
+  });
+
   it("confirm forwards the requested action", () => {
     const onConfirm = vi.fn();
     const { result } = renderHook(() => useSelection({ width: 1000, height: 600, onConfirm }));

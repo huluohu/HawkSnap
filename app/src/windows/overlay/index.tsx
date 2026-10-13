@@ -4,6 +4,7 @@ import { emit } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
 import { useSelection, type SelRect, type ConfirmAction } from "./useSelection";
 import type { Rect } from "./geometry";
+import { toLocalHover, type HoverFrame } from "./hover";
 import { barPosition } from "./actionBar";
 
 type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string };
@@ -56,10 +57,14 @@ export default function OverlayWindow() {
   // Task 4 磁吸候选（display 本地坐标）：每轮 payload 到达时经 snap_candidates 拉取一次
   // （窗口在两轮之间会变化，必须逐轮刷新），首帧置空避免用到上一轮的陈旧候选。
   const candidatesRef = useRef<Rect[]>([]);
+  // Task 6 hover 高亮（display 本地坐标）：hawk://hover 帧经 toLocalHover 换算后的
+  // 当前悬停框。state 而非 ref——重绘 effect 依赖它触发；selected 态仍更新但不绘制
+  // （绘制按 phase 门控，见重绘 effect）。
+  const [hoverRect, setHoverRect] = useState<Rect | null>(null);
 
   // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用。
   // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
-  const { phase, rect, pointerHandlers, confirm, reset } = useSelection({
+  const { phase, rect, pointerHandlers, confirm, reset, selectRect } = useSelection({
     width: display?.width ?? 0, height: display?.height ?? 0,
     // bounds = 本 display 的逻辑边界（选区坐标是 display 本地系，故 x/y 恒为 0——
     // payload 的 display.x/y 是全局多屏坐标，直接用会破坏副屏上的夹取）
@@ -105,6 +110,7 @@ export default function OverlayWindow() {
       if (mine) {
         setDisplay(mine);          // 新对象身份必触发重绘 effect
         reset();                   // 新一轮捕获：清选区与 in-flight 守卫
+        setHoverRect(null);        // 新一轮：清上一轮的悬停框（否则 idle 态会画陈旧高亮）
         flowRef.current += 1;      // 代际自增：作废所有在途旧 confirm 链（见 flowRef 注）
         shownRef.current = false;  // 每轮捕获重发 overlay-shown（见上方 shownRef 注）
         // Task 4：每轮流程拉取一次窗口候选（snap_candidates 返回全局逻辑坐标）。
@@ -139,6 +145,69 @@ export default function OverlayWindow() {
       unlisten?.();
     };
   }, [reset]);
+
+  // Task 6：hawk://hover 监听（与 overlay-ready 同款 disposed-flag 挂/卸模式）。
+  // payload = AxFrameJson | null（全局逻辑坐标；null = 光标下无元素且窗口回退未命中，
+  // 清除高亮）→ toLocalHover 换算 display 本地并丢弃越界帧 → hoverRect。
+  // 依赖 display：换算需要本 display 的全局原点与尺寸；display 每轮换新对象即重挂，
+  // 窗口常驻复用下每轮至多重挂一次，成本可忽略。selected 态照常更新 state（保持最新
+  // 悬停框）但绘制按 phase 门控——裁定 4 的「keep last hoverRect but don't draw」。
+  useEffect(() => {
+    if (!display) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<HoverFrame | null>("hawk://hover", (e) => {
+      const next = toLocalHover(e.payload, display);
+      // 值相等则保持原引用：Rust 每 16ms 发一帧（同一元素悬停期间坐标不变），
+      // 引用去重让 React 直接 bail out，避免同帧全画布重绘以 60fps 空转。
+      setHoverRect((prev) => (prev && next
+        && prev.x === next.x && prev.y === next.y
+        && prev.w === next.w && prev.h === next.h ? prev : next));
+    }).then((un) => {
+      if (disposed) un();
+      else unlisten = un;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [display]);
+
+  // —— Task 6 click-to-select：pointerHandlers 的外层包装 ——
+  // press→release 位移双轴均 < 4px 判为 click（裁定 2）；只有 pointerup 才分支
+  // click-vs-drag，down 语义不变（不清 rect，保留 dblclick 确认链）：
+  //   click + 有悬停框 → selectRect 直选（整体替换 rect，动作浮条出现）；
+  //   click + 无悬停框 + 无选区 → reset()（真 no-op 回 idle；若放行原 handler 会进入
+  //     selected 空选区态，而 selected 抑制 hover 高亮——一次落空点击就废掉后续悬停）；
+  //   click + 无悬停框 + 有旧选区 → 放行原 handler（plan A 语义：维持原选区 = no-op）；
+  //   其余（拖拽）→ 原样放行。
+  const downPointRef = useRef<{ x: number; y: number } | null>(null);
+  // 参数类型与 hook 内部同款最小结构（React.PointerEvent 结构满足之；用 DOM PointerEvent
+  // 会因 TS 严格函数逆变被 JSX props 拒绝——React 合成事件并非 DOM PointerEvent）。
+  const clickAwareHandlers = {
+    ...pointerHandlers,
+    onPointerDown: (e: { clientX: number; clientY: number }) => {
+      downPointRef.current = { x: e.clientX, y: e.clientY };
+      pointerHandlers.onPointerDown(e);
+    },
+    onPointerUp: (e: { clientX: number; clientY: number }) => {
+      const down = downPointRef.current;
+      downPointRef.current = null;
+      if (down
+        && Math.abs(e.clientX - down.x) < 4
+        && Math.abs(e.clientY - down.y) < 4) {
+        if (hoverRect) {
+          selectRect(hoverRect);
+          return;
+        }
+        if (!rect) {
+          reset();
+          return;
+        }
+      }
+      pointerHandlers.onPointerUp(e);
+    },
+  };
 
   // 冻结帧 + 遮罩 + 选区：rect/display 变化时重绘。常驻复用下每轮 payload 的 frameUrl
   // 携带后端版本化文件名（capture_screens 按时间戳命名，Plan B Task 1 cache-bust），
@@ -188,6 +257,16 @@ export default function OverlayWindow() {
       ctx.putImageData(frame, 0, 0);
       ctx.fillStyle = "rgba(0,0,0,0.35)";
       ctx.fillRect(0, 0, display.width, display.height);
+      // Task 6：hover 高亮——遮罩之后、选区描边之前（裁定 3）。selected 态不高亮：
+      // 动作浮条已锚定选区，再画橙色悬停框会与选区描边混淆。此时 state 照常更新，
+      // 回到 idle（新一轮/取消）即恢复。
+      if (hoverRect && (phase === "idle" || phase === "dragging")) {
+        ctx.fillStyle = "rgba(255,176,32,0.15)";
+        ctx.fillRect(hoverRect.x, hoverRect.y, hoverRect.w, hoverRect.h);
+        ctx.strokeStyle = "#FFB020";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(hoverRect.x, hoverRect.y, hoverRect.w, hoverRect.h);
+      }
       if (rect && rect.w >= 2 && rect.h >= 2) {
         // 选区内恢复未加暗的原始像素（旧实现 drawImage 的等价物）：putImageData 的
         // dirty-rect 形式同为设备像素，坐标须按 scale 换算
@@ -218,14 +297,14 @@ export default function OverlayWindow() {
       if (!disposed) console.error("冻结帧加载失败", err);
     });
     return () => { disposed = true; };
-  }, [rect, display, phase]);
+  }, [rect, display, phase, hoverRect]);
 
   if (!display) return null;
   return (
     <>
       <canvas ref={canvasRef}
         style={{ position: "fixed", inset: 0, cursor: "crosshair" }}
-        {...pointerHandlers}
+        {...clickAwareHandlers}
         onDoubleClick={() => confirm()} />
       {/* 选区确认浮条：canvas 的兄弟节点（fixed 定位）。pointer/dblclick 处理器都只挂在
           canvas 元素上，浮条内的 mousedown/双击按构造不进入选区状态机——既不清选区也不
