@@ -1718,10 +1718,12 @@ name = "hawksnap"
 version = "0.1.0-alpha.1"
 dependencies = [
  "arboard",
+ "block2",
  "chrono",
  "hawksnap-core",
  "hawksnap-platform-mac",
  "image 0.25.10",
+ "objc2-app-kit",
  "serde",
  "serde_json",
  "tauri",
