@@ -504,8 +504,9 @@ fn hide_all_overlays(app: &AppHandle) -> Result<(), String> {
 static DELAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// 中止旗标：cancel_delayed_capture 置 true，worker 循环每轮（≤50ms）检查——真则隐藏
-/// 倒计时窗、清门闩、不截图。每轮 start_delayed_capture 独占门闩后复位（此刻绝无并发
-/// worker，复位安全）。
+/// 倒计时窗、清门闩、不截图。每轮 start_delayed_capture 在取门闩前复位（先清后取：
+/// 清后至取闩间落下的 cancel 只会留 true 或判非活动期拒绝，不会像先取后清那样被本轮
+/// 复位静默抹掉）。
 static DELAY_ABORT: AtomicBool = AtomicBool::new(false);
 
 /// 最近一次广播的剩余秒数（pull 通道）：倒计时窗口首建时 webview 冷加载（~267ms），
@@ -574,8 +575,11 @@ fn hide_countdown_window(app: &AppHandle) {
 
 /// 启动延时截图（spec §3.1）：校验 → 门闩独占 → 建/复用倒计时窗 → deadline 轮询。
 ///
-/// 必须在非主线程调用：托盘路径 spawn 平台线程后进入；作为命令由前端 invoke 时在
-/// 异步运行时线程执行。两路径都满足（start_capture_flow 的主线程禁忌同源）。
+/// 必须在非主线程调用：本命令标记 `async`，前端 invoke 由 tauri 派到异步运行时线程
+/// 执行（不带 async 的 sync 命令在 IPC 线程内联运行——macOS/wry 即主线程，整段倒计时
+/// 会冻结主线程，且建窗/show 落在禁忌线程）；托盘菜单处理函数本身跑在主线程，故先
+/// spawn 平台线程再进入。两路径都满足非主线程约束（start_capture_flow 的主线程禁忌
+/// 同源）。
 ///
 /// 时序（controller 裁定 1，deadline-based）：`deadline = Instant::now() + secs`，
 /// worker 每 ≤50ms 检查 DELAY_ABORT 与剩余整秒；整秒变化才 emit {remaining: n}
@@ -583,14 +587,16 @@ fn hide_countdown_window(app: &AppHandle) {
 /// 在触发截图前一瞬发出。到点顺序固定：emit 0 → 隐藏窗口 → 清门闩 → start_capture_flow
 /// （已在 worker 线程，安全；失败走 hawk://capture-error，与托盘 shot 同口径）。
 /// 中止（cancel 置 ABORT）：隐藏窗口、清门闩、不截图。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_delayed_capture(app: AppHandle, secs: u64) -> Result<(), String> {
     let secs = validate_delay_secs(secs)?;
+    // 先清 ABORT 再取门闩：若先取闩后清，「取闩到清之间」落下的 cancel 已把 ABORT 置
+    // true 却被本轮复位覆盖——cancel 被静默抹掉，倒计时照跑。先清则该窗口内的 cancel
+    // （门闩未取，cancel_delayed_capture 判非活动期返回 Err，良性）不会残留到本轮。
+    DELAY_ABORT.store(false, Ordering::SeqCst);
     if !try_begin_delay(&DELAY_ACTIVE) {
         return Err("已有延时截图进行中".into());
     }
-    // 门闩已独占：本线程成为唯一 worker，复位上轮可能残留的 ABORT 安全。
-    DELAY_ABORT.store(false, Ordering::SeqCst);
     // 建窗失败必须归还门闩：worker 尚未存在，无人会在到点/中止时清 DELAY_ACTIVE，
     // 漏还则此后所有延时启动永远撞「已有延时截图进行中」直至重启。
     if let Err(e) = show_countdown_window(&app) {
