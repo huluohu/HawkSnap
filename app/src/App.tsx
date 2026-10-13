@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -46,6 +46,12 @@ function App() {
     };
   }, []);
 
+  // 面板入口（C6）：与 F1/F2 热键、托盘同链路（panel_trigger → start_capture_flow /
+  // pin_latest），失败经 hawk://capture-error 横幅回流。热键名硬编码，C7 切到设置。
+  const trigger = (action: "capture" | "pin") => {
+    invoke<void>("panel_trigger", { action }).catch((e) => setCaptureError(String(e)));
+  };
+
   return (
     <main className="container">
       {hotkeyError && (
@@ -81,9 +87,26 @@ function App() {
         </div>
       )}
       <h1>HawkSnap</h1>
-      <p>主面板尚未实现（属于 Plan C）。按 F1 开始截图。</p>
+      <section style={{ display: "flex", gap: 12, justifyContent: "center", margin: "16px 0" }}>
+        <button style={entryBtn} onClick={() => trigger("capture")}>截图 (F1)</button>
+        <button style={entryBtn} onClick={() => trigger("pin")}>贴图 (F2)</button>
+        <button style={entryBtn} disabled title="历史功能将在后续版本提供">历史（即将开放）</button>
+      </section>
+      <section style={{ marginTop: 24, fontSize: 14, color: "#888" }}>
+        <h2 style={{ fontSize: 16 }}>设置</h2>
+        <p>设置项将在后续版本提供（热键自定义 / 输出格式 / 保存目录 / 开机自启）。</p>
+      </section>
     </main>
   );
 }
+
+const entryBtn: CSSProperties = {
+  padding: "10px 20px",
+  fontSize: 15,
+  borderRadius: 6,
+  border: "1px solid #ccc",
+  background: "#fff",
+  cursor: "pointer",
+};
 
 export default App;

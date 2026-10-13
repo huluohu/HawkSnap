@@ -2,6 +2,7 @@ mod commands;
 mod history;
 mod idle_reaper;
 mod overlay;
+mod panel;
 mod perf;
 mod pins;
 mod settings;
@@ -22,7 +23,8 @@ pub fn run() {
             settings::get_settings, settings::set_settings,
             history::history_list, history::history_delete,
             pins::pin_latest, pins::pin_set_opacity, pins::pin_zoom,
-            pins::pin_close, pins::pin_close_all
+            pins::pin_close, pins::pin_close_all,
+            panel::panel_trigger
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
@@ -57,6 +59,17 @@ pub fn run() {
                 eprintln!("[hawksnap] 热键注册失败: {err}");
                 use tauri::Emitter;
                 let _ = app.emit("hawk://hotkey-error", err);
+                // spec §9 收口（C6）：启动零窗口后，此处的 emit 无窗可显（push 通道
+                // 且前端尚未挂载）——立即拉起主面板让横幅有处可显。setup 运行在主线程
+                // （register_hover_probe 的 AppKit 监听依赖此事实），而 webview 建窗
+                // 禁止主线程（与 start_capture_flow 同一纪律，panel.rs 模块注）——
+                // 故既不能直调也不能 run_on_main_thread，spawn 独立线程直呼。
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = panel::ensure_main_panel(&handle) {
+                        eprintln!("[hawksnap] 热键失败反馈面板拉起失败: {e}");
+                    }
+                });
             }
 
             // 媒体键兼容（Task 13）：macOS 默认 F1=亮度键（fnState 未开启时物理 F1 不发
@@ -81,6 +94,10 @@ pub fn run() {
                     menu::{Menu, MenuItem, Submenu},
                     tray::TrayIconBuilder,
                 };
+                // C6 主面板：启动零窗口后唯一的常驻面板入口（热键失败路径会自动拉起，
+                // 但用户主动打开面板的常规路径在这里）。
+                let panel =
+                    MenuItem::with_id(app, "panel", "主面板", true, None::<&str>)?;
                 let shot = MenuItem::with_id(app, "shot", "截图 (F1)", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "退出 HawkSnap", true, None::<&str>)?;
                 // C5 贴图：关闭全部贴图恒可用（无贴图时调用为空操作，不做动态
@@ -100,7 +117,7 @@ pub fn run() {
                     app, "delay-submenu", "延时截图", true,
                     &[&delay_1, &delay_2, &delay_3, &delay_5, &delay_cancel],
                 )?;
-                let menu = Menu::with_items(app, &[&shot, &pin_close_all, &delay_menu, &quit])?;
+                let menu = Menu::with_items(app, &[&panel, &shot, &pin_close_all, &delay_menu, &quit])?;
                 TrayIconBuilder::with_id("main")
                     .icon(
                         app.default_window_icon()
@@ -111,6 +128,17 @@ pub fn run() {
                     // on_menu_event 在主线程回调；start_capture_flow 建窗/关窗不能在主线程做，
                     // 必须丢到独立线程（其内部自行 block_on），保持本回调体最小。
                     .on_menu_event(|app, ev| match ev.id.as_ref() {
+                        // C6 主面板：线程派发同 shot——on_menu_event 在主线程回调，而
+                        // ensure_main_panel 建 wry webview 窗口禁主线程（与贴图原生
+                        // NSWindow 的 run_on_main_thread 相反，见 panel.rs 模块注）。
+                        "panel" => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = panel::ensure_main_panel(&app) {
+                                    eprintln!("[hawksnap] 主面板打开失败: {e}");
+                                }
+                            });
+                        }
                         "shot" => {
                             let app = app.clone();
                             std::thread::spawn(move || {
@@ -175,6 +203,9 @@ pub fn run() {
     // ExitRequested 的 code=None 表示“最后一个窗口关闭”这类用户交互触发的退出请求，
     // 一律阻止；托盘“退出”走 app.exit(0)，以 code=Some(0) 到达，不匹配本分支，正常退出。
     // （ExitRequested 标注 #[non_exhaustive]，模式需带 `..`。）
+    // C6 零窗口启动口径：code=None 仅由「最后一个窗口销毁」引发——启动期无窗口不会
+    // 自发产生（托盘 + 事件循环独立于窗口存活）；用户关掉懒创建的主面板时恰由本分支
+    // 兜住（进程存活，下次托盘「主面板」重建）。
     app.run(|_app, event| {
         if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
             api.prevent_exit();
