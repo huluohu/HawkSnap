@@ -14,12 +14,12 @@ pub fn run() {
             overlay::hotkey_error
         ])
         .setup(|app| {
-            // Task 11 埋点：前端首帧画出冻结帧后回报 hawk://overlay-shown（无 payload），
-            // 此处监听并打 overlay_shown 点（每窗口一次，多显示器时每屏各触发一次）。
+            // Task 11 埋点：前端首帧画出冻结帧后回报 hawk://overlay-shown（无 payload）。
+            // 多显示器时每窗口各发一次，mark_overlay_shown_once 只记每轮首个（评审 Finding 2a）。
             {
                 use tauri::Listener;
                 let _id = app.listen("hawk://overlay-shown", move |_event| {
-                    crate::perf::mark("overlay_shown");
+                    crate::perf::mark_overlay_shown_once();
                 });
             }
 

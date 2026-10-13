@@ -55,8 +55,9 @@ pub fn hotkey_error() -> Option<String> {
 
 // 必须在非主线程调用（register_hotkeys 已保证；Task 10 的托盘入口同样需要放到线程里）。
 pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
-    // Task 11 埋点：热键/托盘共用此入口，首行即触发时刻（stage: hotkey）
-    crate::perf::mark("hotkey");
+    // Task 11 埋点：热键/托盘共用此入口，首行即触发时刻（stage: hotkey）；
+    // mark_hotkey 同时武装 overlay_shown 单发门闩（多显示器只记首个 shown，与 hotkey 1:1）
+    crate::perf::mark_hotkey();
     let displays = tauri::async_runtime::block_on(commands::capture_screens(app.clone()))?;
     crate::perf::mark("grab_done"); // 抓屏成功返回
     for d in &displays {

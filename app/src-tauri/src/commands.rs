@@ -65,6 +65,10 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
 pub async fn finish_capture(
     app: AppHandle, req: FinishReq,
 ) -> Result<CaptureOutcome, String> {
+    // Task 11 评审 Finding 1：前端 invoke 即确认时刻，在函数首行打点（stage: confirm）。
+    // G3 的确认→剪贴板耗时 = clipboard_done - confirm；旧口径 overlay_shown→clipboard_done
+    // 混入了人工框选时间，无法作为 ≤100ms 目标的证据。
+    crate::perf::mark("confirm");
     // 1) 读冻结帧
     let cache = app.path().cache_dir().map_err(|e| e.to_string())?.join("hawksnap/grabs");
     let png = std::fs::read(cache.join(format!("{}.png", req.display_id))).map_err(|e| e.to_string())?;
@@ -84,7 +88,8 @@ pub async fn finish_capture(
             .map_err(|e| e.to_string())?;
         copied = true;
         // Task 11 埋点：clipboard_done 仅在 req.copy=true 路径打点（M1 流程恒为 true）。
-        // 不对称属预期：若未来支持“仅保存”，该阶段会缺行，bench 配对时按索引 zip 截断。
+        // 若未来支持“仅保存”，confirm 与 clipboard_done 行数将不等，bench 长度校验会
+        // 报“数据不齐”——属预期守护而非缺陷。
         crate::perf::mark("clipboard_done");
     }
     // 4) 保存
