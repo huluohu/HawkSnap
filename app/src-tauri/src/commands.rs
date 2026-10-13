@@ -86,6 +86,7 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
             (f.height as f64 * f.scale).round() as u32,
         );
         captures.insert(f.display_id, CaptureMeta {
+            x: f.x, y: f.y, width: f.width, height: f.height,
             scale: f.scale, width_px: pw, height_px: ph,
             rgba: std::sync::Arc::new(f.rgba.clone()), frame_path: file.clone(),
         });
@@ -147,15 +148,44 @@ use std::collections::HashMap;
 // 物理尺寸与整帧 RGBA（Arc 共享，finish_capture 锁外裁剪）。frame_path 仅供下一轮
 // capture_screens 删除上一轮冻结帧文件（Task 2b 起为版本化 .raw 文件，Task 1 的
 // 版本化文件名 cache-bust 方案仍生效）。
+// Plan B Task 7：补存逻辑 x/y/width/height（类型与语义同 DisplayPayload，ScreenFrame
+// 直传）——悬停回退链第三级（显示器全帧）的候选来源，经 captured_display_frames 取出。
 // HashMap::new 非 const fn，static 用 LazyLock 包装。
 static CAPTURES: LazyLock<Mutex<HashMap<u64, CaptureMeta>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Clone)]
 struct CaptureMeta {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
     scale: f64,
     width_px: u32,
     height_px: u32,
     rgba: std::sync::Arc<Vec<u8>>,
     frame_path: std::path::PathBuf, // 仅 capture_screens 删除上一轮冻结帧用
+}
+
+/// 显示器全帧（全局逻辑坐标，f64 域，与 RectLog/AxFrame 同形）：悬停回退链第三级
+/// （全屏模式）的候选。几何快照，刻意不含 rgba/frame_path 等重数据。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplayFrame { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
+
+/// 悬停回退链第三级的显示器候选（Plan B Task 7）：锁内只克隆几何字段（rgba 是 Arc
+/// 不碰、frame_path 不取），锁绝不跨帧持有。try_lock 而非 lock：调用方是主线程上的
+/// hover handler（~60Hz），而 capture_screens 会持同一把锁跨越整帧 RGBA 落盘（数十
+/// ms）——阻塞等待会卡主线程事件循环；锁被占用时返回空候选，该 tick 降级为无显示器
+/// 回退（回退是增强非关键路径，下一 tick 重试自愈）。坐标系 = 全局逻辑（ScreenFrame
+/// 同源）。CAPTURES 按轮覆盖写同 display_id，读到的总是最近一轮捕获的几何；陈旧
+/// display（用户拔掉显示器后未再触发新一轮）可能残留，但覆盖层不可见时悬停总闸早已
+/// 短路，残留帧至多影响下一轮首帧前的窗口期，属可接受降级。
+pub(crate) fn captured_display_frames() -> Vec<DisplayFrame> {
+    let Ok(captures) = CAPTURES.try_lock() else { return Vec::new() };
+    captures
+        .values()
+        .map(|m| DisplayFrame {
+            x: m.x as f64, y: m.y as f64, w: m.width as f64, h: m.height as f64,
+        })
+        .collect()
 }
 
 fn dirs_picture_dir() -> Option<std::path::PathBuf> {

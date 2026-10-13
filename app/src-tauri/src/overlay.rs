@@ -11,7 +11,7 @@ static HOTKEY_ERROR: Mutex<Option<String>> = Mutex::new(None);
 // —— Plan B Task 5：智能吸附 AX 悬停探测 ——
 
 /// 悬停探测总闸：是否有任一覆盖层可见。start_capture_flow 在窗口就绪后置 true；
-/// hide_overlay 在隐藏后确认无任何可见覆盖层时落 false。悬停 handler 首行检查此门——
+/// hide_all_overlays 隐藏全部覆盖层后落 false。悬停 handler 首行检查此门——
 /// 覆盖层全隐时空转成本趋近于零（一次原子读即返回），不烧 CPU、不做 AX 查询。
 pub(crate) static ANY_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
@@ -134,15 +134,17 @@ mod hover {
         // 坐标，与 AxFrame/AXPosition 同一坐标系。勿用 NSEvent 的 mouseLocation /
         // locationInWindow（bottom-left 原点——brief 明言的坐标陷阱）。
         let Some((cx, cy)) = cursor_position() else { return };
-        // 悬停回退链（Task 6 修复，决策收敛于 resolve_hover）：元素命中先验 pid——
-        // 外来进程直通；本进程自命中（覆盖层是最顶层鼠标接受窗）或探测失败 → 窗口级
-        // 点命中 → 仍无则 None。None 同样 emit（前端以 null 清除高亮）。回退是增强而非
-        // 关键路径：CGWindowList 拉取失败按空候选处理（与 snap_candidates 同款降级），
-        // 绝不 panic 打断 hover 链。pid 在 resolve_hover 内消费，emit 前剥除
-        // （AxFrameJson 契约不变）。
+        // 悬停回退链（Task 7 收敛为三级）：元素命中先验 pid——外来进程直通；本进程
+        // 自命中（覆盖层是最顶层鼠标接受窗）或探测失败 → 窗口级点命中 → 仍无 → 显示器
+        // 全帧（全屏模式：悬停空白处高亮整屏，单击即全选本屏）→ 全部落空才 None。None
+        // 同样 emit（前端以 null 清除高亮）。回退是增强而非关键路径：CGWindowList 拉取
+        // 失败按空候选处理（与 snap_candidates 同款降级），绝不 panic 打断 hover 链。
+        // pid 在 resolve_hover 内消费，emit 前剥除（AxFrameJson 契约不变）。显示器候选
+        // 取自 CAPTURES 的几何快照（captured_display_frames：锁内克隆、立即释放）。
         let element = hawksnap_platform_mac::ax::element_at_point_with_pid(cx, cy);
         let windows = super::visible_window_rects().unwrap_or_default();
-        let frame = super::resolve_hover(element, &windows, cx, cy, super::own_pid());
+        let displays = crate::commands::captured_display_frames();
+        let frame = super::resolve_hover(element, &windows, &displays, cx, cy, super::own_pid());
         let _ = app.emit("hawk://hover", frame.map(super::AxFrameJson::from));
     }
 
@@ -403,7 +405,7 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     // Plan B Task 1（G3-1）：覆盖层窗口常驻复用——首轮 build（webview 冷加载 ~267ms），
     // 之后每轮仅 set_position/set_size/show，页面由 overlay-ready 的新 payload 重绘，
     // 砍掉每轮的冷加载段。show/hide/set_position 都是投递给主线程事件循环的消息，
-    // 非主线程调用安全（close 特殊，见 hide_overlay 注）。
+    // 非主线程调用安全（close 特殊，见 hide_all_overlays 注）。
     for d in &displays {
         let label = format!("overlay-{}", d.display_id);
         if let Some(w) = app.get_webview_window(&label) {
@@ -431,7 +433,7 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     }
     crate::perf::mark("overlay_created"); // 覆盖层窗口就绪（build 或复用 show 完成；每轮一次，便于脚本按索引配对）
     // Plan B Task 5：覆盖层已就绪 → 开启悬停探测总闸（handler 首行检查，见
-    // ANY_OVERLAY_VISIBLE 注）；hide_overlay 在全部隐藏后落下。
+    // ANY_OVERLAY_VISIBLE 注）；hide_all_overlays 隐藏全部覆盖层后落下。
     ANY_OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
     // overlay-ready 在窗口 overlay 路由的前端挂载前可能先到（首次 emit 会丢）。
     // 简化实现：共发 3 次、间隔 150ms，前端以收到的最后一次为准（Task 9 契约）。
@@ -447,44 +449,52 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     app.emit("hawk://overlay-ready", displays).map_err(|e| e.to_string())
 }
 
-use crate::commands;
+use crate::commands::{self, DisplayFrame};
 
 // —— Task 9 薄命令 ——
 
-/// 覆盖层取消：隐藏对应窗口（capture-error 事件链未覆盖此路径，无需 emit）。
+/// 覆盖层取消：隐藏**全部**覆盖层（Task 7 多显示器语义收敛——任一屏 Esc，各屏覆盖层
+/// 一致隐藏，不再残留他屏覆盖层；单显示器行为不变）。displayId 保留为前端 invoke 契约
+/// （Tauri 命令按参数名匹配），隐藏语义不再限于发起窗口。
 #[tauri::command]
 pub async fn cancel_capture(app: AppHandle, display_id: u64) -> Result<(), String> {
-    hide_overlay(&app, display_id)
+    let _ = display_id; // 契约参数，语义见上
+    hide_all_overlays(&app)
 }
 
-/// 覆盖层确认完成：广播 capture-done（payload = outcome，契约不变）后按 displayId
-/// 隐藏发起窗口。CaptureOutcome 不携带 displayId，无法走“setup 监听再关窗”链，
+/// 覆盖层确认完成：广播 capture-done（payload = outcome，契约不变）后隐藏**全部**
+/// 覆盖层（Task 7）。CaptureOutcome 不携带 displayId，无法走“setup 监听再关窗”链，
 /// 故由本命令自带目标（Task 9 裁定 2，跳过 setup 监听）。
 #[tauri::command]
 pub async fn emit_capture_done(app: AppHandle, display_id: u64, outcome: commands::CaptureOutcome) -> Result<(), String> {
     app.emit("hawk://capture-done", &outcome).map_err(|e| e.to_string())?;
-    hide_overlay(&app, display_id)
+    let _ = display_id; // 契约参数，隐藏语义收敛为全部覆盖层（Task 7）
+    hide_all_overlays(&app)
 }
 
 /// 常驻复用：隐藏而非关闭，窗口由 start_capture_flow 复用（Plan B Task 1）。命令在
 /// 异步运行时线程执行（非主线程），hide() 是投递给主线程事件循环的消息，安全
 /// （close 须避开主线程，见 register_hotkeys 注；此处本就非主线程，hide 更无此顾虑）。
-fn hide_overlay(app: &AppHandle, display_id: u64) -> Result<(), String> {
-    let label = format!("overlay-{display_id}");
-    if let Some(w) = app.get_webview_window(&label) {
-        w.hide().map_err(|e| e.to_string())?;
+///
+/// 迭代安全（self-review 结论，无需先收集 label）：`webview_windows()` 返回自持的
+/// owned HashMap，且 hide 只是投递异步消息——不在此调用内同步增删窗口集合，迭代器
+/// 不失效；即便窗口被并发外部强关，手里仍是 owned 句柄，对其 hide 优雅返回 Err 而非
+/// panic。单窗 hide 失败不中断其余窗口（记最后一个错误返回）。
+///
+/// 悬停总闸：全部 overlay-* 均已（请求）隐藏 → 直接落 false，无需再实查可见性。
+/// 与 start_capture_flow 并发的极端竞态（新流程 store(true) 后旧取消才 store(false)）
+/// 可自愈：下一轮流程会重新置 true。
+fn hide_all_overlays(app: &AppHandle) -> Result<(), String> {
+    let mut last_err: Option<String> = None;
+    for (label, w) in app.webview_windows() {
+        if label.starts_with("overlay-") {
+            if let Err(e) = w.hide() {
+                last_err = Some(e.to_string());
+            }
+        }
     }
-    // Plan B Task 5：该窗口隐藏后若无任何覆盖层仍可见 → 落下悬停总闸（handler 首行短路，
-    // 空转成本归零）。刚 hide 的窗口按已隐藏计——hide 是投递给主线程的异步消息，立即
-    // 查它仍会读到旧值；只实查其余 overlay-* 窗口。与 start_capture_flow 并发的极端竞态
-    // （新流程 store(true) 后旧取消才 store(false)）可自愈：下一轮流程会重新置 true。
-    let any_visible = app.webview_windows().into_iter().any(|(name, w)| {
-        name.starts_with("overlay-") && name != label && w.is_visible().unwrap_or(false)
-    });
-    if !any_visible {
-        ANY_OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
-    }
-    Ok(())
+    ANY_OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+    last_err.map_or(Ok(()), Err)
 }
 
 // —— Task 4：方向键磁吸的窗口候选 ——
@@ -500,27 +510,56 @@ pub struct RectLog { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
 /// 且面积最小的窗口 rect——面积最小者胜出 controller 裁定，防止全屏级大窗（桌面/
 /// 壁纸残留）抢走普通应用窗口的命中；并列时取先出现者（稳定）。包含判定用半开区间
 /// [x, x+w)：右/下边缘上的点不属于该窗（标准 hit-test，相邻窗不双重命中）。
+/// Task 7：谓词收编 core 的 contains_point_f64（与显示器级命中、i32 Rect 共用同一
+/// 经测试的边缘判定）。
 fn window_hit(rects: &[RectLog], x: f64, y: f64) -> Option<RectLog> {
     rects.iter().copied()
-        .filter(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+        .filter(|r| hawksnap_core::geometry::contains_point_f64(x, y, r.x, r.y, r.w, r.h))
         .min_by(|a, b| {
             (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap_or(std::cmp::Ordering::Equal)
         })
 }
 
-/// 悬停回退链的纯决策（Task 6 修复，controller 裁定）：外来进程的元素命中直通；
-/// 元素为本进程（覆盖层悬停自命中——覆盖层恰是此刻最顶层鼠标接受窗，system-wide
-/// 探测会返回自身整屏框，若直通将常驻全屏高亮、单击全选整屏，且窗口回退成死代码）
-/// 或探测失败 → 回退窗口级点命中（role 标 AXWindow）；两者皆空 → None（前端清除高亮）。
+/// Task 7 显示器级回退的点命中（纯逻辑）：包含光标点的候选中取面积最小者——与
+/// window_hit 同一裁定（显示器几乎不嵌套，规则保持统一）；半开区间，右/下边缘上的
+/// 点不属于该屏（相邻屏不双重命中）。空候选 / 全部落空 → None。
+fn display_frame_at(displays: &[DisplayFrame], x: f64, y: f64) -> Option<DisplayFrame> {
+    displays.iter().copied()
+        .filter(|d| hawksnap_core::geometry::contains_point_f64(x, y, d.x, d.y, d.w, d.h))
+        .min_by(|a, b| {
+            (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+/// 窗口级 → 显示器级的点回退（Task 7，brief 命名）：命中窗口取最小包含者（role
+/// "AXWindow"）；无窗口命中 → 包含光标的最小显示器全帧（role "display"，全屏模式
+/// 语义）。次序不可颠倒：显示器全帧若放前会吞掉一切窗口高亮，窗口级回退沦为死代码。
+/// role 仅信息性（前端只画框，不按 role 分支）。二者皆空 → None（前端清除高亮）。
+fn window_or_display_frame(
+    windows: &[RectLog], displays: &[DisplayFrame], x: f64, y: f64,
+) -> Option<hawksnap_platform_mac::ax::AxFrame> {
+    window_hit(windows, x, y)
+        .map(|w| hawksnap_platform_mac::ax::AxFrame {
+            x: w.x, y: w.y, w: w.w, h: w.h, role: "AXWindow".into(),
+        })
+        .or_else(|| {
+            display_frame_at(displays, x, y).map(|d| hawksnap_platform_mac::ax::AxFrame {
+                x: d.x, y: d.y, w: d.w, h: d.h, role: "display".into(),
+            })
+        })
+}
+
+/// 悬停回退链的纯决策（Task 6 引入、Task 7 收敛为三级，controller 裁定）：外来进程的
+/// 元素命中直通；元素为本进程（覆盖层悬停自命中——覆盖层恰是此刻最顶层鼠标接受窗，
+/// system-wide 探测会返回自身整屏框，若直通将常驻全屏高亮、单击全选整屏）或探测失败
+/// → 窗口级点命中 → 仍无 → 显示器全帧（role "display"）；全部落空 → None。
 fn resolve_hover(
     element: Option<(hawksnap_platform_mac::ax::AxFrame, i32)>,
-    windows: &[RectLog], x: f64, y: f64, own_pid: i32,
+    windows: &[RectLog], displays: &[DisplayFrame], x: f64, y: f64, own_pid: i32,
 ) -> Option<hawksnap_platform_mac::ax::AxFrame> {
     match element {
         Some((f, pid)) if pid != own_pid => Some(f),
-        _ => window_hit(windows, x, y).map(|w| hawksnap_platform_mac::ax::AxFrame {
-            x: w.x, y: w.y, w: w.w, h: w.h, role: "AXWindow".into(),
-        }),
+        _ => window_or_display_frame(windows, displays, x, y),
     }
 }
 
@@ -659,13 +698,13 @@ mod tests {
 
     #[test]
     fn resolve_hover_prefers_foreign_pid_element() {
-        // 修复（controller 裁定）：外来进程的元素命中直通——窗口候选不参与、不覆盖
+        // 修复（controller 裁定）：外来进程的元素命中直通——窗口/显示器候选不参与、不覆盖
         let windows = vec![RectLog { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 }];
         let own = i32::from(u16::MAX); // 任一稳定 pid 值即可（纯逻辑不查真实 pid）
         let el = hawksnap_platform_mac::ax::AxFrame {
             x: 10.0, y: 10.0, w: 40.0, h: 20.0, role: "AXButton".into(),
         };
-        let got = resolve_hover(Some((el.clone(), own + 1)), &windows, 20.0, 20.0, own).unwrap();
+        let got = resolve_hover(Some((el.clone(), own + 1)), &windows, &[], 20.0, 20.0, own).unwrap();
         assert_eq!(got, el);
     }
 
@@ -681,7 +720,7 @@ mod tests {
         let own_fullscreen = hawksnap_platform_mac::ax::AxFrame {
             x: 0.0, y: 0.0, w: 1512.0, h: 982.0, role: "AXGroup".into(),
         };
-        let hit = resolve_hover(Some((own_fullscreen, own)), &windows, 200.0, 200.0, own).unwrap();
+        let hit = resolve_hover(Some((own_fullscreen, own)), &windows, &[], 200.0, 200.0, own).unwrap();
         assert_eq!((hit.w, hit.h, hit.role), (400.0, 300.0, "AXWindow".to_string()));
     }
 
@@ -689,15 +728,76 @@ mod tests {
     fn resolve_hover_none_element_uses_window_hit() {
         // 无元素命中（探测失败/未授权等）→ 纯窗口回退
         let windows = vec![RectLog { x: 5.0, y: 5.0, w: 50.0, h: 40.0 }];
-        let hit = resolve_hover(None, &windows, 20.0, 20.0, 1).unwrap();
+        let hit = resolve_hover(None, &windows, &[], 20.0, 20.0, 1).unwrap();
         assert_eq!((hit.x, hit.y, hit.w, hit.h), (5.0, 5.0, 50.0, 40.0));
         assert_eq!(hit.role, "AXWindow");
     }
 
     #[test]
     fn resolve_hover_both_miss_returns_none() {
-        // 元素与窗口皆未命中 → None（前端清除高亮）
-        assert!(resolve_hover(None, &[], 5.0, 5.0, 1).is_none());
+        // 元素与窗口皆未命中、且无显示器候选 → None（前端清除高亮）
+        assert!(resolve_hover(None, &[], &[], 5.0, 5.0, 1).is_none());
+    }
+
+    #[test]
+    fn display_frame_at_prefers_smallest_containing_area() {
+        // Task 7 显示器级回退语义：包含光标点的候选中取面积最小者（与 window_hit 同一
+        // 裁定，显示器几乎不嵌套但规则保持统一）；半开区间，右/下边缘不属于该屏。
+        let displays = vec![
+            DisplayFrame { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 },     // 主屏
+            DisplayFrame { x: 1512.0, y: 0.0, w: 1920.0, h: 1080.0 }, // 副屏（右侧）
+        ];
+        assert_eq!(display_frame_at(&displays, 100.0, 100.0).unwrap(), displays[0]);
+        assert_eq!(display_frame_at(&displays, 2000.0, 500.0).unwrap(), displays[1]);
+        // 相邻屏边界：主屏右边缘 1512 上的点不属于主屏（半开），命中含左边缘的副屏
+        assert_eq!(display_frame_at(&displays, 1512.0, 0.0).unwrap(), displays[1]);
+        assert!(display_frame_at(&displays, 1511.9, 0.0).is_some());
+        // 两屏之外 → None
+        assert!(display_frame_at(&displays, -0.5, 500.0).is_none());
+        assert!(display_frame_at(&displays, 5000.0, 5000.0).is_none());
+        // 空候选 → None（首轮流程前 CAPTURES 为空的形态）
+        assert!(display_frame_at(&[], 1.0, 1.0).is_none());
+        // 嵌套候选（防御性）：面积最小者胜出
+        let nested = vec![
+            DisplayFrame { x: 0.0, y: 0.0, w: 3024.0, h: 1964.0 },
+            DisplayFrame { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 },
+        ];
+        assert_eq!(display_frame_at(&nested, 100.0, 100.0).unwrap(), nested[1]);
+    }
+
+    #[test]
+    fn resolve_hover_display_fallback_when_element_and_window_miss() {
+        // 三级回退（Task 7）：元素与窗口皆未命中 → 包含光标的显示器全帧（全屏模式：
+        // 悬停空白处高亮整屏，单击即全选本屏），role "display"
+        let displays = vec![DisplayFrame { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 }];
+        let hit = resolve_hover(None, &[], &displays, 800.0, 900.0, 1).unwrap();
+        assert_eq!((hit.x, hit.y, hit.w, hit.h), (0.0, 0.0, 1512.0, 982.0));
+        assert_eq!(hit.role, "display");
+    }
+
+    #[test]
+    fn resolve_hover_window_hit_shadows_display_frame() {
+        // 次序守护：窗口命中优先于显示器帧——回退链若把显示器放前，全屏帧会吞掉一切
+        // 窗口高亮，窗口级回退沦为死代码
+        let windows = vec![RectLog { x: 100.0, y: 100.0, w: 400.0, h: 300.0 }];
+        let displays = vec![DisplayFrame { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 }];
+        let hit = resolve_hover(None, &windows, &displays, 200.0, 200.0, 1).unwrap();
+        assert_eq!((hit.w, hit.h, hit.role), (400.0, 300.0, "AXWindow".to_string()));
+        // 光标在窗口外但在屏内 → 才落显示器帧
+        let hit = resolve_hover(None, &windows, &displays, 20.0, 20.0, 1).unwrap();
+        assert_eq!((hit.w, hit.h, hit.role), (1512.0, 982.0, "display".to_string()));
+    }
+
+    #[test]
+    fn resolve_hover_own_pid_element_still_falls_through_to_display() {
+        // 自命中 + 窗口未命中 → 一路落显示器帧（回退链贯穿三级）
+        let displays = vec![DisplayFrame { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 }];
+        let own = i32::from(u16::MAX);
+        let own_fullscreen = hawksnap_platform_mac::ax::AxFrame {
+            x: 0.0, y: 0.0, w: 1512.0, h: 982.0, role: "AXGroup".into(),
+        };
+        let hit = resolve_hover(Some((own_fullscreen, own)), &[], &displays, 1200.0, 900.0, own).unwrap();
+        assert_eq!((hit.w, hit.h, hit.role), (1512.0, 982.0, "display".to_string()));
     }
 
     #[test]

@@ -16,6 +16,12 @@ impl Rect {
     pub fn right(&self) -> i32 { self.x + self.w as i32 }
     pub fn bottom(&self) -> i32 { self.y + self.h as i32 }
 
+    /// 半开区间 [x, x+w) × [y, y+h) 点命中：右/下边缘上的点不属于该矩形（标准
+    /// hit-test，相邻矩形不双重命中）。供窗口/元素选区的点包含判定。
+    pub fn contains_point(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+
     pub fn clamp_to(self, bounds: Rect) -> Rect {
         let x = self.x.clamp(bounds.x, bounds.right() - 1);
         let y = self.y.clamp(bounds.y, bounds.bottom() - 1);
@@ -41,6 +47,16 @@ impl Rect {
         }
         r
     }
+}
+
+/// f64 域的半开区间点命中 [x, x+w) × [y, y+h)，与 [`Rect::contains_point`] 同一语义。
+///
+/// 为何是自由函数而非 Rect 方法：悬停回退链的候选（CGWindowList 的 RectLog、显示器全帧
+/// DisplayFrame）与光标坐标天然是 f64 逻辑坐标，Rect 自身是 i32/u32——若把 f64 入参挂成
+/// &self 方法，调用方必须先做有损的 f64→i32 矩形转换（小数边缘被吞、半开语义漂移）；
+/// 自由函数让 i32 Rect 与 f64 候选共用同一份经测试的边缘判定，零转换。
+pub fn contains_point_f64(px: f64, py: f64, x: f64, y: f64, w: f64, h: f64) -> bool {
+    px >= x && px < x + w && py >= y && py < y + h
 }
 
 impl Scale {
@@ -94,5 +110,28 @@ mod tests {
         let s125 = Scale(1.25);
         assert_eq!(s125.to_physical(100), 125);
         assert_eq!(s125.to_logical(125), 100);
+    }
+
+    #[test]
+    fn contains_point_bounds_checked() {
+        let r = Rect { x: 10, y: 10, w: 50, h: 50 };
+        assert!(r.contains_point(10, 10));
+        assert!(r.contains_point(59, 59));
+        assert!(!r.contains_point(60, 60));
+        assert!(!r.contains_point(9, 30));
+    }
+
+    #[test]
+    fn contains_point_f64_half_open() {
+        // 与 i32 contains_point 同一半开语义（[x, x+w) × [y, y+h)），f64 域：
+        // 供 overlay 的 window_hit / display_frame_at（候选与光标天然是 f64 逻辑坐标，
+        // 光标坐标取整会把负半轴上的点错误折进左/上边缘，故命中判定必须保 f64）。
+        let (x, y, w, h) = (10.0, 10.0, 50.0, 50.0);
+        assert!(contains_point_f64(10.0, 10.0, x, y, w, h)); // 左/上边缘（含）
+        assert!(contains_point_f64(59.9, 59.9, x, y, w, h)); // 右/下边缘内侧
+        assert!(!contains_point_f64(60.0, 30.0, x, y, w, h)); // 右边缘（不含）
+        assert!(!contains_point_f64(30.0, 60.0, x, y, w, h)); // 下边缘（不含）
+        assert!(!contains_point_f64(9.5, 30.0, x, y, w, h)); // 左外侧（含小数负偏）
+        assert!(!contains_point_f64(30.0, -0.5, x, y, w, h)); // 上外侧
     }
 }
