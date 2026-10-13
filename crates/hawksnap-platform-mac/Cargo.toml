@@ -26,7 +26,7 @@ core-foundation = "0.10"
 # （NSImage 的 initWithCGImage 入口）；core-graphics 直连依赖补 CGDataProvider
 # （app-kit 的传递 features 不含它，而 CGImage::new 需要 CGDataProvider）。
 objc2 = "0.6"
-objc2-foundation = "0.3"
+objc2-foundation = { version = "0.3", features = ["NSRunLoop"] }
 objc2-core-foundation = "0.3"
 objc2-core-graphics = { version = "0.3", features = ["CGColor", "CGColorSpace", "CGDataProvider", "CGImage"] }
 objc2-app-kit = { version = "0.3", features = [

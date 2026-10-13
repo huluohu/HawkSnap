@@ -233,6 +233,11 @@ impl PinWindow {
             ));
         }
         let scale = if scale > 0.0 { scale } else { 1.0 };
+        // 探针（常驻，廉价，每次创建一行）：E2E 判别「create 被调用 + 参数合理」。
+        eprintln!(
+            "[hawksnap] PinWindow::create: pin_id={pin_id} {w_px}×{h_px} top_left=({:.0},{:.0}) scale={scale}",
+            top_left.0, top_left.1
+        );
         // 图像逻辑尺寸（1 物理像素/1 逻辑像素的基线）与初始显示尺寸（半尺寸起步）。
         let logical_w = w_px as f64 / scale;
         let logical_h = h_px as f64 / scale;
@@ -312,8 +317,21 @@ impl PinWindow {
         }
         // 不抢焦点地显示（Accessory 应用 + orderFrontRegardless：不出现在焦点轮转里）。
         window.orderFrontRegardless();
+        // 探针（常驻，廉价，每次创建一行）：上屏状态立刻核对。0.3.2 无 isOnScreen
+        // 绑定（仅 isOnActiveSpace，语义不同），isVisible = 已 order 上屏，够用。
+        let frame = window.frame();
+        eprintln!(
+            "[hawksnap] PinWindow::create: frame=({:.0},{:.0} {:.0}×{:.0}) isVisible={}",
+            frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
+            window.isVisible()
+        );
 
         Ok(PinWindow { window, view, closed: Cell::new(false) })
+    }
+
+    /// 调试/冒烟断言用：窗口当前是否可见（AppKit isVisible = 已 order 上屏）。
+    pub fn is_visible(&self) -> bool {
+        self.window.isVisible()
     }
 
     /// 当前显示比（命令侧 clamp 的现状输入；滚轮缩放也写同一 ivar）。

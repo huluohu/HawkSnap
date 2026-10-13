@@ -53,6 +53,8 @@ pub(crate) fn clamp_opacity(opacity: f64) -> f64 {
 
 /// pin 图像来源（C5）：CAPTURES 最近一轮非空整帧，或剪贴板图像（scale=1.0）。
 struct PinSource {
+    /// 来源标签（探针/E2E 判别用）："captures" | "clipboard"。
+    source: &'static str,
     rgba: std::sync::Arc<Vec<u8>>,
     w_px: u32,
     h_px: u32,
@@ -64,7 +66,7 @@ struct PinSource {
 /// 「剪贴板没有图像且无最近截图」。
 fn resolve_source() -> Result<PinSource, String> {
     if let Some(c) = commands::latest_capture_rgba() {
-        return Ok(PinSource { rgba: c.rgba, w_px: c.w_px, h_px: c.h_px, scale: c.scale });
+        return Ok(PinSource { source: "captures", rgba: c.rgba, w_px: c.w_px, h_px: c.h_px, scale: c.scale });
     }
     let img = arboard::Clipboard::new()
         .and_then(|mut cb| cb.get_image())
@@ -73,7 +75,7 @@ fn resolve_source() -> Result<PinSource, String> {
     if w == 0 || h == 0 {
         return Err("剪贴板没有图像且无最近截图: empty image".into());
     }
-    Ok(PinSource { rgba: std::sync::Arc::new(img.bytes.into_owned()), w_px: w, h_px: h, scale: 1.0 })
+    Ok(PinSource { source: "clipboard", rgba: std::sync::Arc::new(img.bytes.into_owned()), w_px: w, h_px: h, scale: 1.0 })
 }
 
 // —— 命令 —--
@@ -105,6 +107,11 @@ fn do_pin_latest(app: &AppHandle) -> Result<(), String> {
 
     let rgba = src.rgba;
     let (w_px, h_px, scale) = (src.w_px, src.h_px, src.scale);
+    // 探针（常驻，廉价，每次贴图一行）：E2E 判别来源/落点是否合理。
+    eprintln!(
+        "[hawksnap] pin_latest: id={id} src={} {w_px}×{h_px} scale={scale} top_left=({:.0},{:.0})",
+        src.source, top_left.0, top_left.1
+    );
     app.run_on_main_thread(move || {
         match hawksnap_platform_mac::pin::PinWindow::create(rgba, w_px, h_px, top_left, scale, id) {
             Ok(win) => {

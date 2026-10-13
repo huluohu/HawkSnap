@@ -55,6 +55,9 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
     let app2 = app.clone();
     gs.on_shortcut(f2, move |_app, _shortcut, event| {
         if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            // 探针（常驻，廉价）：E2E 判别「F2 回调没进来」vs「进来了但没出窗」。
+            // 注意 global-hotkey 0.8 的 Code::F2 → Carbon 0x78=120（99 是 kVK_F3）。
+            eprintln!("[hawksnap] F2 热键触发（pin_latest）");
             let app = app2.clone();
             std::thread::spawn(move || {
                 if let Err(e) = crate::pins::pin_latest(app.clone()) {
