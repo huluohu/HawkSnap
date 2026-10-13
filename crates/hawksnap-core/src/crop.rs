@@ -136,6 +136,46 @@ mod rgba_to_png_tests {
     }
 }
 
+/// RGBA → 缩略图 RGBA（等比缩到最长边 ≤ max_edge；已小于则原样返回）。
+/// 历史库缩略图用（C3）：max_edge 由调用方定（如 320）。
+pub fn rgba_thumbnail(rgba: &[u8], w: u32, h: u32, max_edge: u32) -> Result<(Vec<u8>, u32, u32), CropError> {
+    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec()).ok_or(CropError::Decode)?;
+    let scale = max_edge as f64 / w.max(h) as f64;
+    if scale >= 1.0 {
+        return Ok((rgba.to_vec(), w, h)); // 已小于 max
+    }
+    let nw = ((w as f64 * scale).round() as u32).max(1);
+    let nh = ((h as f64 * scale).round() as u32).max(1);
+    let thumb = image::DynamicImage::ImageRgba8(img)
+        .resize_exact(nw, nh, image::imageops::FilterType::Lanczos3);
+    Ok((thumb.into_rgba8().into_raw(), nw, nh))
+}
+
+#[cfg(test)]
+mod thumbnail_tests {
+    use super::*;
+
+    fn solid_rgba(w: u32, h: u32, px: [u8; 4]) -> Vec<u8> {
+        vec![px[0], px[1], px[2], px[3]].repeat((w * h) as usize)
+    }
+
+    #[test]
+    fn thumbnail_scales_proportionally() {
+        let rgba = solid_rgba(100, 50, [10, 20, 30, 255]);
+        let (data, nw, nh) = rgba_thumbnail(&rgba, 100, 50, 40).unwrap();
+        assert_eq!((nw, nh), (40, 20), "等比缩到最长边 40");
+        assert_eq!(data.len(), (40 * 20 * 4) as usize);
+    }
+
+    #[test]
+    fn thumbnail_keeps_small_images() {
+        let rgba = solid_rgba(20, 20, [1, 2, 3, 255]);
+        let (data, nw, nh) = rgba_thumbnail(&rgba, 20, 20, 40).unwrap();
+        assert_eq!((nw, nh), (20, 20), "已小于 max_edge 原样返回");
+        assert_eq!(data, rgba);
+    }
+}
+
 #[cfg(test)]
 mod rgba_tests {
     use super::*;

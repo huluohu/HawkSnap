@@ -13,6 +13,10 @@ xcap = "0.4"
 image = "0.25"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
+# SQLite 历史存储（C3）。bundled：自带 amalgamation 编译，不依赖系统 libsqlite3。
+# default-features=false：默认 features 含 sqlite-wasm-rs（wasm 运行时），桌面用不到；
+# 0.40 为本机缓存可离线解析的版本（0.37 未缓存，环境禁网——离线适配注记）。
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

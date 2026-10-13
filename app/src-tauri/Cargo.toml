@@ -23,6 +23,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 hawksnap-core.workspace = true
 hawksnap-platform-mac.workspace = true
+# 历史存储（C3）：SQLite + bundled amalgamation
+rusqlite.workspace = true
 # protocol-asset：tauri.conf.json 启用 assetProtocol 的硬性要求（build script 校验）
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-opener = "2"

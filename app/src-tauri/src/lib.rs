@@ -1,4 +1,5 @@
 mod commands;
+mod history;
 mod idle_reaper;
 mod overlay;
 mod perf;
@@ -17,7 +18,8 @@ pub fn run() {
             overlay::hotkey_error, overlay::snap_candidates,
             overlay::start_delayed_capture, overlay::cancel_delayed_capture,
             overlay::countdown_remaining,
-            settings::get_settings, settings::set_settings
+            settings::get_settings, settings::set_settings,
+            history::history_list, history::history_delete
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
@@ -39,6 +41,12 @@ pub fn run() {
                 let _id = app.listen("hawk://overlay-shown", move |_event| {
                     crate::perf::mark_overlay_shown_once();
                 });
+            }
+
+            // 历史库（C3）：旁路功能，init 失败仅记录不阻塞启动（裁定：不 `?` 退出）；
+            // 此后各 history 命令自行开连接，失败以 Err 返回给前端。
+            if let Err(e) = history::init(app.handle()) {
+                eprintln!("[hawksnap] 历史库初始化失败: {e}");
             }
 
             // 热键注册失败不中止启动（spec §9：允许无热键启动，但必须给用户可见反馈）。
