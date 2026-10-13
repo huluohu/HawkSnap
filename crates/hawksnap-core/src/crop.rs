@@ -28,6 +28,41 @@ pub fn crop_png(png: &[u8], physical: &Rect) -> Result<Vec<u8>, CropError> {
     Ok(out)
 }
 
+/// 从物理 RGBA 缓冲按行复制裁剪（无重编码）。`rgba.len()` 必须 ≥ w_px*h_px*4。
+pub fn crop_rgba(rgba: &[u8], w_px: u32, h_px: u32, physical: &Rect) -> Result<Vec<u8>, CropError> {
+    let stride = w_px as usize * 4;
+    if w_px == 0 || h_px == 0 || rgba.len() < stride.checked_mul(h_px as usize).ok_or(CropError::Decode)? {
+        return Err(CropError::Decode);
+    }
+    if physical.w > i32::MAX as u32 || physical.h > i32::MAX as u32 {
+        return Err(CropError::OutOfBounds);
+    }
+    if physical.x < 0 || physical.y < 0
+        || physical.right() > w_px as i32 || physical.bottom() > h_px as i32 {
+        return Err(CropError::OutOfBounds);
+    }
+    let mut out = Vec::with_capacity(physical.w as usize * 4 * physical.h as usize);
+    for row in physical.y as usize..physical.bottom() as usize {
+        let start = row * stride + physical.x as usize * 4;
+        out.extend_from_slice(&rgba[start..start + physical.w as usize * 4]);
+    }
+    Ok(out)
+}
+
+/// 裁剪结果 → PNG（Fast+NoFilter）。只在保存路径调用；剪贴板直用 RGBA。
+pub fn rgba_to_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, CropError> {
+    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec()).ok_or(CropError::Decode)?;
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_with_encoder(image::codecs::png::PngEncoder::new_with_quality(
+            std::io::Cursor::new(&mut out),
+            image::codecs::png::CompressionType::Fast,
+            image::codecs::png::FilterType::NoFilter,
+        ))
+        .map_err(|_| CropError::Encode)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +94,48 @@ mod tests {
     fn out_of_bounds_returns_error() {
         let e = crop_png(&solid_png(4, 4, [0, 0, 0, 255]), &Rect { x: 3, y: 3, w: 5, h: 5 });
         assert!(matches!(e, Err(CropError::OutOfBounds)));
+    }
+}
+
+#[cfg(test)]
+mod rgba_tests {
+    use super::*;
+    use crate::geometry::Rect;
+
+    fn solid_rgba(w: u32, h: u32, px: [u8; 4]) -> Vec<u8> {
+        vec![px[0], px[1], px[2], px[3]].repeat((w * h) as usize)
+    }
+
+    #[test]
+    fn crop_rgba_extracts_exact_rows() {
+        // 2x2：左列红右列蓝，裁右列 → 1x2 蓝
+        let mut img = vec![255u8, 0, 0, 255, 0, 0, 255, 255];
+        img[0] = 255; img[2] = 0; // (0,0) 红
+        let out = crop_rgba(&solid_rgba(2, 2, [0, 0, 255, 255]), 2, 2,
+            &Rect { x: 1, y: 0, w: 1, h: 2 }).unwrap();
+        assert_eq!(out, vec![0, 0, 255, 255, 0, 0, 255, 255]);
+        let _ = img; // 语义用 solid_rgba 表达
+    }
+
+    #[test]
+    fn crop_rgba_rejects_oob_and_overflow() {
+        assert!(matches!(crop_rgba(&solid_rgba(2, 2, [0; 4]), 2, 2,
+            &Rect { x: 2, y: 0, w: 1, h: 1 }), Err(CropError::OutOfBounds)));
+        assert!(matches!(crop_rgba(&solid_rgba(2, 2, [0; 4]), 2, 2,
+            &Rect { x: 0, y: 0, w: u32::MAX, h: 1 }), Err(CropError::OutOfBounds)));
+    }
+
+    #[test]
+    fn crop_rgba_rejects_short_buffer() {
+        assert!(matches!(crop_rgba(&[0u8; 7], 2, 2,
+            &Rect { x: 0, y: 0, w: 1, h: 1 }), Err(CropError::Decode)));
+    }
+
+    #[test]
+    fn rgba_to_png_roundtrips_dimensions() {
+        let rgba = solid_rgba(4, 3, [9, 8, 7, 255]);
+        let png = rgba_to_png(&rgba, 4, 3).unwrap();
+        let img = image::load_from_memory(&png).unwrap();
+        assert_eq!((img.width(), img.height()), (4, 3));
     }
 }

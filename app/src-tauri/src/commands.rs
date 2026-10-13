@@ -1,6 +1,6 @@
 use hawksnap_core::capture::ScreenGrabber;
 use hawksnap_core::geometry::Rect;
-use hawksnap_core::{crop::crop_png, naming::{expand, NamingCtx}};
+use hawksnap_core::{crop::{crop_rgba, rgba_to_png}, naming::{expand, NamingCtx}};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -46,13 +46,13 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
     let cache = app.path().cache_dir().map_err(|e| e.to_string())?.join("hawksnap/grabs");
     std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(frames.len());
-    let mut frame_meta = FRAME_META.lock().unwrap();
+    let mut captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
     for f in frames {
         // Plan B Task 1 cache-bust：覆盖层窗口常驻复用后页面不再重载，同路径覆盖写会命中
         // Webview 的 URL 缓存而显示上一轮旧帧，故文件名带毫秒时间戳强制每轮重新加载
         // （asset 协议对 query 参数不可靠，版本化文件名是确定性方案；仍在 $CACHE/** scope 内）。
         // 写入前删除上一轮同 display 的冻结帧，缓存目录不随轮数增长。
-        if let Some(prev) = frame_meta.get(&f.display_id) {
+        if let Some(prev) = captures.get(&f.display_id) {
             let _ = std::fs::remove_file(&prev.png_path);
         }
         let file = cache.join(format!(
@@ -61,9 +61,17 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
             chrono::Local::now().timestamp_millis()
         ));
         std::fs::write(&file, &f.png).map_err(|e| e.to_string())?;
-        // 冻结帧的 scale 供 finish_capture 做逻辑→物理换算；png_path 供 finish_capture
-        // 读取（文件名版本化后无法再按 display_id 拼名，Plan B Task 1）
-        frame_meta.insert(f.display_id, FrameMeta { scale: f.scale, png_path: file.clone() });
+        // raw-RGBA 捕获缓存（Plan B Task 2）：物理尺寸按 (width*scale).round() 计算，
+        // finish_capture 直通行复制裁剪与剪贴板，全程不再读 PNG 文件。PNG 仅供前端
+        // asset 协议显示冻结帧；png_path 仅供下一轮删除上一轮冻结帧。
+        let (pw, ph) = (
+            (f.width as f64 * f.scale).round() as u32,
+            (f.height as f64 * f.scale).round() as u32,
+        );
+        captures.insert(f.display_id, CaptureMeta {
+            scale: f.scale, width_px: pw, height_px: ph,
+            rgba: std::sync::Arc::new(f.rgba.clone()), png_path: file.clone(),
+        });
         out.push(DisplayPayload {
             display_id: f.display_id, x: f.x, y: f.y,
             width: f.width, height: f.height, scale: f.scale,
@@ -79,21 +87,23 @@ pub async fn finish_capture(req: FinishReq) -> Result<CaptureOutcome, String> {
     // G3 的确认→剪贴板耗时 = clipboard_done - confirm；旧口径 overlay_shown→clipboard_done
     // 混入了人工框选时间，无法作为 ≤100ms 目标的证据。
     crate::perf::mark("confirm");
-    // 1) 读冻结帧（文件名版本化后不能按 display_id 拼名，路径经 FRAME_META 取当轮写路径）
-    let frame_meta = FRAME_META.lock().unwrap();
-    let meta = frame_meta.get(&req.display_id).ok_or("display not captured")?;
-    let png = std::fs::read(&meta.png_path).map_err(|e| e.to_string())?;
-    let scale = meta.scale;
-    let physical = to_physical_rect(&req.rect, scale);
-    let cropped = crop_png(&png, &physical).map_err(|e| e.to_string())?;
-    // 3) 剪贴板
+    // raw-RGBA 直通（Plan B Task 2）：不再读冻结 PNG。锁内只做查找 + Arc clone 并立即
+    // 释放；行复制裁剪与剪贴板全程无锁（单用户场景总耗时 <50ms，无需 spawn_blocking）。
+    let meta = { CAPTURES.lock().unwrap_or_else(|e| e.into_inner()).get(&req.display_id).cloned() }
+        .ok_or("display not captured")?;
+    let physical = to_physical_rect(&req.rect, meta.scale);
+    let cropped = crop_rgba(&meta.rgba, meta.width_px, meta.height_px, &physical)
+        .map_err(|e| e.to_string())?;
+    // 3) 剪贴板：直接送 RGBA，省去裁剪 PNG 重编码 + 再解码两个环节
     let mut copied = false;
     if req.copy {
-        let img = image::load_from_memory(&cropped).map_err(|e| e.to_string())?;
-        let (w, h) = (img.width(), img.height());
-        let rgba = img.to_rgba8().into_raw();
         let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: rgba.into() })
+        // clone：req.save 同时为 true 时 cropped 还要经 rgba_to_png 落盘
+        cb.set_image(arboard::ImageData {
+            width: physical.w as usize,
+            height: physical.h as usize,
+            bytes: cropped.clone().into(),
+        })
             .map_err(|e| e.to_string())?;
         copied = true;
         // Task 11 埋点：clipboard_done 仅在 req.copy=true 路径打点（M1 流程恒为 true）。
@@ -101,13 +111,14 @@ pub async fn finish_capture(req: FinishReq) -> Result<CaptureOutcome, String> {
         // 报“数据不齐”——属预期守护而非缺陷。
         crate::perf::mark("clipboard_done");
     }
-    // 4) 保存
+    // 4) 保存：PNG 编码只发生在保存路径
     let mut saved_to = None;
     if req.save {
         let dir = dirs_picture_dir().ok_or("no picture dir")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = save_path_for(&dir, &frontmost_app_name().unwrap_or_else(|| "HawkSnap".into()));
-        std::fs::write(&path, &cropped).map_err(|e| e.to_string())?;
+        let png = rgba_to_png(&cropped, physical.w, physical.h).map_err(|e| e.to_string())?;
+        std::fs::write(&path, &png).map_err(|e| e.to_string())?;
         saved_to = Some(path.to_string_lossy().into_owned());
     }
     Ok(CaptureOutcome { copied, saved_to })
@@ -115,9 +126,19 @@ pub async fn finish_capture(req: FinishReq) -> Result<CaptureOutcome, String> {
 
 use std::sync::{LazyLock, Mutex};
 use std::collections::HashMap;
-// HashMap::new 非 const fn，static 用 LazyLock 包装（调用处 FRAME_META.lock() 语法不变）
-static FRAME_META: LazyLock<Mutex<HashMap<u64, FrameMeta>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-#[derive(Clone)] struct FrameMeta { scale: f64, png_path: std::path::PathBuf }
+// raw-RGBA 捕获缓存（Plan B Task 2，取代 FRAME_META）：每 display 存冻结帧的 scale、
+// 物理尺寸与整帧 RGBA（Arc 共享，finish_capture 锁外裁剪）。png_path 仅供下一轮
+// capture_screens 删除上一轮冻结帧文件（Task 1 版本化文件名方案仍生效）。
+// HashMap::new 非 const fn，static 用 LazyLock 包装。
+static CAPTURES: LazyLock<Mutex<HashMap<u64, CaptureMeta>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+#[derive(Clone)]
+struct CaptureMeta {
+    scale: f64,
+    width_px: u32,
+    height_px: u32,
+    rgba: std::sync::Arc<Vec<u8>>,
+    png_path: std::path::PathBuf, // 仅 capture_screens 删除上一轮冻结帧用
+}
 
 fn dirs_picture_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures/HawkSnap"))

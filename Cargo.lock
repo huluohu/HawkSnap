@@ -1722,7 +1722,6 @@ dependencies = [
  "chrono",
  "hawksnap-core",
  "hawksnap-platform-mac",
- "image 0.25.10",
  "objc2-app-kit",
  "serde",
  "serde_json",

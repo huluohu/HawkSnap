@@ -3,6 +3,7 @@ extern crate self as hawksnap_platform_mac;
 
 use hawksnap_core::capture::{CaptureError, ScreenFrame, ScreenGrabber};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ExtendedColorType, ImageEncoder};
 
 pub struct XcapGrabber;
 
@@ -31,13 +32,16 @@ impl ScreenGrabber for XcapGrabber {
             let mut png = Vec::new();
             // 快速压缩（Fast + NoFilter）：整帧 Retina PNG 编码从数百 ms 降到 ~10ms 级，
             // 满足热键→覆盖层 ≤150ms 预算；产物仍是合法 PNG。
-            image::DynamicImage::ImageRgba8(img)
-                .write_with_encoder(PngEncoder::new_with_quality(
-                    &mut std::io::Cursor::new(&mut png),
-                    CompressionType::Fast,
-                    FilterType::NoFilter,
-                ))
-                .map_err(|e| CaptureError::Backend(e.to_string()))?;
+            // 借 img 原始缓冲编码（write_image 不取所有权），随后 into_raw 直接取走
+            // RGBA——避免整帧物理缓冲 clone（4K@2x 约 33MB）。
+            PngEncoder::new_with_quality(
+                &mut std::io::Cursor::new(&mut png),
+                CompressionType::Fast,
+                FilterType::NoFilter,
+            )
+            .write_image(img.as_raw(), img.width(), img.height(), ExtendedColorType::Rgba8)
+            .map_err(|e| CaptureError::Backend(e.to_string()))?;
+            let rgba = img.into_raw();
             out.push(ScreenFrame {
                 display_id: m.id().map_err(backend)? as u64,
                 x: m.x().map_err(backend)?,
@@ -46,6 +50,7 @@ impl ScreenGrabber for XcapGrabber {
                 height: m.height().map_err(backend)?,
                 scale: m.scale_factor().map_err(backend)? as f64,
                 png,
+                rgba,
             });
         }
         Ok(out)
@@ -65,5 +70,10 @@ mod tests {
         let f = &frames[0];
         let img = image::load_from_memory(&f.png).unwrap();
         assert_eq!(img.width(), (f.width as f64 * f.scale).round() as u32);
+        // raw-RGBA 直通（Plan B Task 2）：rgba 与 png 必须是同一帧、同一物理尺寸，
+        // 否则 finish_capture 的行复制裁剪会读到错位/越界数据。
+        let expected_px = ((f.width as f64 * f.scale).round() as u64)
+            * ((f.height as f64 * f.scale).round() as u64);
+        assert_eq!(f.rgba.len() as u64, expected_px * 4);
     }
 }

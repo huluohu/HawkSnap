@@ -7,6 +7,9 @@ pub struct ScreenFrame {
     pub width: u32, pub height: u32, // 逻辑尺寸
     pub scale: f64,                  // DPI 缩放（Retina=2.0）
     pub png: Vec<u8>,                // 物理像素 PNG
+    // 物理 RGBA 原始字节（与 png 同一帧）：宽高 = (width*scale).round() × (height*scale).round()，
+    // 长度 = 宽*高*4。finish_capture 直通裁剪/剪贴板用它，避免 PNG 解码。
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -52,7 +55,8 @@ mod tests {
     #[test]
     fn in_mem_grabber_returns_frames_in_order() {
         let mut g = InMemGrabber::new(vec![
-            ScreenFrame { display_id: 1, x: 0, y: 0, width: 100, height: 50, scale: 2.0, png: frame_png(200, 100) },
+            ScreenFrame { display_id: 1, x: 0, y: 0, width: 100, height: 50, scale: 2.0,
+                png: frame_png(200, 100), rgba: vec![0; 200 * 100 * 4] },
         ]);
         let frames = g.grab_all().unwrap();
         assert_eq!(frames.len(), 1);
