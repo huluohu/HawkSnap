@@ -1,0 +1,12 @@
+[package]
+name = "hawksnap-platform-mac"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hawksnap-core.workspace = true
+xcap = "0.4"
+image.workspace = true

@@ -8,6 +8,8 @@ version = "0.1.0-alpha.1"
 
 [workspace.dependencies]
 hawksnap-core = { path = "crates/hawksnap-core" }
+hawksnap-platform-mac = { path = "crates/hawksnap-platform-mac" }
+xcap = "0.4"
 image = "0.25"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
