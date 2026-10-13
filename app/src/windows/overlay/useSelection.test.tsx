@@ -1,6 +1,10 @@
-import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, cleanup, renderHook } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useSelection } from "./useSelection";
+
+// vitest globals 未开启 → RTL 的自动 cleanup 未注册；keydown 监听挂在 window 上，
+// 不清理会跨用例泄漏（上一例 selected 态的监听会 preventDefault 下一例 idle 态的方向键）。
+afterEach(cleanup);
 
 describe("useSelection", () => {
   it("drag normalizes rect and tracks phases", () => {
@@ -102,5 +106,76 @@ describe("useSelection", () => {
     act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
     act(() => result.current.confirm("save"));
     expect(onConfirm).toHaveBeenCalledWith({ x: 10, y: 10, w: 50, h: 30 }, "save");
+  });
+
+  // —— Task 4：方向键微调 + 磁吸 ——
+
+  const arrowKey = (key: string, shift = false) => {
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key, shiftKey: shift, cancelable: true })));
+  };
+  const dragTo = (result: { current: { pointerHandlers: {
+    onPointerDown: (e: PointerEvent) => void; onPointerMove: (e: PointerEvent) => void;
+    onPointerUp: (e: PointerEvent) => void } } }, x: number, y: number) => {
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: x, clientY: y } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: x + 50, clientY: y + 40 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
+  };
+
+  it("arrow keys nudge the selected rect by 1 (10 with Shift) and clamp to bounds", () => {
+    const candidatesRef = { current: [] as { x: number; y: number; w: number; h: number }[] };
+    const { result } = renderHook(() => useSelection({
+      width: 1000, height: 600,
+      bounds: { x: 0, y: 0, w: 1000, h: 600 }, candidatesRef,
+    }));
+    dragTo(result, 100, 100);
+    expect(result.current.rect).toEqual({ x: 100, y: 100, w: 50, h: 40 });
+    arrowKey("ArrowLeft");
+    expect(result.current.rect).toEqual({ x: 99, y: 100, w: 50, h: 40 });
+    arrowKey("ArrowUp", true); // Shift = 10px
+    expect(result.current.rect).toEqual({ x: 99, y: 90, w: 50, h: 40 });
+    // 夹取：推到左上角之外也不出 bounds
+    for (let i = 0; i < 200; i++) arrowKey("ArrowLeft", true);
+    expect(result.current.rect).toEqual({ x: 0, y: 90, w: 50, h: 40 });
+  });
+
+  it("arrow nudge snaps to the nearest candidate edge (8px)", () => {
+    const candidatesRef = {
+      current: [{ x: 150, y: 0, w: 300, h: 600 }], // 右边缘 450
+    };
+    const { result } = renderHook(() => useSelection({
+      width: 1000, height: 600,
+      bounds: { x: 0, y: 0, w: 1000, h: 600 }, candidatesRef,
+    }));
+    dragTo(result, 100, 100); // 选区 x=100, 右边缘 150 → 距候选左边缘 150 恰好 0？否：右 150 vs 候选左 150 → d=0 排除
+    arrowKey("ArrowLeft"); // 右边缘 149 vs 候选左 150 → d=1 → 吸附 x=100（右=150）
+    expect(result.current.rect).toEqual({ x: 100, y: 100, w: 50, h: 40 });
+    arrowKey("ArrowLeft"); // 已对齐（d=0 排除），不再扰动
+    expect(result.current.rect).toEqual({ x: 100, y: 100, w: 50, h: 40 });
+    // Shift 右移 10：右边缘 160 vs 150 → d=10 超阈值，不吸；左边缘 100 vs 候选右 450 远
+    arrowKey("ArrowRight", true);
+    expect(result.current.rect).toEqual({ x: 110, y: 100, w: 50, h: 40 });
+  });
+
+  it("arrows are ignored outside the selected phase and never block Escape/Enter", () => {
+    const onConfirm = vi.fn();
+    const { result } = renderHook(() => useSelection({
+      width: 1000, height: 600,
+      bounds: { x: 0, y: 0, w: 1000, h: 600 },
+      onConfirm,
+    }));
+    // idle 态：方向键不产生 rect、不 preventDefault（事件保持可取消能力）
+    const idle = new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true });
+    act(() => window.dispatchEvent(idle));
+    expect(idle.defaultPrevented).toBe(false);
+    expect(result.current.rect).toBeNull();
+    // selected 态方向键被消费（preventDefault），随后 Escape 仍正常取消（分支顺序）
+    dragTo(result, 100, 100);
+    const sel = new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true });
+    act(() => window.dispatchEvent(sel));
+    expect(sel.defaultPrevented).toBe(true);
+    expect(result.current.rect).toEqual({ x: 99, y: 100, w: 50, h: 40 });
+    arrowKey("Escape");
+    expect(result.current.phase).toBe("idle");
+    expect(result.current.rect).toBeNull();
   });
 });

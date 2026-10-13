@@ -1720,6 +1720,8 @@ dependencies = [
  "arboard",
  "block2",
  "chrono",
+ "core-foundation",
+ "core-graphics",
  "hawksnap-core",
  "hawksnap-platform-mac",
  "objc2-app-kit",

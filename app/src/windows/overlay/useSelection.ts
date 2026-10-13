@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { nudgeRect, snapRect, type Rect } from "./geometry";
 
-export type SelRect = { x: number; y: number; w: number; h: number };
+// 与 geometry::Rect 结构全同；保留 SelRect 名字供既有页面/测试引用。
+export type SelRect = Rect;
 export type Phase = "idle" | "dragging" | "selected";
 // 确认动作：Enter/双击缺省复制；保存是浮条上的显式按钮（Plan B Task 3 语义裁定）。
 export type ConfirmAction = "copy" | "save";
@@ -9,6 +11,10 @@ type Point = { clientX: number; clientY: number };
 
 export function useSelection(opts: {
   width: number; height: number;
+  // Task 4：磁吸候选（display 本地坐标）与夹取边界。bounds 缺省（display 未到）时
+  // 方向键不移动选区；candidatesRef 缺省时只 nudge 不磁吸。
+  candidatesRef?: { current: Rect[] };
+  bounds?: Rect;
   onConfirm?: (r: SelRect, action: ConfirmAction) => void; onCancel?: () => void;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
@@ -67,12 +73,35 @@ export function useSelection(opts: {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Task 4 方向键微调：必须先于 Escape/Enter 判断，且仅在 selected 态生效——
+      // 拖拽中/空闲的方向键一律忽略（不 preventDefault，不改状态）。preventDefault
+      // 阻止方向键的默认滚动/焦点移动；return 防止同一按键再落进 Escape/Enter 分支。
+      if (phase === "selected" && e.key.startsWith("Arrow")) {
+        e.preventDefault();
+        const bounds = opts.bounds;
+        if (bounds) {
+          const step = e.shiftKey ? 10 : 1;
+          const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+          const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+          // 先 nudge（夹取进 bounds），再 snap（最近单边 8px）；snap 的跨边吸附可能把
+          // 选区推出 bounds 至多一个阈值，末尾再夹一次（位移 0 的 nudgeRect 即纯夹取）。
+          setRect((r) => {
+            if (!r) return r;
+            const snapped = snapRect(
+              nudgeRect(r, dx, dy, bounds),
+              opts.candidatesRef?.current ?? [], 8,
+            );
+            return nudgeRect(snapped, 0, 0, bounds);
+          });
+        }
+        return;
+      }
       if (e.key === "Escape") cancel();
       if (e.key === "Enter") confirm();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cancel, confirm]);
+  }, [cancel, confirm, phase, opts]);
 
   return { phase, rect, pointerHandlers, confirm, cancel, reset };
 }

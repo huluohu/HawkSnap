@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
 import { useSelection, type SelRect, type ConfirmAction } from "./useSelection";
+import type { Rect } from "./geometry";
 import { barPosition } from "./actionBar";
 
 type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string };
@@ -52,11 +53,18 @@ export default function OverlayWindow() {
   // 用户新触发一轮会复用本窗口，旧链的迟到延续若不拦截，会用 emit_capture_done 把新一轮
   // 刚 show 的窗口藏掉（用户看到窗口闪现即消失），其失败也会误报在新一轮上。
   const flowRef = useRef(0);
+  // Task 4 磁吸候选（display 本地坐标）：每轮 payload 到达时经 snap_candidates 拉取一次
+  // （窗口在两轮之间会变化，必须逐轮刷新），首帧置空避免用到上一轮的陈旧候选。
+  const candidatesRef = useRef<Rect[]>([]);
 
   // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用。
   // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
   const { phase, rect, pointerHandlers, confirm, reset } = useSelection({
     width: display?.width ?? 0, height: display?.height ?? 0,
+    // bounds = 本 display 的逻辑边界（选区坐标是 display 本地系，故 x/y 恒为 0——
+    // payload 的 display.x/y 是全局多屏坐标，直接用会破坏副屏上的夹取）
+    bounds: display ? { x: 0, y: 0, w: display.width, h: display.height } : undefined,
+    candidatesRef,
     onConfirm: async (r: SelRect, action: ConfirmAction) => {
       if (!display) return;
       const myFlow = flowRef.current;
@@ -99,6 +107,28 @@ export default function OverlayWindow() {
         reset();                   // 新一轮捕获：清选区与 in-flight 守卫
         flowRef.current += 1;      // 代际自增：作废所有在途旧 confirm 链（见 flowRef 注）
         shownRef.current = false;  // 每轮捕获重发 overlay-shown（见上方 shownRef 注）
+        // Task 4：每轮流程拉取一次窗口候选（snap_candidates 返回全局逻辑坐标）。
+        // 先置空再异步填充；迟到响应（flow 已推进）不得覆盖新一轮的候选。
+        candidatesRef.current = [];
+        const flow = flowRef.current;
+        void invoke<Rect[]>("snap_candidates", { displayId: mine.displayId })
+          .then((rects) => {
+            if (flowRef.current !== flow) return;
+            // 按 display 边界做交集过滤（Rust 侧返回全屏窗口，只有前端知道自身 display），
+            // 再换算为 display 本地坐标（与选区/磁吸同一坐标系）；display 边界本身
+            // 首位加入，屏幕四边即可磁吸（geometry.test.ts 的语义）。
+            candidatesRef.current = [
+              { x: 0, y: 0, w: mine.width, h: mine.height },
+              ...rects
+                .filter((r) => r.x < mine.x + mine.width && r.x + r.w > mine.x
+                  && r.y < mine.y + mine.height && r.y + r.h > mine.y)
+                .map((r) => ({ x: r.x - mine.x, y: r.y - mine.y, w: r.w, h: r.h })),
+            ];
+          })
+          .catch(() => {
+            if (flowRef.current !== flow) return;
+            candidatesRef.current = []; // 拉取失败静默降级：仍可 nudge，只是不磁吸
+          });
       }
     }).then((un) => {
       if (disposed) un();

@@ -12,7 +12,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture,
             overlay::cancel_capture, overlay::emit_capture_done,
-            overlay::hotkey_error
+            overlay::hotkey_error, overlay::snap_candidates
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
