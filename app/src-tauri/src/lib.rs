@@ -2,6 +2,7 @@ mod commands;
 mod idle_reaper;
 mod overlay;
 mod perf;
+mod settings;
 mod single_instance;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -15,7 +16,8 @@ pub fn run() {
             overlay::cancel_capture, overlay::emit_capture_done,
             overlay::hotkey_error, overlay::snap_candidates,
             overlay::start_delayed_capture, overlay::cancel_delayed_capture,
-            overlay::countdown_remaining
+            overlay::countdown_remaining,
+            settings::get_settings, settings::set_settings
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
