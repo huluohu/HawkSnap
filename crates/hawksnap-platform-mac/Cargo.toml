@@ -10,3 +10,10 @@ workspace = true
 hawksnap-core.workspace = true
 xcap = "0.4"
 image.workspace = true
+
+# Task 5 AX 悬停探测：AX 裸 extern 需要的 CF 类型托管（core-foundation）与
+# CGPoint/CGSize 几何类型（core-graphics）。两 crate 均已在依赖树（app Task 4、xcap），
+# 版本一致，不引入新版本解析。
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"
+core-foundation = "0.10"

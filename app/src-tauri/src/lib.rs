@@ -52,6 +52,13 @@ pub fn run() {
                 eprintln!("[hawksnap] 媒体键监听注册失败: {err}");
             }
 
+            // 智能吸附悬停探测（Plan B Task 5）：辅助功能未授予时整条链路缺席（不装监听、
+            // 不弹窗，拖拽框选不受影响）；注册失败只 eprintln，绝不阻塞启动。
+            #[cfg(target_os = "macos")]
+            if let Err(err) = overlay::register_hover_probe(app.handle()) {
+                eprintln!("[hawksnap] 悬停探测注册失败: {err}");
+            }
+
             // 托盘常驻：截图入口 + 退出。
             {
                 use tauri::{

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -6,6 +7,163 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 // 热键注册失败的 pull 通道：setup 阶段的 hawk://hotkey-error emit 早于前端 listen 注册，
 // 必丢；错误同时落入此静态，前端挂载时经 hotkey_error 命令拉取补显（读取即清除）。
 static HOTKEY_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+// —— Plan B Task 5：智能吸附 AX 悬停探测 ——
+
+/// 悬停探测总闸：是否有任一覆盖层可见。start_capture_flow 在窗口就绪后置 true；
+/// hide_overlay 在隐藏后确认无任何可见覆盖层时落 false。悬停 handler 首行检查此门——
+/// 覆盖层全隐时空转成本趋近于零（一次原子读即返回），不烧 CPU、不做 AX 查询。
+pub(crate) static ANY_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+/// hawk://hover payload：Some = 高亮该元素框（全局逻辑坐标，top-left 原点，含义同
+/// hawksnap_platform_mac::ax::AxFrame）；None = 清除高亮（cursor 下无元素 / 查询失败）。
+/// 字段均为单词、无需 rename，derive 保持与既有 payload（DisplayPayloadForTest 等）一致。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AxFrameJson {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub role: String,
+}
+
+impl From<hawksnap_platform_mac::ax::AxFrame> for AxFrameJson {
+    fn from(f: hawksnap_platform_mac::ax::AxFrame) -> Self {
+        AxFrameJson { x: f.x, y: f.y, w: f.w, h: f.h, role: f.role }
+    }
+}
+
+/// Plan B Task 5：智能吸附 AX 悬停探测注册。
+///
+/// 辅助功能未授予 → 整条链路缺席（裁定 1）：eprintln + `Ok(())`，不装监听、不弹授权窗，
+/// 桌面上不留任何提示；拖拽框选与窗口级磁吸不受影响。
+/// 必须在主线程调用（事件监听挂在 AppKit 事件循环上，与 register_media_key_f1 同）。
+#[cfg(target_os = "macos")]
+pub fn register_hover_probe(app: &AppHandle) -> Result<(), String> {
+    if !hawksnap_platform_mac::ax::ax_trusted() {
+        eprintln!("[hawksnap] 未授予辅助功能：悬停元素高亮不可用（拖拽框选不受影响）");
+        return Ok(());
+    }
+    hover::install_hover_monitors(app);
+    Ok(())
+}
+
+/// 悬停探测监听（macOS 专属，与 Task 13 媒体键监听同一 NSEvent 模式）。
+#[cfg(target_os = "macos")]
+mod hover {
+    use super::AppHandle;
+    use std::ptr::NonNull;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// 16ms 节流 ≈ 60fps，与覆盖层重绘节奏契合；同时限定内联 AX 同步查询的成本上限
+    /// （裁定 2：查询 inline 在 handler 主线程做，绝不 per-event spawn 线程）。
+    const THROTTLE: Duration = Duration::from_millis(16);
+
+    /// 上次发射时刻（poison 容忍与 HOTKEY_ERROR 同款）。
+    static LAST_HOVER: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// NSEventMaskMouseMoved = 1 << 5。
+    const NSEVENT_MASK_MOUSE_MOVED: u64 = 1 << 5;
+
+    /// 安装全局 + 本地两个 mouseMoved 监听，token 泄漏保活（同 media 监听，永不 remove）。
+    ///
+    /// 为何本地监听不可省（对 brief「全局监听」的必要补充，已在任务报告登记为适配）：
+    /// NSEvent 全局监听按定义不投递「发往本应用的事件」；而悬停探测恰在覆盖层可见时
+    /// 工作，此时全屏命中本应用窗口（拖拽框选就靠这些事件），只有本地监听能看到。
+    /// 两个监听的 handler 都在主线程执行，共用同一 hover_tick 主体。
+    pub(super) fn install_hover_monitors(app: &AppHandle) {
+        use block2::RcBlock;
+        use objc2_app_kit::NSEvent;
+
+        // 全局监听：光标在其他应用窗口上时的移动（覆盖层尚未完成命中/菜单栏等场景）。
+        let app_g = app.clone();
+        let global = RcBlock::new(move |_event: NonNull<NSEvent>| {
+            hover_tick(&app_g);
+        });
+        // objc2 0.6 生成的绑定将此方法标为 safe（监听仅观察、不修改事件）——与 media 同。
+        let global_token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+            objc2_app_kit::NSEventMask(NSEVENT_MASK_MOUSE_MOVED),
+            &global,
+        );
+        if let Some(t) = global_token {
+            // 泄漏监听 token：与进程同寿命（监听常驻，永不 remove）
+            std::mem::forget(t);
+        }
+
+        // 本地监听：光标在本应用窗口（覆盖层）上的移动。返回值契约：必须原样返回事件，
+        // 返回 null 会吞掉事件、拖拽框选直接失效。
+        let app_l = app.clone();
+        let local = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            hover_tick(&app_l);
+            event.as_ptr() // 原样放行（NonNull → 裸指针，不取 null 分支）
+        });
+        // SAFETY: block 返回原事件的有效指针（非 null），满足绑定的 Safety 契约
+        // （"block's return must be a valid pointer or null"——我们绝不返回 null）。
+        let local_token = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                objc2_app_kit::NSEventMask(NSEVENT_MASK_MOUSE_MOVED),
+                &local,
+            )
+        };
+        if let Some(t) = local_token {
+            std::mem::forget(t); // 泄漏保活，同上
+        }
+    }
+
+    /// handler 主体（全局/本地共用）。顺序固定：总闸 → 节流 → 光标 → AX 查询 → emit。
+    /// 在主线程执行；16ms 节流保证 AX 同步查询至多 ~60 次/秒。
+    fn hover_tick(app: &AppHandle) {
+        use std::sync::atomic::Ordering;
+        use tauri::Emitter;
+
+        // 门 1：无覆盖层可见 → 立即返回（空转成本 = 一次原子读 + 一次函数返回）。
+        if !super::ANY_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+            return;
+        }
+        // 门 2：16ms 节流——同一把锁内读旧值 + 写新值，窗口内重复事件直接丢弃。
+        {
+            let mut last = LAST_HOVER.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|t| t.elapsed() < THROTTLE) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        // 门 3：光标位置。CGEventCreate(nil) + CGEventGetLocation：top-left 原点全局逻辑
+        // 坐标，与 AxFrame/AXPosition 同一坐标系。勿用 NSEvent 的 mouseLocation /
+        // locationInWindow（bottom-left 原点——brief 明言的坐标陷阱）。
+        let Some((cx, cy)) = cursor_position() else { return };
+        // AX 查询 inline（裁定 2 的 DECISION）；任何失败 → None，None 同样 emit
+        // （前端以 null 清除高亮）。
+        let frame = hawksnap_platform_mac::ax::element_at_point(cx, cy);
+        let _ = app.emit("hawk://hover", frame.map(super::AxFrameJson::from));
+    }
+
+    /// 当前光标位置（全局逻辑坐标，top-left 原点）。
+    fn cursor_position() -> Option<(f64, f64)> {
+        use core_foundation::base::{CFType, TCFType};
+
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            /// source 传 nil：合成一个携带当前光标位置的事件（Swift `CGEvent(source: nil)`）。
+            fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+            /// 返回事件位置 = 全局显示器坐标（逻辑点，top-left 原点）。
+            fn CGEventGetLocation(event: *const std::ffi::c_void) -> core_graphics::geometry::CGPoint;
+        }
+
+        // SAFETY: CGEventCreate 返回 +1 引用的 CF 对象；先查空（wrap 对 null 会 panic），
+        // 成功则包成 CFType 托管（Drop 即 CFRelease），任何早退路径不泄漏。
+        let ev = unsafe { CGEventCreate(std::ptr::null()) };
+        if ev.is_null() {
+            return None;
+        }
+        let owned = unsafe { CFType::wrap_under_create_rule(ev) };
+        // SAFETY: CGEvent 本就是 CF 类型，仅借用其指针读取位置字段，不改变所有权。
+        let loc = unsafe { CGEventGetLocation(owned.as_CFTypeRef()) };
+        Some((loc.x, loc.y))
+    }
+}
 
 // 仅测试用：镜像 commands::DisplayPayload 的序列化契约（camelCase），供下方契约测试断言
 #[cfg_attr(not(test), allow(dead_code))]
@@ -266,6 +424,9 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
         let _ = win.set_focus();
     }
     crate::perf::mark("overlay_created"); // 覆盖层窗口就绪（build 或复用 show 完成；每轮一次，便于脚本按索引配对）
+    // Plan B Task 5：覆盖层已就绪 → 开启悬停探测总闸（handler 首行检查，见
+    // ANY_OVERLAY_VISIBLE 注）；hide_overlay 在全部隐藏后落下。
+    ANY_OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
     // overlay-ready 在窗口 overlay 路由的前端挂载前可能先到（首次 emit 会丢）。
     // 简化实现：共发 3 次、间隔 150ms，前端以收到的最后一次为准（Task 9 契约）。
     // 重复发送放在独立线程，避免热键处理被拖慢 450ms。
@@ -303,8 +464,19 @@ pub async fn emit_capture_done(app: AppHandle, display_id: u64, outcome: command
 /// 异步运行时线程执行（非主线程），hide() 是投递给主线程事件循环的消息，安全
 /// （close 须避开主线程，见 register_hotkeys 注；此处本就非主线程，hide 更无此顾虑）。
 fn hide_overlay(app: &AppHandle, display_id: u64) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(&format!("overlay-{display_id}")) {
+    let label = format!("overlay-{display_id}");
+    if let Some(w) = app.get_webview_window(&label) {
         w.hide().map_err(|e| e.to_string())?;
+    }
+    // Plan B Task 5：该窗口隐藏后若无任何覆盖层仍可见 → 落下悬停总闸（handler 首行短路，
+    // 空转成本归零）。刚 hide 的窗口按已隐藏计——hide 是投递给主线程的异步消息，立即
+    // 查它仍会读到旧值；只实查其余 overlay-* 窗口。与 start_capture_flow 并发的极端竞态
+    // （新流程 store(true) 后旧取消才 store(false)）可自愈：下一轮流程会重新置 true。
+    let any_visible = app.webview_windows().into_iter().any(|(name, w)| {
+        name.starts_with("overlay-") && name != label && w.is_visible().unwrap_or(false)
+    });
+    if !any_visible {
+        ANY_OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
     }
     Ok(())
 }
@@ -430,6 +602,20 @@ mod tests {
         let r = RectLog { x: 1.5, y: 2.0, w: 300.0, h: 4.0 };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(s, r#"{"x":1.5,"y":2.0,"w":300.0,"h":4.0}"#);
+    }
+
+    #[test]
+    fn hover_payload_serializes_frame_or_null() {
+        // Task 5 契约：hawk://hover payload = Option<AxFrameJson>，扁平 x/y/w/h/role
+        // 键（camelCase 对单词字段是无操作，断言防误改）；None 必须序列化为 null——
+        // 前端以 null 清除高亮。
+        let some = serde_json::to_string(&Some(AxFrameJson {
+            x: 1.0, y: 2.0, w: 3.0, h: 4.0, role: "AXButton".into(),
+        }))
+        .unwrap();
+        assert_eq!(some, r#"{"x":1.0,"y":2.0,"w":3.0,"h":4.0,"role":"AXButton"}"#);
+        let none = serde_json::to_string(&None::<AxFrameJson>).unwrap();
+        assert_eq!(none, "null");
     }
 }
 

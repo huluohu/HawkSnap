@@ -1,6 +1,8 @@
 // edition 2021 下 crate 自身名字不在作用域内，别名以支持测试中 `hawksnap_platform_mac::` 路径。
 extern crate self as hawksnap_platform_mac;
 
+pub mod ax;
+
 use hawksnap_core::capture::{CaptureError, ScreenFrame, ScreenGrabber};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};

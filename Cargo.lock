@@ -1746,6 +1746,8 @@ dependencies = [
 name = "hawksnap-platform-mac"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "core-foundation",
+ "core-graphics",
  "hawksnap-core",
  "image 0.25.10",
  "xcap",
