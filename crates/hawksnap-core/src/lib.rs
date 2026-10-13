@@ -1,4 +1,5 @@
 pub mod geometry;
+pub mod naming;
 
 #[cfg(test)]
 mod smoke_tests {
