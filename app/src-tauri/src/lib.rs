@@ -42,7 +42,10 @@ pub fn run() {
                         "shot" => {
                             let app = app.clone();
                             std::thread::spawn(move || {
-                                let _ = overlay::start_capture_flow(&app);
+                                // 与 F1 热键路径同口径：失败走 hawk://capture-error，不静默吞掉
+                                if let Err(e) = overlay::start_capture_flow(&app) {
+                                    let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                                }
                             });
                         }
                         "quit" => app.exit(0),
