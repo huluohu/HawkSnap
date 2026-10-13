@@ -97,6 +97,45 @@ mod tests {
     }
 }
 
+/// RGBA → JPEG（有损，无 alpha：编码前先转 RGB8）。quality clamp 1..=100。
+/// 只在保存路径调用（settings.output_format == "jpeg" 时）。
+pub fn rgba_to_jpeg(rgba: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, CropError> {
+    let q = quality.clamp(1, 100);
+    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec()).ok_or(CropError::Decode)?;
+    let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8(); // JPEG 无 alpha
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut std::io::Cursor::new(&mut out), q)
+        .encode_image(&image::DynamicImage::ImageRgb8(rgb))
+        .map_err(|_| CropError::Encode)?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod rgba_to_png_tests {
+    use super::*;
+
+    fn solid_rgba(w: u32, h: u32, px: [u8; 4]) -> Vec<u8> {
+        vec![px[0], px[1], px[2], px[3]].repeat((w * h) as usize)
+    }
+
+    #[test]
+    fn jpeg_roundtrips_dimensions() {
+        let rgba = solid_rgba(4, 3, [200, 100, 50, 255]);
+        let jpeg = rgba_to_jpeg(&rgba, 4, 3, 90).unwrap();
+        let img = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((img.width(), img.height()), (4, 3));
+    }
+
+    #[test]
+    fn jpeg_quality_clamps_to_range() {
+        // quality 0 与 255 越界：clamp 后都必须成功编码（不 panic 且输出非空）
+        let rgba = solid_rgba(4, 3, [1, 2, 3, 255]);
+        let lo = rgba_to_jpeg(&rgba, 4, 3, 0).unwrap();
+        let hi = rgba_to_jpeg(&rgba, 4, 3, 255).unwrap();
+        assert!(!lo.is_empty() && !hi.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod rgba_tests {
     use super::*;

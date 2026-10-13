@@ -32,15 +32,17 @@ pub fn to_physical_rect(logical: &Rect, scale: f64) -> Rect {
     }
 }
 
-pub fn save_path_for(dir: &std::path::Path, app_name: &str) -> std::path::PathBuf {
+pub fn save_path_for(dir: &std::path::Path, app_name: &str, ext: &str) -> std::path::PathBuf {
     let now = chrono::Local::now();
     let ctx = NamingCtx {
         app: app_name.to_string(),
         date: now.format("%Y-%m-%d").to_string(),
         time: now.format("%H%M%S").to_string(),
     };
-    let name = expand("{app} {date} {time}", &ctx, |n| dir.join(format!("{n}.png")).exists());
-    dir.join(format!("{name}.png"))
+    let name = expand(&format!("{{app}} {{date}} {{time}}"), &ctx, |n| {
+        dir.join(format!("{n}.{ext}")).exists()
+    });
+    dir.join(format!("{name}.{ext}"))
 }
 
 #[tauri::command]
@@ -105,7 +107,7 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
 }
 
 #[tauri::command]
-pub async fn finish_capture(req: FinishReq) -> Result<CaptureOutcome, String> {
+pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOutcome, String> {
     // Task 11 评审 Finding 1：前端 invoke 即确认时刻，在函数首行打点（stage: confirm）。
     // G3 的确认→剪贴板耗时 = clipboard_done - confirm；旧口径 overlay_shown→clipboard_done
     // 混入了人工框选时间，无法作为 ≤100ms 目标的证据。
@@ -134,14 +136,29 @@ pub async fn finish_capture(req: FinishReq) -> Result<CaptureOutcome, String> {
         // 报“数据不齐”——属预期守护而非缺陷。
         crate::perf::mark("clipboard_done");
     }
-    // 4) 保存：PNG 编码只发生在保存路径
+    // 4) 保存：编码只发生在保存路径；格式/质量来自设置（C2）。每次读小 JSON 文件
+    // （µs 级）——裁定 2：不为缓存引状态，profile 有实测成本再缓存。
     let mut saved_to = None;
     if req.save {
+        let settings = crate::settings::Settings::load(&app);
         let dir = dirs_picture_dir().ok_or("no picture dir")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let path = save_path_for(&dir, &frontmost_app_name().unwrap_or_else(|| "HawkSnap".into()));
-        let png = rgba_to_png(&cropped, physical.w, physical.h).map_err(|e| e.to_string())?;
-        std::fs::write(&path, &png).map_err(|e| e.to_string())?;
+        let (bytes, ext) = if settings.output_format == "jpeg" {
+            (
+                hawksnap_core::crop::rgba_to_jpeg(
+                    &cropped, physical.w, physical.h, settings.jpeg_quality,
+                )
+                .map_err(|e| e.to_string())?,
+                "jpeg",
+            )
+        } else {
+            (
+                rgba_to_png(&cropped, physical.w, physical.h).map_err(|e| e.to_string())?,
+                "png",
+            )
+        };
+        let path = save_path_for(&dir, &frontmost_app_name().unwrap_or_else(|| "HawkSnap".into()), ext);
+        std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
         saved_to = Some(path.to_string_lossy().into_owned());
     }
     Ok(CaptureOutcome { copied, saved_to })
@@ -230,11 +247,14 @@ mod tests {
     fn save_uses_template_and_avoids_collision() {
         let dir = std::env::temp_dir().join(format!("hs-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let first = save_path_for(&dir, "Safari");
+        let first = save_path_for(&dir, "Safari", "png");
         assert!(first.to_string_lossy().contains("Safari"));
+        assert!(first.to_string_lossy().ends_with(".png"));
         std::fs::write(&first, b"1").unwrap();
-        let second = save_path_for(&dir, "Safari");
+        let second = save_path_for(&dir, "Safari", "png");
         assert_ne!(first, second, "重名时必须生成不同文件名");
+        let jpeg = save_path_for(&dir, "Safari", "jpeg");
+        assert!(jpeg.to_string_lossy().ends_with(".jpeg"), "ext 参数决定扩展名");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
