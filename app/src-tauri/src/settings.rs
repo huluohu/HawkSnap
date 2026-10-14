@@ -14,6 +14,7 @@ pub struct Settings {
     pub save_dir: Option<String>, // None → ~/Pictures/HawkSnap
     pub launch_at_login: bool,    // 默认 false
     pub appearance: String,       // "system"|"light"|"dark"，默认 "system"
+    pub language: String,         // "system"|"zh-CN"|"en-US"，默认 "system"（D1 i18n）
 }
 
 impl Default for Settings {
@@ -27,6 +28,7 @@ impl Default for Settings {
             save_dir: None,
             launch_at_login: false,
             appearance: "system".into(),
+            language: "system".into(),
         }
     }
 }
@@ -84,6 +86,10 @@ impl Settings {
         }
         if self.save_dir.as_deref().is_some_and(|d| d.trim().is_empty()) {
             self.save_dir = None;
+        }
+        // D1：语言白名单归一——未知值（旧文件手改/脏数据）一律回 "system"（跟随系统）。
+        if self.language != "zh-CN" && self.language != "en-US" {
+            self.language = "system".into();
         }
         self
     }
@@ -185,6 +191,7 @@ mod tests {
         assert_eq!(s.save_dir, None);
         assert!(!s.launch_at_login);
         assert_eq!(s.appearance, "system");
+        assert_eq!(s.language, "system");
     }
 
     #[test]
@@ -200,6 +207,7 @@ mod tests {
             save_dir: Some("/tmp/shots".into()),
             launch_at_login: true,
             appearance: "dark".into(),
+            language: "zh-CN".into(),
         };
         s.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();
@@ -216,6 +224,13 @@ mod tests {
         assert_eq!(base().sanitized().output_format, "png", "非 jpeg → png");
         let jpeg = Settings { output_format: "jpeg".into(), ..base() };
         assert_eq!(jpeg.sanitized().output_format, "jpeg", "合法 jpeg 保留");
+        // D1：语言白名单——合法值保留，未知值归一 "system"。
+        let zh = Settings { language: "zh-CN".into(), ..base() };
+        assert_eq!(zh.sanitized().language, "zh-CN", "合法 zh-CN 保留");
+        let en = Settings { language: "en-US".into(), ..base() };
+        assert_eq!(en.sanitized().language, "en-US", "合法 en-US 保留");
+        let dirty = Settings { language: "fr-FR".into(), ..base() };
+        assert_eq!(dirty.sanitized().language, "system", "未知语言 → system");
     }
 
     // —— C7：set_settings 应用管线 ——

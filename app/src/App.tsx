@@ -1,6 +1,13 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  t,
+  setLanguage,
+  getLanguage,
+  subscribe,
+  type LanguageSetting,
+} from "./lib/i18n";
 
 // —— 设置模型（C7）：与 Rust Settings（serde camelCase）逐字段对齐 ——
 interface Settings {
@@ -12,6 +19,7 @@ interface Settings {
   saveDir: string | null; // null/空 = 默认 ~/Pictures/HawkSnap
   launchAtLogin: boolean;
   appearance: string; // "system" | "light" | "dark"
+  language: string; // "system" | "zh-CN" | "en-US"（服务端 sanitize 兜底，D1）
 }
 
 // 表单态：saveDir 归一为 string（null ↔ "" 双向转换），便于受控输入。
@@ -26,6 +34,7 @@ const DEFAULTS: SettingsForm = {
   saveDir: "",
   launchAtLogin: false,
   appearance: "system",
+  language: "system",
 };
 
 const toForm = (s: Settings): SettingsForm => ({ ...s, saveDir: s.saveDir ?? "" });
@@ -37,23 +46,14 @@ const toPayload = (f: SettingsForm): Settings => ({
 type HotkeySlot = "hotkeyCapture" | "hotkeyPin" | "hotkeyRecord";
 
 // 热键注册失败载荷（D0-⑤）：与后端 HotkeyError（serde camelCase）对齐——kind 供横幅
-// 归因（截图/贴图/录屏），message 为人类可读文案（注册失败原因或媒体键降级提示）。
+// 归因，message 为人类可读文案（注册失败原因或媒体键降级提示）。kind 的展示名走
+// t(`hotkey.kind.${kind}`)（唯一约定的动态 key 族，单测断言双语在盘——检查器扫不到
+// 模板字面量，scripts/check-i18n.mjs 对此类调用报 warn 不 fail）。
 type HotkeyKind = "capture" | "pin" | "record";
 interface HotkeyErrorPayload {
   kind: HotkeyKind;
   message: string;
 }
-const HOTKEY_KIND_LABEL: Record<HotkeyKind, string> = {
-  capture: "截图",
-  pin: "贴图",
-  record: "录屏",
-};
-
-const HOTKEY_SLOTS: Array<{ key: HotkeySlot; label: string }> = [
-  { key: "hotkeyCapture", label: "开始捕获" },
-  { key: "hotkeyPin", label: "贴图" },
-  { key: "hotkeyRecord", label: "录屏（占位）" },
-];
 
 // 纯修饰键按下（无主键）：不算组合，继续等待。
 const MODIFIER_ONLY_KEYS = new Set([
@@ -82,6 +82,8 @@ function comboFromEvent(e: KeyboardEvent): string | null {
 }
 
 function App() {
+  // 订阅 i18n 语言态：语言切换触发本组件重渲染，全部 t() 文案即时换新（不重载）。
+  useSyncExternalStore(subscribe, getLanguage);
   const [hotkeyError, setHotkeyError] = useState<HotkeyErrorPayload | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [comingSoon, setComingSoon] = useState<string | null>(null);
@@ -154,9 +156,13 @@ function App() {
   }, []);
 
   // 挂载即拉取设置填充表单（面板由 idle_reaper 销毁后重建时会重挂载 → 总能拿到最新值）。
+  // 语言（D1）：i18n 模块默认跟随系统，显式设置以此处为准对齐（本窗口与覆盖层窗口同源）。
   useEffect(() => {
     invoke<Settings>("get_settings")
-      .then((s) => setForm(toForm(s)))
+      .then((s) => {
+        setForm(toForm(s));
+        setLanguage(s.language as LanguageSetting);
+      })
       .catch((e) => setSettingsError(String(e)));
   }, []);
 
@@ -194,13 +200,14 @@ function App() {
       form.hotkeyPin.trim() === "" ||
       form.hotkeyRecord.trim() === ""
     ) {
-      setSettingsError("热键不能为空");
+      setSettingsError(t("settings.error.emptyHotkey"));
       return;
     }
     setSaving(true);
     invoke<Settings>("set_settings", { s: toPayload(form) })
       .then((effective) => {
         setForm(toForm(effective)); // 回显服务端生效值（sanitize 后）
+        setLanguage(effective.language as LanguageSetting); // 语言随保存即时生效
         setSettingsError(null);
         setSaveOk(true);
         window.setTimeout(() => setSaveOk(false), 1600);
@@ -219,12 +226,15 @@ function App() {
     <main className="container">
       {hotkeyError && (
         <div role="alert" style={banner}>
-          {HOTKEY_KIND_LABEL[hotkeyError.kind]} 热键注册失败：{hotkeyError.message}
+          {t("banner.hotkeyError", {
+            kind: t(`hotkey.kind.${hotkeyError.kind}`),
+            message: hotkeyError.message,
+          })}
         </div>
       )}
       {captureError && (
         <div role="alert" style={banner}>
-          截图失败：{captureError}
+          {t("banner.captureError", { message: captureError })}
         </div>
       )}
       {comingSoon && (
@@ -234,22 +244,32 @@ function App() {
       )}
       {settingsError && (
         <div role="alert" style={banner}>
-          设置保存失败：{settingsError}
+          {t("banner.settingsError", { message: settingsError })}
         </div>
       )}
       <h1>HawkSnap</h1>
       <section style={{ display: "flex", gap: 12, justifyContent: "center", margin: "16px 0" }}>
-        <button style={entryBtn} onClick={() => trigger("capture")}>截图 ({form.hotkeyCapture})</button>
-        <button style={entryBtn} onClick={() => trigger("pin")}>贴图 ({form.hotkeyPin})</button>
-        <button style={entryBtn} disabled title="历史功能将在后续版本提供">历史（即将开放）</button>
+        <button style={entryBtn} onClick={() => trigger("capture")}>
+          {t("panel.capture", { key: form.hotkeyCapture })}
+        </button>
+        <button style={entryBtn} onClick={() => trigger("pin")}>
+          {t("panel.pin", { key: form.hotkeyPin })}
+        </button>
+        <button style={entryBtn} disabled title={t("panel.historyTip")}>
+          {t("panel.history")}
+        </button>
       </section>
       <section style={settingsSection}>
-        <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>设置</h2>
+        <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>{t("settings.title")}</h2>
 
         <div style={fieldRow}>
-          <label style={fieldLabel}>热键</label>
+          <label style={fieldLabel}>{t("settings.hotkeyLabel")}</label>
           <div style={{ display: "grid", gap: 6 }}>
-            {HOTKEY_SLOTS.map(({ key, label }) => (
+            {([
+              { key: "hotkeyCapture" as const, label: t("settings.slot.capture") },
+              { key: "hotkeyPin" as const, label: t("settings.slot.pin") },
+              { key: "hotkeyRecord" as const, label: t("settings.slot.record") },
+            ]).map(({ key, label }) => (
               <div key={key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ width: 90, color: "#666" }}>{label}</span>
                 <button
@@ -260,7 +280,7 @@ function App() {
                   {form[key]}
                 </button>
                 {capturing === key && (
-                  <span style={{ color: "#396cd8" }}>按下组合键…（Esc 取消）</span>
+                  <span style={{ color: "#396cd8" }}>{t("settings.pressCombo")}</span>
                 )}
               </div>
             ))}
@@ -268,7 +288,7 @@ function App() {
         </div>
 
         <div style={fieldRow}>
-          <label style={fieldLabel}>输出格式</label>
+          <label style={fieldLabel}>{t("settings.outputFormat")}</label>
           <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
             <label>
               <input
@@ -290,7 +310,7 @@ function App() {
             </label>
             {form.outputFormat === "jpeg" && (
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                质量 {form.jpegQuality}
+                {t("settings.quality", { n: form.jpegQuality })}
                 <input
                   type="range"
                   min={1}
@@ -304,13 +324,13 @@ function App() {
         </div>
 
         <div style={fieldRow}>
-          <label style={fieldLabel} htmlFor="save-dir">保存目录</label>
+          <label style={fieldLabel} htmlFor="save-dir">{t("settings.saveDir")}</label>
           <div style={{ display: "flex", gap: 8 }}>
             <input
               id="save-dir"
               type="text"
               style={{ ...entryBtn, flex: 1, cursor: "text" }}
-              placeholder="默认：~/Pictures/HawkSnap"
+              placeholder={t("settings.saveDirPlaceholder")}
               value={form.saveDir}
               onChange={(e) => setField("saveDir", e.target.value)}
             />
@@ -318,15 +338,15 @@ function App() {
               type="button"
               style={entryBtn}
               onClick={() => setField("saveDir", "")}
-              title="清空 = 使用默认目录"
+              title={t("settings.restoreDefaultTip")}
             >
-              恢复默认
+              {t("settings.restoreDefault")}
             </button>
           </div>
         </div>
 
         <div style={fieldRow}>
-          <label style={fieldLabel} htmlFor="launch-at-login">开机自启</label>
+          <label style={fieldLabel} htmlFor="launch-at-login">{t("settings.launchAtLogin")}</label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               id="launch-at-login"
@@ -334,12 +354,12 @@ function App() {
               checked={form.launchAtLogin}
               onChange={(e) => setField("launchAtLogin", e.target.checked)}
             />
-            登录时自动启动 HawkSnap
+            {t("settings.launchAtLoginDesc")}
           </label>
         </div>
 
         <div style={fieldRow}>
-          <span style={fieldLabel}>外观</span>
+          <span style={fieldLabel}>{t("settings.appearance")}</span>
           <div>
             {(["system", "light", "dark"] as const).map((mode) => (
               <label key={mode} style={{ marginRight: 16 }}>
@@ -349,27 +369,38 @@ function App() {
                   checked={form.appearance === mode}
                   onChange={() => setField("appearance", mode)}
                 />{" "}
-                {mode === "system" ? "跟随系统" : mode === "light" ? "浅色" : "深色"}
+                {mode === "system"
+                  ? t("settings.appearanceSystem")
+                  : mode === "light"
+                    ? t("settings.appearanceLight")
+                    : t("settings.appearanceDark")}
               </label>
             ))}
           </div>
         </div>
 
         <div style={fieldRow}>
-          <label style={fieldLabel} htmlFor="language">语言</label>
+          <label style={fieldLabel} htmlFor="language">{t("settings.language")}</label>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <select id="language" style={{ ...entryBtn }} disabled>
-              <option>中文</option>
+            {/* D1：语言选择随表单保存生效（保存后回显生效值并即时切换文案）。 */}
+            <select
+              id="language"
+              style={{ ...entryBtn }}
+              value={form.language}
+              onChange={(e) => setField("language", e.target.value)}
+            >
+              <option value="system">{t("settings.langSystem")}</option>
+              <option value="zh-CN">{t("settings.langZh")}</option>
+              <option value="en-US">{t("settings.langEn")}</option>
             </select>
-            <span style={planDBadge}>Plan D</span>
           </div>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
           <button type="button" style={{ ...entryBtn, padding: "8px 32px" }} onClick={save} disabled={saving}>
-            {saving ? "保存中…" : "保存"}
+            {saving ? t("settings.saving") : t("settings.save")}
           </button>
-          {saveOk && <span style={{ color: "#3c763d" }}>已保存</span>}
+          {saveOk && <span style={{ color: "#3c763d" }}>{t("settings.saved")}</span>}
         </div>
       </section>
     </main>
@@ -411,13 +442,5 @@ const fieldRow: CSSProperties = {
 };
 
 const fieldLabel: CSSProperties = { color: "#666", paddingTop: 6 };
-
-const planDBadge: CSSProperties = {
-  fontSize: 11,
-  padding: "1px 6px",
-  border: "1px solid #bbb",
-  borderRadius: 8,
-  color: "#888",
-};
 
 export default App;

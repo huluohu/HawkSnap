@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
+import { t, setLanguage, type LanguageSetting } from "../../lib/i18n";
 import { useSelection, type SelRect, type ConfirmAction } from "./useSelection";
 import type { Rect } from "./geometry";
 import { toLocalHover, type HoverFrame } from "./hover";
@@ -47,6 +48,13 @@ async function fetchRaw(url: string): Promise<ArrayBuffer> {
 export default function OverlayWindow() {
   const [display, setDisplay] = useState<Display | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // 语言（D1）：覆盖层是独立 webview，i18n 模块态默认跟随系统；显式设置需挂载时拉取
+  // 一次 settings 对齐（与主窗口同源）。失败静默——保持系统语言兜底即可用。
+  useEffect(() => {
+    invoke<{ language: string }>("get_settings")
+      .then((s) => setLanguage(s.language as LanguageSetting))
+      .catch(() => {});
+  }, []);
   // 覆盖层窗口常驻复用（Plan B Task 1）：页面生命周期跨越多轮捕获，此标志每轮 payload
   // 到达时复位，保证 hawk://overlay-shown 每轮捕获重发一次（bench 门闩按轮与 hotkey 配对）。
   const shownRef = useRef(false);
@@ -326,16 +334,21 @@ export default function OverlayWindow() {
           <button type="button" onClick={() => confirm("copy")}
             style={{ padding: "4px 12px", background: "#22405F", color: "#FFFFFF",
               border: "1px solid #22405F", borderRadius: 6,
-              fontSize: 13, cursor: "pointer" }}>复制</button>
+              fontSize: 13, cursor: "pointer" }}>{t("overlay.copy")}</button>
           <button type="button" onClick={() => confirm("save")}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
-              fontSize: 13, cursor: "pointer" }}>保存</button>
-          {["贴图", "标注", "OCR", "GIF"].map((t) => (
-            <button key={t} type="button" disabled title="即将推出"
+              fontSize: 13, cursor: "pointer" }}>{t("overlay.save")}</button>
+          {[
+            { id: "pin", label: t("overlay.pin") },
+            { id: "annotate", label: t("overlay.annotate") },
+            { id: "ocr", label: t("overlay.ocr") },
+            { id: "gif", label: t("overlay.gif") },
+          ].map(({ id, label }) => (
+            <button key={id} type="button" disabled title={t("overlay.comingSoon")}
               style={{ padding: "4px 8px", background: "transparent", color: "#D8E2EE",
                 border: "1px solid #22405F", borderRadius: 6, opacity: 0.4,
-                fontSize: 13, cursor: "not-allowed" }}>{t}</button>
+                fontSize: 13, cursor: "not-allowed" }}>{label}</button>
           ))}
         </div>
       )}
