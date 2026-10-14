@@ -6,7 +6,7 @@ HawkSnap 是一款免费、纯本地的轻量级截屏工具，基于 Tauri 2 + 
 
 ## 当前进度
 
-M1 Plan A + Plan B + Plan C 已完成。
+M1 Plan A + Plan B + Plan C + Plan D 已完成，当前版本 0.1.0。
 
 Plan A——F1 截图闭环：
 
@@ -30,11 +30,19 @@ Plan C——贴图、历史与设置：
 - 设置：全局热键自定义（截图 / 贴图 / 录制，修改后立即生效；与其他应用冲突时保存失败并提示）、输出格式 PNG / JPEG（JPEG 可调质量）、保存目录、开机自启、外观（跟随系统 / 浅色 / 深色）、语言（跟随系统 / 中文 / English，保存后即时生效）记忆；界面文案双语覆盖（zh-CN / en-US，key 覆盖率由 CI 门禁断言），Rust 侧文案（托盘/错误串）i18n 归后续版本；
 - GIF 录制热键 F6 为占位，触发后提示「即将推出」。
 
-配套：延迟打点与压测脚本 `scripts/bench-latency.sh`、合成注入基准 `scripts/bench-synth.sh`、空载内存采样 `scripts/sample-mem.sh` 已就位，性能数据（G2 / G3）待运行归档；安装包体积预算 ≤15MB，由 `scripts/check-size.sh` 断言。
+Plan D——i18n、自动更新、权限引导与发布基建：
+
+- i18n 双语：界面文案全量 key 化（zh-CN / en-US），「跟随系统」检测 + 手动覆盖热切换，缺失 key 按回退链降级，CI 门禁断言代码引用与两份词典双向一致；
+- 自动更新：tauri-plugin-updater + Ed25519 签名的 GitHub Releases 更新通道，设置区「自动更新」开关与「检查更新」按钮，坏签名更新包拒绝安装（伪签名集成测试断言）；
+- macOS 权限引导：截图前预检「屏幕录制」权限，未授权时深链系统设置并显示横幅（修复此前 macOS 14+ 未授权时静默返回壁纸画面的缺陷）；
+- 热键单一真源、bench 注入守卫等 Plan C 终审继承项收口；
+- 三平台 CI 矩阵（macOS / Windows / Linux：cargo test + clippy + 前端测试 + i18n 门禁 + 安装包体积断言），打 tag 触发三平台构建发布流水线并组装签名更新 feed。
+
+配套：延迟打点与压测脚本 `scripts/bench-latency.sh`、合成注入基准 `scripts/bench-synth.sh`、空载内存采样 `scripts/sample-mem.sh`、冷启动/开面板仪器 `scripts/bench-g4.sh` 已就位，性能数据（G2 / G3 / G4）待运行归档；安装包体积预算 ≤15MB，由 `scripts/check-size.sh` 断言。
 
 ## 后续计划
 
-见 [docs/superpowers/plans/](docs/superpowers/plans/)（Plan A/B/C 已完成；Plan D（i18n、自动更新、权限引导、CI 矩阵）与后续里程碑在前一计划验收归档后另立文档）。
+见 [docs/superpowers/plans/](docs/superpowers/plans/)（Plan A/B/C/D 已完成，M1 出口 0.1.0；历史面板 UI、GIF 录制、标注 / OCR、Rust 侧文案 i18n 等后续里程碑在前一计划验收归档后另立文档）。
 
 ## 开发环境
 
@@ -74,4 +82,11 @@ macOS 默认把 F1 当作亮度降低键（「将 F1、F2 等键用作标准功�
 
 两者都不满足时，应用启动会给出「提示：」横幅引导（不会静默失效）。
 
-已知问题：macOS 14+ 上若未授予屏幕录制权限，抓屏可能静默返回仅壁纸画面而非报错（权限引导将在后续版本加入）。
+已知问题：macOS 14+ 上若未授予屏幕录制权限，抓屏可能静默返回仅壁纸画面而非报错。Plan D 已加入权限预检与系统设置深链引导（启动及截图时触发）；若引导后仍未生效，请按上文手动授权并重启应用。
+
+## 已知限制
+
+- Windows 版为 beta：仅经三平台 CI 编译验证，实机 E2E 测试待补；
+- 72 小时长时录屏稳定性（G5）自 M2 起测；
+- 错误提示等 Rust 侧文案暂为中文（界面已双语，Rust 侧 i18n 归后续版本）；
+- 热键冲突时仅提示保存失败，不列出占用该热键的其他应用（macOS 无公开 API），自动候选键建议留 M2 评估。

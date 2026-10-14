@@ -10,10 +10,13 @@
 //   windows-x86_64  <- *-setup.exe      （v2 updater 直接分发 NSIS 安装器本体）
 // 语义：任一平台缺失载荷/签名、或多于一份 → exit 1（宁可失败也不出脏 feed；
 // .sig 缺失即「未签名产物不得发布」——与 workflow 的 secrets 硬失败同一防线）。
-// signature 字段 = .sig 全文（minisign 两行格式，untrusted comment + base64），
+// signature 字段 = .sig 全文（单行 base64(minisign 文本)，tauri signer 产物），
 // 仅去首尾空白；url 指向该 tag 的 Release 下载地址。
+// version 取自 --tag（去掉 v 前缀），并与 app/src-tauri/tauri.conf.json 的 version 交叉校验，
+// 不一致即失败——防止 tag 与应用版本漂移出脏 feed。
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const PAYLOADS = [
   { key: "darwin-aarch64", ends: ".app.tar.gz" },
@@ -80,8 +83,19 @@ for (const { key, ends } of PAYLOADS) {
   console.log(`make-latest: ${key} <- ${relative(dist, payload)}`);
 }
 
+const version = tag.slice(1);
+const tauriConf = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../app/src-tauri/tauri.conf.json", import.meta.url)), "utf8"),
+);
+if (tauriConf.version !== version) {
+  console.error(
+    `make-latest: 版本不一致——tag ${tag} 推出 version ${version}，但 tauri.conf.json 为 ${tauriConf.version}`,
+  );
+  process.exit(1);
+}
+
 const latest = {
-  version: tag.slice(1),
+  version,
   notes: `HawkSnap ${tag} — see README for install steps and known limitations.`,
   pub_date: new Date().toISOString(),
   platforms,
