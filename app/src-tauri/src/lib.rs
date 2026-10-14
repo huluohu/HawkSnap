@@ -38,6 +38,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture,
+            commands::debug_log, // DEBUG-PROBE（诊断后移除）：前端生命周期打点通道
             overlay::cancel_capture, overlay::emit_capture_done,
             overlay::hotkey_error, overlay::snap_candidates,
             overlay::start_delayed_capture, overlay::cancel_delayed_capture,
@@ -174,9 +175,11 @@ pub fn run() {
                                 if crate::bench_mode::is_running() {
                                     return;
                                 }
-                                // 与 F1 热键路径同口径：失败走 hawk://capture-error，不静默吞掉
+                                // 与 F1 热键路径同口径：失败走 hawk://capture-error，不静默吞掉。
+                                // emit 前确保主面板存在（懒创建）：启动零窗口且用户未开面板时
+                                // push 事件无窗可显——横幅会静默丢失（panel::show_capture_error）。
                                 if let Err(e) = overlay::start_capture_flow(&app) {
-                                    let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                                    panel::show_capture_error(&app, e);
                                 }
                             });
                         }

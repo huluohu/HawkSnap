@@ -37,6 +37,19 @@ pub fn ensure_main_panel(app: &AppHandle) -> Result<WebviewWindow, String> {
         .map_err(|e| e.to_string())
 }
 
+/// capture-error 的可见投递（spec §9「不静默」的收尾修复）：主面板懒创建（启动零窗口），
+/// 用户从未打开或已关闭面板时，hawk://capture-error 这个 push 事件无窗可显——横幅
+/// 静默丢失，用户只见「什么都没发生」。emit 前先 ensure_main_panel（镜像 F6
+/// coming-soon 模式：调用方均在独立线程，建窗合法；拉起失败仅 eprintln，横幅退化为
+/// push 通道尽力投递——此时至少面板若开着仍能收到）。
+/// 必须在非主线程调用（ensure_main_panel 建 webview 窗口禁主线程，见模块注）。
+pub fn show_capture_error(app: &AppHandle, msg: String) {
+    if let Err(e) = ensure_main_panel(app) {
+        eprintln!("[hawksnap] capture-error 反馈面板拉起失败: {e}");
+    }
+    let _ = tauri::Emitter::emit(app, "hawk://capture-error", msg);
+}
+
 /// 面板入口按钮（C6 最小真实版）：「截图」「贴图」两枚入口与 F1/F2 热键、托盘
 /// 同链路同反馈（失败均 emit hawk://capture-error → 面板横幅）。fire-and-forget：
 /// spawn 后立即返回 Ok，错误经事件通道回流（spec §9 不静默）。
@@ -52,12 +65,13 @@ pub fn panel_trigger(app: AppHandle, action: String) -> Result<(), String> {
                 return;
             }
             if let Err(e) = crate::overlay::start_capture_flow(&app) {
-                let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                // emit 前确保面板存在：面板被关闭后失败横幅本会无窗可显
+                crate::panel::show_capture_error(&app, e);
             }
         }
         "pin" => {
             if let Err(e) = crate::pins::pin_latest(app.clone()) {
-                let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                crate::panel::show_capture_error(&app, e);
             }
         }
         other => {

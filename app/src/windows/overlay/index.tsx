@@ -20,8 +20,22 @@ type Display = { displayId: number; x: number; y: number; width: number; height:
 declare global {
   interface Window {
     __LABEL__?: string;
+    // DEBUG-PROBE（诊断后移除）：Tauri IPC 内部注入存在性探测（测试环境无此字段）
+    __TAURI_INTERNALS__?: unknown;
   }
 }
+
+// DEBUG-PROBE（诊断后移除）：临时诊断通道——fire-and-forget 追加 `overlay: <msg>` 到
+// $TMPDIR/hawksnap-debug.log（Rust 侧 debug_log 命令）。测试环境（jsdom）无
+// __TAURI_INTERNALS__，invoke 会同步抛错 → 整体 try/catch 吞掉；任何失败静默，
+// 诊断通道绝不影响产品链路。模块级定义保证引用稳定，可直接作为 useSelection 的
+// onDebug 传入（不进 useCallback 依赖数组）。
+const dlog = (m: string) => {
+  try {
+    if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) return;
+    void invoke("debug_log", { msg: `overlay: ${m}` }).catch(() => {});
+  } catch { /* 诊断通道静默 */ }
+};
 
 // 冻结帧（原始物理 RGBA）加载：fetch 为主通道；若 WKWebView 对 asset 协议 URL 的 fetch
 // 出现异常，降级 XHR responseType=arraybuffer（两者能力的最低公因数）。字节长度校验
@@ -77,6 +91,12 @@ export default function OverlayWindow() {
   // （绘制按 phase 门控，见重绘 effect）。
   const [hoverRect, setHoverRect] = useState<Rect | null>(null);
 
+  // DEBUG-PROBE（诊断后移除）：挂载打点——页面 JS 是否活着、__LABEL__ 注入是否命中。
+  // 用户 6 轮捕获全有 overlay-shown 但零 confirm 行，此点区分「页面活着」的具体阶段。
+  useEffect(() => {
+    dlog("mounted, label=" + (window.__LABEL__ ?? "none"));
+  }, []);
+
   // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用。
   // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
   const { phase, rect, pointerHandlers, confirm, reset, selectRect } = useSelection({
@@ -85,20 +105,27 @@ export default function OverlayWindow() {
     // payload 的 display.x/y 是全局多屏坐标，直接用会破坏副屏上的夹取）
     bounds: display ? { x: 0, y: 0, w: display.width, h: display.height } : undefined,
     candidatesRef,
+    onDebug: dlog, // DEBUG-PROBE（诊断后移除）：keydown / confirm 守卫打点（见 useSelection）
     onConfirm: async (r: SelRect, action: ConfirmAction) => {
+      dlog(`onConfirm ${action} ${r.x},${r.y} ${r.w}x${r.h}`); // DEBUG-PROBE（诊断后移除）
       if (!display) return;
       const myFlow = flowRef.current;
+      let stage = "finish"; // DEBUG-PROBE（诊断后移除）：catch 里区分 finish/done 哪段失败
       try {
         const outcome = await invoke<{ copied: boolean; savedTo: string | null }>("finish_capture", {
           req: { displayId: display.displayId, rect: r, copy: action === "copy", save: action === "save" },
         });
+        dlog("finish ok"); // DEBUG-PROBE（诊断后移除）
         // 代际守卫：finish_capture 在途期间新一轮 payload 已到（flowRef 已自增）→ 本链
         // 已被作废，绝不 emit_capture_done（否则 hide 掉新一轮刚显示的窗口）。
         if (flowRef.current !== myFlow) return;
         // 发 capture-done 并隐藏本窗口（Rust 侧按 displayId 隐藏，见 Task 9 裁定 2；
         // Plan B Task 1 起常驻复用：隐藏而非关闭，窗口由 start_capture_flow 复用）
+        stage = "done";
         await invoke("emit_capture_done", { displayId: display.displayId, outcome });
+        dlog("done ok"); // DEBUG-PROBE（诊断后移除）
       } catch (err) {
+        dlog((stage === "done" ? "done ERR " : "finish ERR ") + String(err)); // DEBUG-PROBE（诊断后移除）
         // 旧轮链的失败静默吞掉：横幅是全局事件，迟到的失败会误导新一轮的用户
         if (flowRef.current !== myFlow) return;
         // spec §9：失败不允许静默。覆盖层窗口不是横幅宿主，经全局事件把错误送到
@@ -123,11 +150,15 @@ export default function OverlayWindow() {
     listen<Display[]>("hawk://overlay-ready", (e) => {
       const mine = e.payload.find((d) => `overlay-${d.displayId}` === window.__LABEL__);
       if (mine) {
+        dlog("payload flow=" + mine.flow + " round-reset"); // DEBUG-PROBE（诊断后移除）
         // 语言逐轮对齐（评审修正）：覆盖层常驻复用，挂载期同步会被面板后续的语言切换
         // 冻结在旧值——每轮 payload 到达时拉一次 settings（µs 级小 IPC）重设 i18n 态；
         // 与 setDisplay 的先后序无关，谁后到谁触发订阅重渲染，浮条文案必为新语言。
         void invoke<{ language: string }>("get_settings")
-          .then((s) => setLanguage(s.language as LanguageSetting))
+          .then((s) => {
+            setLanguage(s.language as LanguageSetting);
+            dlog("lang=" + s.language); // DEBUG-PROBE（诊断后移除）
+          })
           .catch(() => {});
         // 代数守卫（终审 wave）：旧代迟到 payload 直接丢弃（见 maxFlowRef 注），
         // 绝不 setDisplay / reset。等值放行：同代的三连发补显仍生效。
@@ -212,23 +243,29 @@ export default function OverlayWindow() {
   const clickAwareHandlers = {
     ...pointerHandlers,
     onPointerDown: (e: { clientX: number; clientY: number }) => {
+      dlog(`pdown ${e.clientX},${e.clientY}`); // DEBUG-PROBE（诊断后移除）
       downPointRef.current = { x: e.clientX, y: e.clientY };
       pointerHandlers.onPointerDown(e);
     },
     onPointerUp: (e: { clientX: number; clientY: number }) => {
+      // DEBUG-PROBE（诊断后移除）：pointerup 是否到达 + 到达时的 phase/hover/rect 快照
+      dlog(`pup ${e.clientX},${e.clientY} phase=${phase} hover=${hoverRect ? "yes" : "no"} rect=${rect ? "yes" : "no"}`);
       const down = downPointRef.current;
       downPointRef.current = null;
       if (down
         && Math.abs(e.clientX - down.x) < 4
         && Math.abs(e.clientY - down.y) < 4) {
         if (hoverRect) {
+          dlog("branch selectRect"); // DEBUG-PROBE（诊断后移除）
           selectRect(hoverRect);
           return;
         }
         if (!rect) {
+          dlog("branch reset"); // DEBUG-PROBE（诊断后移除）
           reset();
           return;
         }
+        dlog("branch passthrough (keep rect)"); // DEBUG-PROBE（诊断后移除）
       }
       pointerHandlers.onPointerUp(e);
     },
@@ -339,11 +376,13 @@ export default function OverlayWindow() {
           ...barPosition(rect, display.width, display.height),
           background: "#0D1522", border: "1px solid #22405F", borderRadius: 8,
           padding: "6px 10px", zIndex: 10 }}>
-          <button type="button" onClick={() => confirm("copy")}
+          {/* DEBUG-PROBE（诊断后移除）：onClick 直探——区分「按钮收不到 click」vs
+              「click 到了但 confirm 被守卫拒绝」（后者见 confirm 行的 verdict） */}
+          <button type="button" onClick={() => { dlog("btn click copy"); confirm("copy"); }}
             style={{ padding: "4px 12px", background: "#22405F", color: "#FFFFFF",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.copy")}</button>
-          <button type="button" onClick={() => confirm("save")}
+          <button type="button" onClick={() => { dlog("btn click save"); confirm("save"); }}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.save")}</button>

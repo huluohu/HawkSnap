@@ -208,7 +208,9 @@ pub(crate) fn trigger_capture_flow(app: &AppHandle) {
     let app2 = app.clone();
     std::thread::spawn(move || {
         if let Err(e) = start_capture_flow(&app2) {
-            let _ = tauri::Emitter::emit(&app2, "hawk://capture-error", e);
+            // F1/媒体键失败横幅可见化：主面板懒创建，未开面板时 push 事件无窗可显——
+            // emit 前先拉起（show_capture_error 内 ensure_main_panel，本线程非主线程合法）
+            crate::panel::show_capture_error(&app2, e);
         }
     });
     // 去重窗按时长解除（而非按流程结束）：恰好挡住同一次按键的双通道竞态
