@@ -1,3 +1,4 @@
+mod bench_mode;
 mod commands;
 mod history;
 mod idle_reaper;
@@ -48,6 +49,10 @@ pub fn run() {
                     return Ok(());
                 }
             }
+
+            // G3 基准模式（bench_mode）：单实例守卫之后第一时间接管。环境变量
+            // HAWKSNAP_BENCH 缺席时零成本返回，正常启动路径不受任何影响。
+            crate::bench_mode::maybe_run(app.handle());
 
             // Task 11 埋点：前端首帧画出冻结帧后回报 hawk://overlay-shown（无 payload）。
             // 多显示器时每窗口各发一次，mark_overlay_shown_once 只记每轮首个（评审 Finding 2a）。

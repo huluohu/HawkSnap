@@ -6,12 +6,16 @@
 // 打点失败一律静默（let _ =），绝不阻塞/拖垮截图主路径。
 // perf.rs
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 // overlay_shown 单发门闩（评审 Finding 2a）：多显示器下每个覆盖层窗口各回报一次
 // overlay-shown，全部记入会使 overlay_shown 行数多于 hotkey，bench 按行配对错位。
 // hotkey 打点时置位，本轮首个 overlay_shown 打点时消费——保证两阶段行数 1:1。
 static AWAIT_SHOWN: AtomicBool = AtomicBool::new(false);
+
+// 已记录的 overlay_shown 轮数（bench_mode 轮推进门控）：与 CSV 的 overlay_shown 行数
+// 严格 1:1——自增就在同一个 if 分支里，CSV 写几行它就计几轮（锁-free，纯原子）。
+static SHOWN_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// hotkey 阶段打点并武装门闩（start_capture_flow 首行调用，热键/托盘共用）。
 pub fn mark_hotkey() {
@@ -23,7 +27,14 @@ pub fn mark_hotkey() {
 pub fn mark_overlay_shown_once() {
     if AWAIT_SHOWN.swap(false, Ordering::SeqCst) {
         mark("overlay_shown");
+        SHOWN_COUNT.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// bench_mode 轮推进门控：当前进程已记录的 overlay_shown 轮数。bench 每轮记下轮前
+/// 基线、轮询此值越过基线来确认「前端已画出冻结帧」，再发确认链。
+pub fn overlay_shown_count() -> u32 {
+    SHOWN_COUNT.load(Ordering::SeqCst)
 }
 
 pub fn mark(stage: &str) {

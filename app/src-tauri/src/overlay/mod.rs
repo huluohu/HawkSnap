@@ -20,6 +20,8 @@ pub(crate) use hotkey::register_in_order;
 pub use hotkey::{register_hover_probe, register_media_key_f1};
 
 pub(crate) use flow::ANY_OVERLAY_VISIBLE;
+// bench_mode 基准链路专用：HIDE_WINDOWS 置位 + 轮间隐藏。flow 模块保持私有（门面不破）。
+pub(crate) use flow::{hide_all_overlays, HIDE_WINDOWS};
 
 // #[tauri::command] 生成的隐藏宏（__cmd__X 包装器 / __tauri_command_name_X 命令名匹配）
 // 定义在命令所在的子模块，而 generate_handler![overlay::X] 会展开出 overlay::__cmd__X!()

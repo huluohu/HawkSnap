@@ -19,6 +19,16 @@ static FLOW_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 覆盖层全隐时空转成本趋近于零（一次原子读即返回），不烧 CPU、不做 AX 查询。
 pub(crate) static ANY_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
+/// bench_mode 门控（G3 基准）：置 true 后覆盖层「幽灵化」——窗口仍要上屏，但
+/// set_ignore_cursor_events(true) + 注入 CSS `visibility:hidden` 隐藏页面全部内容
+/// （窗口本就 transparent(true)，故上屏后无任何可见像素）+ 绝不 set_focus。
+///
+/// 为什么不是纯 `visible(false)`：实测 macOS WKWebView 在从未上屏的窗口里不执行任何
+/// JS（evaluateJavaScript 不运行、页面链路停摆），invisible 覆盖层永远等不到
+/// overlay-shown。上屏但不可感知 = AppKit/WebKit 眼中全速运行 webview 全路径
+/// （加载/取帧/绘制/overlay-shown 照常），用户侧零感知、零输入拦截。
+pub static HIDE_WINDOWS: AtomicBool = AtomicBool::new(false);
+
 // 仅测试用：镜像 commands::DisplayPayload 的序列化契约（camelCase），供下方契约测试断言
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Serialize, Clone)]
@@ -54,8 +64,14 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
             // 复用：窗口与页面常驻，仅更新几何并显示。页面经 overlay-ready 的新 payload 重绘。
             let _ = w.set_position(tauri::LogicalPosition::new(d.x as f64, d.y as f64));
             let _ = w.set_size(tauri::LogicalSize::new(d.width as f64, d.height as f64));
-            let _ = w.show();
-            let _ = w.set_focus();
+            // bench_mode：上屏唤醒 WebKit（幽灵化在首建时已生效且跨轮持久：CSS 隐藏 +
+            // 鼠标穿透），绝不 set_focus 抢焦点。
+            if HIDE_WINDOWS.load(Ordering::SeqCst) {
+                let _ = w.show();
+            } else {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
             continue;
         }
         // 首建路径（防御：复用模式下同 label 不会重建，除非窗口被外部强关）。
@@ -67,11 +83,22 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
             .inner_size(d.width as f64, d.height as f64)
             .decorations(false).transparent(true).always_on_top(true)
             .skip_taskbar(true).resizable(false)
+            // bench_mode：不可见创建——窗口从不上屏，webview 全路径照常。
+            .visible(!HIDE_WINDOWS.load(Ordering::SeqCst))
             .build().map_err(|e| e.to_string())?;
         // 注入窗口 label：页面加载前 wry 会把 eval 暂存到 pending_scripts，导航完成后执行，
         // 故此处注入不惧与首帧加载竞态；display_id 为 u64，无需转义。
         let _ = win.eval(&format!("window.__LABEL__='overlay-{}';", d.display_id));
-        let _ = win.set_focus();
+        if HIDE_WINDOWS.load(Ordering::SeqCst) {
+            // bench_mode 幽灵化：页面内容 CSS 隐藏（visibility 可继承，React 后续渲染的
+            // 选区/浮条一并隐藏；首帧前的暂存期与页面背景均透明，上屏无闪烁）。在
+            // show() 之前先建穿透，用户点击永不落入本窗。
+            let _ = win.eval("document.documentElement.style.visibility='hidden';");
+            let _ = win.set_ignore_cursor_events(true);
+            let _ = win.show(); // 从未上屏的窗口里 WKWebView 不执行 JS（见 HIDE_WINDOWS 注）
+        } else {
+            let _ = win.set_focus();
+        }
     }
     crate::perf::mark("overlay_created"); // 覆盖层窗口就绪（build 或复用 show 完成；每轮一次，便于脚本按索引配对）
     // Plan B Task 5：覆盖层已就绪 → 开启悬停探测总闸（handler 首行检查，见
@@ -139,7 +166,7 @@ pub async fn emit_capture_done(app: AppHandle, display_id: u64, outcome: command
 /// 悬停总闸：全部 overlay-* 均已（请求）隐藏 → 直接落 false，无需再实查可见性。
 /// 与 start_capture_flow 并发的极端竞态（新流程 store(true) 后旧取消才 store(false)）
 /// 可自愈：下一轮流程会重新置 true。
-fn hide_all_overlays(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn hide_all_overlays(app: &AppHandle) -> Result<(), String> {
     let mut last_err: Option<String> = None;
     for (label, w) in app.webview_windows() {
         if label.starts_with("overlay-") {

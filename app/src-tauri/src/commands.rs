@@ -220,6 +220,28 @@ pub(crate) fn captured_display_frames() -> Vec<DisplayFrame> {
         .collect()
 }
 
+/// 主显示器快照（bench_mode 确认链用）：display_id 与全帧几何取**同一条目**、一次锁内
+/// 产出——bench 要向 finish_capture 传该显示器的 id 与其内部 rect，二者必须同源。
+/// DisplayFrame 刻意不含 display_id（hover 的相等性断言依赖纯几何，见结构体与 hover
+/// 测试注），故单开此访问器而非扩字段。「主显示器」口径沿用 primary_display_center：
+/// 含原点 (0,0) 的帧优先，否则取面积最大者。锁内只做几何拷贝。
+pub(crate) fn primary_display() -> Option<(u64, DisplayFrame)> {
+    let captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
+    let frame = |id: &u64, m: &CaptureMeta| (*id, DisplayFrame {
+        x: m.x as f64, y: m.y as f64, w: m.width as f64, h: m.height as f64,
+    });
+    captures
+        .iter()
+        .find(|(_, m)| m.x <= 0 && m.y <= 0)
+        .map(|(id, m)| frame(id, m))
+        .or_else(|| {
+            captures
+                .iter()
+                .max_by_key(|(_, m)| m.width as u64 * m.height as u64)
+                .map(|(id, m)| frame(id, m))
+        })
+}
+
 /// 贴图 pin 的图像来源第一级（C5）：CAPTURES 最近一轮的非空整帧。display_id 取最大者
 /// （多显示器无主次概念时稳定取一个）；release_captures 后 rgba 全为空 → None，调用方
 /// 落到剪贴板来源。锁内只做 Arc clone + 几何拷贝，不跨 IO。
