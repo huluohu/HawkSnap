@@ -11,6 +11,17 @@ use tauri::AppHandle;
 
 use hawksnap_core::geometry::Rect;
 
+/// bench 循环进行中：run_bench 的轮次循环开跑即置 true，此后从不清除（基准是一次性
+/// 模式，跑完即 app.exit）。供外部触发点守卫用（D0-③，Plan C 终审）——见 [`is_running`]。
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// bench 模式进行中？外部触发入口（F1/媒体键经 trigger_capture_flow、托盘截图、面板
+/// 截图按钮）应在此为 true 时忽略触发：bench 轮次直接调 start_capture_flow、不走这些
+/// 外部入口，用户/托盘中途混入的一轮会污染当轮计时。bench 线程自身不查此旗标。
+pub fn is_running() -> bool {
+    RUNNING.load(Ordering::SeqCst)
+}
+
 /// HAWKSNAP_BENCH 解析：缺席/非 u64 → None（正常启动，零成本）。纯函数便于单测。
 fn parse_rounds(v: Option<String>) -> Option<u64> {
     v.and_then(|s| s.trim().parse::<u64>().ok())
@@ -52,6 +63,8 @@ pub fn maybe_run(app: &AppHandle) {
 fn run_bench(app: AppHandle, rounds: u64) {
     // 等 setup 收尾（托盘/热键注册、资源就绪），不与启动竞态。
     std::thread::sleep(Duration::from_millis(1500));
+    // D0-③：循环开跑即宣告 bench 进行中，外部触发点（热键/托盘/面板）自此忽略触发。
+    RUNNING.store(true, Ordering::SeqCst);
     crate::overlay::HIDE_WINDOWS.store(true, Ordering::SeqCst);
     eprintln!("[bench] 基准模式：{rounds} 轮（覆盖层不可见，剪贴板将被覆盖 {rounds} 次）");
     let mut stats: Vec<RoundStat> = Vec::new();

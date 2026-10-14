@@ -36,6 +36,19 @@ const toPayload = (f: SettingsForm): Settings => ({
 
 type HotkeySlot = "hotkeyCapture" | "hotkeyPin" | "hotkeyRecord";
 
+// 热键注册失败载荷（D0-⑤）：与后端 HotkeyError（serde camelCase）对齐——kind 供横幅
+// 归因（截图/贴图/录屏），message 为人类可读文案（注册失败原因或媒体键降级提示）。
+type HotkeyKind = "capture" | "pin" | "record";
+interface HotkeyErrorPayload {
+  kind: HotkeyKind;
+  message: string;
+}
+const HOTKEY_KIND_LABEL: Record<HotkeyKind, string> = {
+  capture: "截图",
+  pin: "贴图",
+  record: "录屏",
+};
+
 const HOTKEY_SLOTS: Array<{ key: HotkeySlot; label: string }> = [
   { key: "hotkeyCapture", label: "开始捕获" },
   { key: "hotkeyPin", label: "贴图" },
@@ -69,7 +82,7 @@ function comboFromEvent(e: KeyboardEvent): string | null {
 }
 
 function App() {
-  const [hotkeyError, setHotkeyError] = useState<string | null>(null);
+  const [hotkeyError, setHotkeyError] = useState<HotkeyErrorPayload | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [comingSoon, setComingSoon] = useState<string | null>(null);
   const [form, setForm] = useState<SettingsForm>(DEFAULTS);
@@ -83,13 +96,13 @@ function App() {
     let disposed = false;
     // pull 通道：setup 期的 hawk://hotkey-error emit 早于 listen 注册必丢，挂载即向后端
     // 拉取（后端读取即清除）。非 Tauri 环境下降级为无提示。
-    invoke<string | null>("hotkey_error")
+    invoke<HotkeyErrorPayload | null>("hotkey_error")
       .then((err) => {
         if (!disposed && err) setHotkeyError(err);
       })
       .catch(() => {});
     // push 通道：覆盖挂载后发生的注册失败（spec §9：不允许静默失败）。
-    listen<string>("hawk://hotkey-error", (e) => setHotkeyError(e.payload))
+    listen<HotkeyErrorPayload>("hawk://hotkey-error", (e) => setHotkeyError(e.payload))
       .then((un) => {
         if (disposed) un();
         else unlisten = un;
@@ -206,7 +219,7 @@ function App() {
     <main className="container">
       {hotkeyError && (
         <div role="alert" style={banner}>
-          全局热键注册失败，{form.hotkeyCapture} 截图不可用：{hotkeyError}
+          {HOTKEY_KIND_LABEL[hotkeyError.kind]} 热键注册失败：{hotkeyError.message}
         </div>
       )}
       {captureError && (

@@ -13,6 +13,9 @@ pub use delay::{cancel_delayed_capture, countdown_remaining, start_delayed_captu
 pub use flow::{cancel_capture, emit_capture_done, start_capture_flow};
 // reregister_from_settings / reregister_with 只在 hotkey.rs 内部链路使用（setup 经
 // register_hotkeys），不在此重导出（重导出无人引用会挂 unused_imports）。
+// HotkeyError 不在此重导出：crate 内无按名引用（lib.rs 经 if-let 接住、settings.rs 仅
+// 取 e.message 字段），重导出会挂 unused_imports；类型仍随 register_hotkeys 的 Err /
+// hotkey_error 命令返回值对外可见（serde 序列化为 `{kind, message}`）。
 pub use hotkey::{hotkey_error, register_hotkeys, register_one, HotkeyKind};
 // 保存管线（settings.rs apply_pipeline）按注册序逐项注册热键：crate 内共享，不外暴。
 pub(crate) use hotkey::register_in_order;

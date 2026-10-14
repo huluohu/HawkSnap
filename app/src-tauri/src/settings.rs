@@ -126,7 +126,8 @@ fn apply_pipeline(
     autostart_fn: impl FnOnce(bool),
 ) -> Result<Settings, String> {
     let s = s.sanitized();
-    crate::overlay::register_in_order(&s, register_fn)?;
+    // Err 的 kind 归因（D0-⑤）只服务横幅；保存命令的 Err 口径保持纯文案 String 不变。
+    crate::overlay::register_in_order(&s, register_fn).map_err(|e| e.message)?;
     // 自启 only-if-changed（终审 Fix 4）：此刻尚未落盘，load_from 读到的是文件中的旧值
     // ——仅当 launch_at_login 与旧值不同才切换登录项，省掉每次保存对 LaunchAgent 的
     // 无谓 enable/disable 往返。文件不存在/不可读（首次保存、手改损坏）无旧值可比，

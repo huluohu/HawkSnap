@@ -157,6 +157,11 @@ pub fn run() {
                         "shot" => {
                             let app = app.clone();
                             std::thread::spawn(move || {
+                                // bench 守卫（D0-③，Plan C 终审）：基准模式进行中忽略外部
+                                // 触发（防一轮被污染）。与 F1/面板入口同款。
+                                if crate::bench_mode::is_running() {
+                                    return;
+                                }
                                 // 与 F1 热键路径同口径：失败走 hawk://capture-error，不静默吞掉
                                 if let Err(e) = overlay::start_capture_flow(&app) {
                                     let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);

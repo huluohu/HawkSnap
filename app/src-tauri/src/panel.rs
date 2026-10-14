@@ -46,6 +46,11 @@ pub fn panel_trigger(app: AppHandle, action: String) -> Result<(), String> {
     // 抓屏耗时数秒——仍派发独立线程，命令立即返回（与托盘 shot 纪律一致）。
     std::thread::spawn(move || match action.as_str() {
         "capture" => {
+            // bench 守卫（D0-③，Plan C 终审）：基准模式进行中忽略外部触发（防一轮被污染）
+            // ——与 F1/托盘入口同款；bench 轮次直呼 start_capture_flow，不经此处。
+            if crate::bench_mode::is_running() {
+                return;
+            }
             if let Err(e) = crate::overlay::start_capture_flow(&app) {
                 let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
             }

@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+/// 贴图缩放显示比范围（D0-④ 常量下沉）：0.1..=3.2（= 10%–3200%，F3 验收口径）。
+/// 1.0 = 图像原始尺寸（1 物理像素/1 逻辑像素）；初始显示比 0.5（半尺寸起步，Snipaste 式）。
+/// 单一来源：platform-mac pin.rs 的滚轮缩放路径与 app 层 pins.rs 的命令 clamp 共用，
+/// 两处不再各自持副本。
+pub const PIN_ZOOM_MIN: f64 = 0.1;
+pub const PIN_ZOOM_MAX: f64 = 3.2;
+
+/// 贴图透明度范围（D0-④ 常量下沉）：0.2..=1.0（20%–100%，F3 验收口径）。
+/// 单一来源同 [`PIN_ZOOM_MIN`]。
+pub const PIN_OPACITY_MIN: f64 = 0.2;
+pub const PIN_OPACITY_MAX: f64 = 1.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect { pub x: i32, pub y: i32, pub w: u32, pub h: u32 }
 

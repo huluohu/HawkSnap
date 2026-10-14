@@ -38,14 +38,11 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-/// 缩放显示比范围：0.1..=3.2（= 10%–3200%，F3 验收）。1.0 = 图像原始尺寸
-/// （1 物理像素/1 逻辑像素）；初始显示比 0.5（plan：半尺寸起步，Snipaste 式）。
-const ZOOM_MIN: f64 = 0.1;
-const ZOOM_MAX: f64 = 3.2;
 /// 滚轮每档缩放/透明度步长（≈10%）。方向随 deltaY 符号。
 const WHEEL_STEP: f64 = 1.1;
-/// 透明度范围 0.2..=1.0（20%–100%，F3 验收）。
-const OPACITY_MIN: f64 = 0.2;
+// 缩放/透明度范围常量（D0-④ 下沉 hawksnap-core::geometry 的 PIN_ZOOM_* / PIN_OPACITY_*），
+// 本文件经 use 引入；本地副本已删（命令侧 pins.rs 与滚轮路径同源单一值）。
+use hawksnap_core::geometry::{PIN_OPACITY_MAX, PIN_OPACITY_MIN, PIN_ZOOM_MAX, PIN_ZOOM_MIN};
 /// Esc 的 keyCode（kVK_Escape = 53，Carbon/HIToolbox 沿用值）。
 const KEYCODE_ESCAPE: i64 = 53;
 
@@ -100,7 +97,7 @@ define_class!(
             let ivars = self.ivars();
             if event.modifierFlags().contains(NSEventModifierFlags::Control) {
                 // Ctrl+滚轮：透明度（20%–100%）
-                let next = (ivars.opacity.get() * step).clamp(OPACITY_MIN, 1.0);
+                let next = (ivars.opacity.get() * step).clamp(PIN_OPACITY_MIN, PIN_OPACITY_MAX);
                 ivars.opacity.set(next);
                 if let Some(win) = self.window() {
                     win.setAlphaValue(next);
@@ -108,7 +105,7 @@ define_class!(
             } else {
                 // 滚轮：以窗口中心缩放（10%–3200%）
                 let cur = ivars.scale.get();
-                let target = (cur * step).clamp(ZOOM_MIN, ZOOM_MAX);
+                let target = (cur * step).clamp(PIN_ZOOM_MIN, PIN_ZOOM_MAX);
                 if target == cur {
                     return;
                 }

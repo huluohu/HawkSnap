@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::AppHandle;
@@ -8,7 +9,7 @@ use super::hover;
 
 // 热键注册失败的 pull 通道：setup 阶段的 hawk://hotkey-error emit 早于前端 listen 注册，
 // 必丢；错误同时落入此静态，前端挂载时经 hotkey_error 命令拉取补显（读取即清除）。
-static HOTKEY_ERROR: Mutex<Option<String>> = Mutex::new(None);
+static HOTKEY_ERROR: Mutex<Option<HotkeyError>> = Mutex::new(None);
 
 /// Plan B Task 5：智能吸附 AX 悬停探测注册。
 ///
@@ -25,48 +26,68 @@ pub fn register_hover_probe(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
+pub fn register_hotkeys(app: &AppHandle) -> Result<(), HotkeyError> {
     // C7：热键自设置读取（settings.json 缺失/损坏 → Settings::default = F1/F2/F6），
     // 注册失败语义与拆分前一致：Err 上抛 + 落 pull 通道（HOTKEY_ERROR，首错优先），
     // lib.rs 的 emit/拉面板逻辑不变。
     let settings = crate::settings::Settings::load(app);
-    reregister_from_settings(app, &settings).inspect_err(|msg| {
+    reregister_from_settings(app, &settings).inspect_err(|err| {
         let mut slot = HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             // 首错优先（通道槽位只有一个）：register_in_order 返回的即注册序首个错误
-            *slot = Some(msg.clone());
+            *slot = Some(err.clone());
         }
     })
 }
 
 /// 热键角色：注册序 capture → pin → record 下决定组合键触发哪个处理器。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 小写序列化（"capture"/"pin"/"record"）：hotkey-error 载荷的 kind 字段，前端据此
+/// 归因横幅（截图/贴图/录屏——D0-⑤）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum HotkeyKind {
     Capture,
     Pin,
     Record,
 }
 
+/// 热键注册失败（D0-⑤）：首错的消息 + 角色归因。同时是 hawk://hotkey-error 事件与
+/// hotkey_error 命令的载荷（serde camelCase → `{kind, message}`）；Display 只出 message
+/// ——lib.rs 的 eprintln 日志口径与拆分前一致（组合键本就写在 message 里）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeyError {
+    pub kind: HotkeyKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for HotkeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// F6 占位（C7）：触发时只发「即将推出」横幅事件（App.tsx 横幅复用），不做任何录屏。
 const RECORD_COMING_SOON: &str = "录屏功能将在后续版本提供";
 
 /// 按注册序（capture → pin → record）逐项调用 register_fn；全部尝试（前项失败不阻断
-/// 后项——拆分前 F1 被占用时 F2 仍注册成功的行为保留），任一失败 → 返回首个错误。
-/// 与 AppHandle 解耦（app 由 register_fn 闭包捕获）：settings.rs 的保存管线与单测共用。
+/// 后项——拆分前 F1 被占用时 F2 仍注册成功的行为保留），任一失败 → 返回首个错误
+/// （带角色归因，D0-⑤）。与 AppHandle 解耦（app 由 register_fn 闭包捕获）：settings.rs
+/// 的保存管线与单测共用。
 pub(crate) fn register_in_order(
     settings: &crate::settings::Settings,
     mut register_fn: impl FnMut(&str, HotkeyKind) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<(), HotkeyError> {
     let jobs = [
         (settings.hotkey_capture.as_str(), HotkeyKind::Capture),
         (settings.hotkey_pin.as_str(), HotkeyKind::Pin),
         (settings.hotkey_record.as_str(), HotkeyKind::Record),
     ];
-    let mut first_err: Option<String> = None;
+    let mut first_err: Option<HotkeyError> = None;
     for (combo, kind) in jobs {
         if let Err(e) = register_fn(combo, kind) {
             if first_err.is_none() {
-                first_err = Some(e);
+                first_err = Some(HotkeyError { kind, message: e });
             }
         }
     }
@@ -86,6 +107,8 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
         Shortcut::from_str(combo).map_err(|e| format!("热键 {combo} 无法解析: {e}"))?;
     let gs = app.global_shortcut();
     let app2 = app.clone();
+    // 拥有化组合串：Pin 探针的闭包要求 'static（&str 参数活不过本函数体）。
+    let combo_owned = combo.to_string();
     match kind {
         HotkeyKind::Capture => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
@@ -100,7 +123,8 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                 if event.state == ShortcutState::Pressed {
                     // 探针（常驻，廉价）：E2E 判别「pin 回调没进来」vs「进来了但没出窗」。
                     // 注意 global-hotkey 0.8 的 Code::F2 → Carbon 0x78=120（99 是 kVK_F3）。
-                    eprintln!("[hawksnap] F2 热键触发（pin_latest）");
+                    // D0-①：探针不再写死 F2，回显本次实际注册的组合（combo 即设置值）。
+                    eprintln!("[hawksnap] {combo_owned} 热键触发（pin_latest）");
                     let app = app2.clone();
                     std::thread::spawn(move || {
                         if let Err(e) = crate::pins::pin_latest(app.clone()) {
@@ -115,8 +139,19 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                 if event.state == ShortcutState::Pressed {
                     let app = app2.clone();
                     std::thread::spawn(move || {
+                        // D0-②：启动零窗口时 coming-soon 横幅无窗可显——先拉主面板再
+                        // emit（与 lib.rs 热键失败路径同款纪律：本线程即非主线程，建窗
+                        // 合法；拉起失败仅 eprintln，横幅退化为 push 通道尽力投递）。
+                        if let Err(e) = crate::panel::ensure_main_panel(&app) {
+                            eprintln!("[hawksnap] coming-soon 反馈面板拉起失败: {e}");
+                        }
                         use tauri::Emitter;
-                        let _ = app.emit("hawk://coming-soon", RECORD_COMING_SOON);
+                        // D0-①：占位文案带上本次实际注册的组合（设置读取，默认 F6）。
+                        let settings = crate::settings::Settings::load(&app);
+                        let _ = app.emit(
+                            "hawk://coming-soon",
+                            format!("{RECORD_COMING_SOON}（{}）", settings.hotkey_record),
+                        );
                     });
                 }
             })
@@ -125,15 +160,15 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
 }
 
 /// C7：按设置重注册全部热键——先 unregister_all 旧组合，再按 capture → pin → record
-/// 注册新组合。任一失败 → Err（调用方中止保存）。注意：失败时旧组合已注销、新组合半数
-/// 可能已注册（运行态半新半旧），设置文件保持旧值——重启或下次成功保存自愈（计划裁定
-/// 语义，不做旧热键回滚注册）。注册经插件 run_main_thread 交付主线程（2.4.1
-/// register_internal/unregister_all 均已自带），任意线程可调——set_settings(async) 从
-/// tokio 线程调用安全。
+/// 注册新组合。任一失败 → Err（调用方中止保存；Err 携带角色归因，D0-⑤）。注意：失败时
+/// 旧组合已注销、新组合半数可能已注册（运行态半新半旧），设置文件保持旧值——重启或下次
+/// 成功保存自愈（计划裁定语义，不做旧热键回滚注册）。注册经插件 run_main_thread 交付
+/// 主线程（2.4.1 register_internal/unregister_all 均已自带），任意线程可调——
+/// set_settings(async) 从 tokio 线程调用安全。
 pub fn reregister_from_settings(
     app: &AppHandle,
     settings: &crate::settings::Settings,
-) -> Result<(), String> {
+) -> Result<(), HotkeyError> {
     reregister_with(app, settings, register_one)
 }
 
@@ -143,11 +178,16 @@ pub fn reregister_with(
     app: &AppHandle,
     settings: &crate::settings::Settings,
     register_fn: impl Fn(&AppHandle, &str, HotkeyKind) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<(), HotkeyError> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     app.global_shortcut()
         .unregister_all()
-        .map_err(|e| format!("注销旧热键失败: {e}"))?;
+        // 注销失败发生在任何角色注册之前、无从归因到单个组合——按注册序归首个角色
+        //（capture），仅为满足 HotkeyError 的 kind 字段；文案保持原样。
+        .map_err(|e| HotkeyError {
+            kind: HotkeyKind::Capture,
+            message: format!("注销旧热键失败: {e}"),
+        })?;
     register_in_order(settings, |combo, kind| register_fn(app, combo, kind))
 }
 
@@ -156,6 +196,12 @@ pub fn reregister_with(
 /// 原子置位 + spawn，start_capture_flow 永远跑在 spawn 出的非主线程上（主线程建窗/关窗
 /// 会 panic）。
 pub(crate) fn trigger_capture_flow(app: &AppHandle) {
+    // bench 守卫（D0-③，Plan C 终审）：基准模式进行中忽略外部触发（防一轮被污染）——
+    // bench 轮次直接调 start_capture_flow、不经本入口，自身不受影响。托盘/面板入口
+    // 各有同款守卫（lib.rs / panel.rs），F1 与媒体键两通道在此统一拦截。
+    if crate::bench_mode::is_running() {
+        return;
+    }
     if !media::arm_once(&media::TRIGGER_INFLIGHT) {
         return; // 去重窗口内已有触发在跑
     }
@@ -181,6 +227,9 @@ pub(crate) fn trigger_capture_flow(app: &AppHandle) {
 /// 必须在主线程调用（全局事件监听挂在 AppKit 事件循环上）。
 #[cfg(target_os = "macos")]
 pub fn register_media_key_f1(app: &AppHandle) -> Result<(), String> {
+    // D0-①：hint 文案的热键名从设置读取（默认 F1，可改配——文案随之回显实际组合）。
+    // 一次性读（注册期调用），非每事件读。
+    let settings = crate::settings::Settings::load(app);
     let fnstate = media::read_fnstate();
     let monitor_ok = media::install_media_key_monitor(app);
     // macOS 的全局监听对按键类事件仅在被授予「辅助功能」时投递（NSEvent.h：见
@@ -190,17 +239,21 @@ pub fn register_media_key_f1(app: &AppHandle) -> Result<(), String> {
         eprintln!(
             "[hawksnap] 媒体键监听不可用（monitor={monitor_ok}，辅助功能授权未确认），F1 亮度键路径降级"
         );
-        // F1 真失联（fnState 是媒体键模式 且 监听不可用）才提示；走 hotkey-error 横幅通道，
-        // 带「提示：」前缀与注册失败文案区分；已有真实注册错误时保留错误、仅 eprintln。
-        if let Some(hint) = media::fnstate_hint(fnstate) {
+        // 截图热键真失联（fnState 是媒体键模式 且 监听不可用）才提示；走 hotkey-error
+        // 横幅通道，带「提示：」前缀与注册失败文案区分；已有真实注册错误时保留错误、
+        // 仅 eprintln。载荷带 kind=capture（D0-⑤），前端归因为「截图」。
+        if let Some(hint) = media::fnstate_hint(fnstate, &settings.hotkey_capture) {
             eprintln!("[hawksnap] 提示: {hint}");
             let mut slot = HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner());
             if slot.is_none() {
-                let msg = format!("提示：{hint}");
-                *slot = Some(msg.clone());
+                let err = HotkeyError {
+                    kind: HotkeyKind::Capture,
+                    message: format!("提示：{hint}"),
+                };
+                *slot = Some(err.clone());
                 drop(slot);
                 use tauri::Emitter;
-                let _ = app.emit("hawk://hotkey-error", msg);
+                let _ = app.emit("hawk://hotkey-error", err);
             }
         }
     }
@@ -236,12 +289,16 @@ pub(crate) mod media {
     }
 
     /// fnState 提示：true=标准功能键（无需提示）；None=未设置（默认媒体键模式）；
-    /// false=媒体键模式。
-    pub fn fnstate_hint(fnstate: Option<bool>) -> Option<String> {
+    /// false=媒体键模式。`capture_combo` 是当前设置的截图热键（D0-① 单一来源，默认 F1），
+    /// 只用于句首回显实际组合；后半句是 macOS 系统设置的原文案（Apple UI 字符串，不随
+    /// 配置变化）。
+    pub fn fnstate_hint(fnstate: Option<bool>, capture_combo: &str) -> Option<String> {
         match fnstate {
             Some(true) => None,
-            _ => Some("F1 当前是亮度键：可在 系统设置→键盘 开启「将 F1、F2 等键用作标准功能键」，\
-                     或在 系统设置→隐私与安全性→辅助功能 中添加 HawkSnap（推荐，开箱即用）。".into()),
+            _ => Some(format!(
+                "{capture_combo} 当前是亮度键：可在 系统设置→键盘 开启「将 F1、F2 等键用作标准功能键」，\
+                     或在 系统设置→隐私与安全性→辅助功能 中添加 HawkSnap（推荐，开箱即用）。"
+            )),
         }
     }
 
@@ -332,8 +389,9 @@ pub(crate) mod media {
 }
 
 /// 拉取并清除最近一次热键注册错误（None = 无错误）；补上 setup 期早于前端 listen 的丢失。
+/// 载荷 `{kind, message}`（camelCase，D0-⑤）：前端按 kind 归因横幅。
 #[tauri::command]
-pub fn hotkey_error() -> Option<String> {
+pub fn hotkey_error() -> Option<HotkeyError> {
     HOTKEY_ERROR
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -361,9 +419,17 @@ mod media_tests {
 
     #[test]
     fn hint_only_when_fnstate_not_standard() {
-        assert!(fnstate_hint(Some(false)).is_some()); // 媒体键模式 → 提示
-        assert!(fnstate_hint(None).is_some());        // 未设置（默认）→ 提示
-        assert!(fnstate_hint(Some(true)).is_none());  // 标准功能键 → 无提示
+        assert!(fnstate_hint(Some(false), "F1").is_some()); // 媒体键模式 → 提示
+        assert!(fnstate_hint(None, "F1").is_some());        // 未设置（默认）→ 提示
+        assert!(fnstate_hint(Some(true), "F1").is_none());  // 标准功能键 → 无提示
+    }
+
+    #[test]
+    fn hint_echoes_configured_capture_combo() {
+        // D0-①：句首热键名随设置回显；系统设置原文案保持不变
+        let h = fnstate_hint(Some(false), "Cmd+Shift+A").unwrap();
+        assert!(h.starts_with("Cmd+Shift+A 当前是亮度键"), "{h}");
+        assert!(h.contains("「将 F1、F2 等键用作标准功能键」"), "{h}");
     }
 
     #[test]

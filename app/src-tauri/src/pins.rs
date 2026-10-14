@@ -23,12 +23,6 @@ static PINS: LazyLock<Mutex<HashMap<u64, PinHandle>>> = LazyLock::new(|| Mutex::
 /// 贴图 id 分配器（也作级联序号：第 n 个贴图偏移 (n%8)*24）。
 static PIN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 缩放显示比范围：0.1..=3.2（10%–3200%，F3 验收；与 platform-mac pin.rs 同口径）。
-const ZOOM_MIN: f64 = 0.1;
-const ZOOM_MAX: f64 = 3.2;
-/// 透明度下限 0.2（20%，F3 验收；上限 1.0 与 pin.rs 同口径）。
-const OPACITY_MIN: f64 = 0.2;
-
 // —— 纯逻辑（可测；窗口路径经 PinWindow 句柄） ——
 
 /// 级联偏移（C5 测试契约）：第 n 个贴图相对基准点（主屏中心 − 半尺寸）的对角偏移。
@@ -38,15 +32,17 @@ pub(crate) fn next_pin_offset(n: u64) -> (f64, f64) {
     (k, k)
 }
 
-/// 缩放目标 clamp：当前显示比 × factor 后截到 0.1..=3.2（= 10%–3200%，F3 验收口径；
-/// 显示比 1.0 = 图像 1 物理像素/1 逻辑像素的原始尺寸，初始显示比为 0.5 半尺寸）。
+/// 缩放目标 clamp：当前显示比 × factor 后截到 [`hawksnap_core::geometry`] 的贴图范围
+/// （0.1..=3.2 = 10%–3200%，F3 验收口径；常量下沉后与 platform-mac 滚轮路径同一来源）。
 pub(crate) fn clamp_zoom(cur: f64, factor: f64) -> f64 {
-    (cur * factor).clamp(ZOOM_MIN, ZOOM_MAX)
+    use hawksnap_core::geometry::{PIN_ZOOM_MAX, PIN_ZOOM_MIN};
+    (cur * factor).clamp(PIN_ZOOM_MIN, PIN_ZOOM_MAX)
 }
 
-/// 透明度 clamp：0.2..=1.0（20%–100%，F3 验收口径）。
+/// 透明度 clamp：0.2..=1.0（20%–100%，F3 验收口径；常量单一来源同上）。
 pub(crate) fn clamp_opacity(opacity: f64) -> f64 {
-    opacity.clamp(OPACITY_MIN, 1.0)
+    use hawksnap_core::geometry::{PIN_OPACITY_MAX, PIN_OPACITY_MIN};
+    opacity.clamp(PIN_OPACITY_MIN, PIN_OPACITY_MAX)
 }
 
 // —— 图像来源解析 ——
