@@ -325,7 +325,10 @@ fn record_history(
 }
 
 fn dirs_picture_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures/HawkSnap"))
+    // Windows 无 HOME（用户域为 USERPROFILE）：三平台 CI 矩阵（plan D2）bring-up 修复。
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| std::path::PathBuf::from(h).join("Pictures/HawkSnap"))
 }
 
 /// C7：保存目录解析——settings.save_dir 优先（sanitized 已把空白串归一为 None），
@@ -394,7 +397,10 @@ mod tests {
             Some(std::path::PathBuf::from("/tmp/hs-custom")),
             "自定义目录优先于默认"
         );
-        let home = std::env::var_os("HOME").expect("测试环境必须有 HOME");
+        // Windows 无 HOME：与 dirs_picture_dir 同口径取 USERPROFILE（D2 bring-up）。
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("测试环境必须有 HOME/USERPROFILE");
         let default_dir =
             Some(std::path::PathBuf::from(home).join("Pictures/HawkSnap"));
         assert_eq!(resolve_save_dir(&crate::settings::Settings::default()), default_dir);

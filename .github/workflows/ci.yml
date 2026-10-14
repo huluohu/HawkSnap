@@ -1,0 +1,76 @@
+# HawkSnap CI（plan D2）：三平台 Rust 测试矩阵 + 前端测试/构建 + G6 i18n 覆盖率门
+# + G1 体积断言。D6 将把 size 扩为正式 release 流水线（tag 触发三平台产物 + updater feed）。
+name: CI
+
+on: [push, pull_request]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # TODO(plan D6): 接入 `cargo clippy --workspace -- -D warnings`。当前存量代码在
+      # hawksnap-platform-mac 有 clippy 告警（neg_cmp_op_on_partial_ord），D2 裁定先
+      # 不让 lint 噪音阻塞三平台 bring-up；告警清理后在 D6 收口时启用。
+      - name: Install Linux system deps (webkit2gtk / tray / xcap X11+dbus)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libx11-dev libxext-dev libxrandr-dev libxtst-dev \
+            libxkbcommon-dev libdbus-1-dev
+      - name: cargo test
+        run: cargo test --workspace
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      # G6 门（plan D2）：i18n key 覆盖率（A⊆Z、A⊆E、Z==E），违例 exit 1。
+      - run: npm run check:i18n
+
+  size:
+    # G1 体积断言（≤15MB dmg）。tauri build 慢是预期；continue-on-error: false（计划
+    # 裁定：此 job 即 G1 断言本体，D6 转正式 release 流水线时沿用）。
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+      - name: tauri build
+        working-directory: app
+        run: npm run tauri build
+      - name: check size (G1)
+        run: bash scripts/check-size.sh
