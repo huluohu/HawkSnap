@@ -9,13 +9,15 @@
 //!   → 插件验签（Ed25519）→ 安装。验签失败 Err，绝不落盘（G7 集成测试证明）。
 //! - `restart_app`：安装完成后前端提示重启，用户点「立即重启」才调（不自动重启）。
 //!
-//! 占位公钥（REPLACE_AT_RELEASE，D7/发布时由控制器替换为真实公钥）的行为——按插件
-//! 源码实证（tauri-plugin-updater 2.13.x）：公钥是纯 String 配置，插件 init 与 check()
-//! 均不解析它，只在 download 后的 verify_signature 才解码验签。因此占位符不会让插件
-//! 注册失败、不会让应用启动失败（沿 C7 autostart「非致命」先例）；但任何下载都会在
-//! 验签一步被拒（公钥 base64 解码失败 → Err，fail-closed）。为不给用户「发现新版本
-//! 却装不了」的死路，check_for_updates/install_update 在检测到占位/空公钥时短路：
-//! 自动检查静默 Ok(None)，手动检查返回哨兵错误（前端映射为「更新功能未配置」）。
+//! 公钥状态：真实 Ed25519 公钥已随 0.1.0 发布（D7 = 8123f6c 已把它填入
+//! tauri.conf.json），不再是 REPLACE_AT_RELEASE 占位。channel_configured 的占位/空钥
+//! 短路保留为防御性兜底——按插件源码实证（tauri-plugin-updater 2.13.x）：公钥是纯
+//! String 配置，插件 init 与 check() 均不解析它，只在 download 后的 verify_signature
+//! 才解码验签。因此无效/占位公钥不会让插件注册失败、不会让应用启动失败（沿 C7
+//! autostart「非致命」先例）；但任何下载都会在验签一步被拒（公钥 base64 解码失败 →
+//! Err，fail-closed）。为不给用户「发现新版本却装不了」的死路，
+//! check_for_updates/install_update 在检测到占位/空公钥时短路：自动检查静默
+//! Ok(None)，手动检查返回哨兵错误（前端映射为「更新功能未配置」）。
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};

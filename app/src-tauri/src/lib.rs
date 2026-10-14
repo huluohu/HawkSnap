@@ -31,9 +31,10 @@ pub fn run() {
             builder.build()
         })
         // D3 自动更新：updater 2.13.x 的插件注册是纯状态管理（UpdaterState manage），
-        // 不解析 pubkey——tauri.conf.json 的占位公钥 REPLACE_AT_RELEASE（D7 填真钥）
-        // 不会让注册或启动失败（非致命，同 hotkey/历史库裁定）。占位期的用户面行为
-        // 由 updater.rs 的 channel_configured 短路兜底（检查返回「未配置」语义）。
+        // 不解析 pubkey——真实公钥已随 0.1.0 填入 tauri.conf.json（D7 = 8123f6c），
+        // 无效/缺失公钥也不会让注册或启动失败（非致命，同 hotkey/历史库裁定）。通道
+        // 未配置（占位/空钥）时的用户面行为由 updater.rs 的 channel_configured 短路
+        // 兜底（检查返回「未配置」语义）。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture,

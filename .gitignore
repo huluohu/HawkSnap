@@ -6,3 +6,4 @@ target/
 .superpowers/
 .video_agent/
 app/src-tauri/gen/schemas/
+.idea/

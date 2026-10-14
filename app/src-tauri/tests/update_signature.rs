@@ -104,9 +104,9 @@ fn serve_channel() -> (std::thread::JoinHandle<()>, String) {
 }
 
 /// mock app + updater 插件：`updater_builder()` 需要插件 setup 已 manage 状态。
-/// 上下文用本 crate 的真 tauri.conf.json（占位公钥 REPLACE_AT_RELEASE 是普通
-/// String，反序列化/插件初始化照常——顺带证明占位配置不会让插件注册失败）；
-/// endpoint/pubkey 在 builder 上逐实例覆盖为本地测试值，不外联。运行时用
+/// 上下文用本 crate 的真 tauri.conf.json（plugins.updater.pubkey 自 0.1.0 起为
+/// 真实公钥，是普通 String，反序列化/插件初始化照常——顺带证明真实配置可通过
+/// 插件注册）；endpoint/pubkey 在 builder 上逐实例覆盖为本地测试值，不外联。运行时用
 /// tauri::test 的 MockRuntime（无窗口/事件循环；Wry 的 EventLoop 禁止在 cargo
 /// test 的工作线程上创建）。generate_context! 在 debug 下不嵌前端资产，与
 /// app_lib 同前提，CI 无 dist 目录可编译。
@@ -153,7 +153,7 @@ fn tampered_package_is_rejected_with_signature_error_and_nothing_installs() {
     // ① 公告获取成功：check 不验签，返回 Some(update)。
     let update = tauri::async_runtime::block_on(updater.check())
         .expect("check 对可达通道必须成功")
-        .expect("99.0.0 > 0.1.0-alpha.3，必须判定为更新");
+        .expect("99.0.0 > 0.1.0，必须判定为更新");
     assert_eq!(update.version, "99.0.0");
     assert_eq!(
         update.current_version,

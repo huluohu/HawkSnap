@@ -36,7 +36,7 @@ Plan D——i18n、自动更新、权限引导与发布基建：
 - 自动更新：tauri-plugin-updater + Ed25519 签名的 GitHub Releases 更新通道，设置区「自动更新」开关与「检查更新」按钮，坏签名更新包拒绝安装（伪签名集成测试断言）；
 - macOS 权限引导：截图前预检「屏幕录制」权限，未授权时深链系统设置并显示横幅（修复此前 macOS 14+ 未授权时静默返回壁纸画面的缺陷）；
 - 热键单一真源、bench 注入守卫等 Plan C 终审继承项收口；
-- 三平台 CI 矩阵（macOS / Windows / Linux：cargo test + clippy + 前端测试 + i18n 门禁 + 安装包体积断言），打 tag 触发三平台构建发布流水线并组装签名更新 feed。
+- 三平台 CI 矩阵（macOS / Windows / Linux：cargo test + 前端测试 + i18n 门禁；clippy 暂缓接入，安装包体积断言仅 macOS），打 tag 触发三平台构建发布流水线并组装签名更新 feed。
 
 配套：延迟打点与压测脚本 `scripts/bench-latency.sh`、合成注入基准 `scripts/bench-synth.sh`、空载内存采样 `scripts/sample-mem.sh`、冷启动/开面板仪器 `scripts/bench-g4.sh` 已就位，性能数据（G2 / G3 / G4）待运行归档；安装包体积预算 ≤15MB，由 `scripts/check-size.sh` 断言。
 

@@ -82,8 +82,8 @@ jobs:
   #   1. GitHub repo Secrets 配置：
   #        TAURI_SIGNING_PRIVATE_KEY           — Ed25519 私钥（`npm run tauri signer generate`）
   #        TAURI_SIGNING_PRIVATE_KEY_PASSWORD  — 私钥口令（无口令则设为空串）
-  #   2. tauri.conf.json 的 plugins.updater.pubkey 填入配对公钥（当前占位
-  #      REPLACE_AT_RELEASE，D8 控制器步骤）。
+  #   2. tauri.conf.json 的 plugins.updater.pubkey 填入配对公钥（已随 0.1.0 填入，
+  #      8123f6c；更换密钥 = 替换此处 + conf + secrets）。
   # 两者齐备后：push tag v* → release 三平台构建签名 → publish 组装 latest.json
   # 并创建【草稿】Release，控制器人工复核后发布（plan D7）。
   release:
@@ -98,8 +98,8 @@ jobs:
     # 签名私钥只进本 job 的构建环境。缺失/为空时 tauri CLI 在签名阶段硬失败
     # （实测两种报错："A public key has been found, but no private key" /
     # "failed to decode secret key"），本 job 红 = 未签名产物绝不发布（有意为之）。
-    # 注意：tauri.conf.json 的 plugins.updater.pubkey 仍是占位 REPLACE_AT_RELEASE
-    # 时同样硬失败（无法 base64 解码）——pubkey（D8）与 secrets 必须先于首个 tag。
+    # 注意：pubkey 已随 0.1.0 填入（8123f6c）；若 pubkey 缺失/被回退为占位，同样
+    # 硬失败（无法 base64 解码）——pubkey 与 secrets 必须始终配对且先于 tag。
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
