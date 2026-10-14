@@ -1,5 +1,6 @@
 mod bench_mode;
 mod commands;
+mod g4;
 mod history;
 mod idle_reaper;
 mod overlay;
@@ -12,6 +13,9 @@ mod updater;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // G4 冷启动 t0（plan D5）：run() 首行、先于 Builder 打点 process_start——
+    // 进程级「冷启动 → 托盘就绪」计时的起点（CSV 落行 + 进程内缓存，perf.rs）。
+    crate::perf::mark_process_start();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // 2.4.x 起插件不再提供自由函数 init()，改用 Builder::new().build()
@@ -210,6 +214,13 @@ pub fn run() {
                     })
                     .build(app)?;
             }
+
+            // G4（plan D5）：托盘就绪打点 + 测量模式接线。tray_ready 无条件打点
+            // （正常启动零成本：一行 CSV 追加 + 一次原子写，打点失败静默）；打点
+            // 失败一律 let _ 吞掉（perf.rs 纪律）。HAWKSNAP_G4=1 时 g4 自动流程
+            // 在此接管：开面板 → 打点 → stderr 汇总 → 退出（见 g4.rs）。
+            crate::perf::mark_tray_ready();
+            crate::g4::maybe_run(app.handle());
 
             // Plan B Task 9 应急（G2）：空闲覆盖层 webview 看护线程。Plan B Task 1 的
             // 常驻复用让每个空闲 overlay-*/countdown webview 常驻 ~30MB，fresh-idle
