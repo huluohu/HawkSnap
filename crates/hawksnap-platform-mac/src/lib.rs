@@ -3,6 +3,9 @@ extern crate self as hawksnap_platform_mac;
 
 pub mod ax;
 
+// Plan D Task D4：屏幕录制权限预检 + 系统设置深链引导（修静默壁纸缺陷）。
+pub mod permissions;
+
 // C5 贴图：原生 NSWindow + NSImageView 窗口族。AppKit 仅 macOS；非 macOS 平台无此
 // 模块，app 层 pins.rs 的 stub 返回 Err（Windows/Linux 适配归 Plan D）。
 #[cfg(target_os = "macos")]

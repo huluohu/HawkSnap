@@ -49,6 +49,25 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     if DELAY_ACTIVE.load(Ordering::SeqCst) {
         DELAY_ABORT.store(true, Ordering::SeqCst);
     }
+    // Plan D Task D4（修 Plan B 裁定的静默壁纸缺陷）：抓屏前屏幕录制权限预检。macOS 14+
+    // 未授权时抓屏 API 不报错、静默返回纯壁纸帧——用户看到"冻结的画面"却毫无解释。预检
+    // 未过 → 尽力打开系统设置的屏幕录制面板 + 拒绝本轮截图（Err 经既有
+    // hawk://capture-error → App.tsx 横幅链回流，前端零改动）。
+    // bench 守卫（裁定 1）：bench 量链路延迟，与本机授权态无关（bench 宿主可能从未授权），
+    // HIDE_WINDOWS 为真（bench 轮次进行中）时跳过预检，基准轮次照常。
+    // 覆盖面：F1 / 媒体键（trigger_capture_flow）/ 托盘 / 面板按钮全部经本入口，
+    // 一处预检全路径生效。
+    if !HIDE_WINDOWS.load(Ordering::SeqCst)
+        && !hawksnap_platform_mac::permissions::screen_recording_prechecked()
+    {
+        // 引导是尽力而为：spawn 不等待（open 手递 LaunchServices 即返回），失败仅记日志
+        // ——拒绝横幅照发，用户仍可手动前往设置。
+        if let Err(e) = hawksnap_platform_mac::permissions::open_screen_recording_settings() {
+            eprintln!("[hawksnap] 打开屏幕录制权限设置失败: {e}");
+        }
+        // Rust 字面量（G6 i18n 范围裁定：Rust 侧文案不入 t() 字典），面向用户可读中文。
+        return Err("屏幕录制权限未授予：已为你打开系统设置，授权后重新按 F1 即可".into());
+    }
     // Task 11 埋点：热键/托盘共用此入口，首行即触发时刻（stage: hotkey）；
     // mark_hotkey 同时武装 overlay_shown 单发门闩（多显示器只记首个 shown，与 hotkey 1:1）
     crate::perf::mark_hotkey();
