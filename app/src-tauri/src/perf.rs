@@ -17,6 +17,11 @@ static AWAIT_SHOWN: AtomicBool = AtomicBool::new(false);
 // 严格 1:1——自增就在同一个 if 分支里，CSV 写几行它就计几轮（锁-free，纯原子）。
 static SHOWN_COUNT: AtomicU32 = AtomicU32::new(0);
 
+// 已记录的 clipboard_done 轮数（bench_mode 进程内 c2c 计时门控）：与 CSV 的
+// clipboard_done 行数严格 1:1——自增与 CSV 追加同在 mark_clipboard_done 里
+// （锁-free，纯原子）。
+static CLIPBOARD_DONE_COUNT: AtomicU32 = AtomicU32::new(0);
+
 /// hotkey 阶段打点并武装门闩（start_capture_flow 首行调用，热键/托盘共用）。
 pub fn mark_hotkey() {
     mark("hotkey");
@@ -35,6 +40,19 @@ pub fn mark_overlay_shown_once() {
 /// 基线、轮询此值越过基线来确认「前端已画出冻结帧」，再发确认链。
 pub fn overlay_shown_count() -> u32 {
     SHOWN_COUNT.load(Ordering::SeqCst)
+}
+
+/// clipboard_done 阶段打点（copy=true 路径专用，commands.rs finish_capture 调用）：
+/// CSV 追加与 CLIPBOARD_DONE_COUNT 自增在同一函数里，两者严格 1:1。
+pub fn mark_clipboard_done() {
+    mark("clipboard_done");
+    CLIPBOARD_DONE_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+
+/// bench_mode 进程内 c2c 计时门控：当前进程已记录的 clipboard_done 轮数。bench 每轮
+/// 记下 finish_capture 前的基线、轮询此值越过基线的瞬间作为 t_clip。
+pub fn clipboard_done_count() -> u32 {
+    CLIPBOARD_DONE_COUNT.load(Ordering::SeqCst)
 }
 
 pub fn mark(stage: &str) {

@@ -133,8 +133,9 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
         copied = true;
         // Task 11 埋点：clipboard_done 仅在 req.copy=true 路径打点（M1 流程恒为 true）。
         // 若未来支持“仅保存”，confirm 与 clipboard_done 行数将不等，bench 长度校验会
-        // 报“数据不齐”——属预期守护而非缺陷。
-        crate::perf::mark("clipboard_done");
+        // 报“数据不齐”——属预期守护而非缺陷。mark_clipboard_done = CSV 追加 +
+        // 进程内计数自增（bench_mode 的 c2c 计时门控），二者严格 1:1。
+        crate::perf::mark_clipboard_done();
     }
     // 4) 保存：编码只发生在保存路径；格式/质量/目录均来自设置（C2 + C7 接线）。每次读
     // 小 JSON 文件（µs 级）——裁定 2：不为缓存引状态，profile 有实测成本再缓存。
