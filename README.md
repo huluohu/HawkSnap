@@ -34,7 +34,7 @@ Plan C——贴图、历史与设置：
 
 ## 后续计划
 
-见 [docs/superpowers/plans/](docs/superpowers/plans/)（M1 剩余 Plan B / C / D 在前一计划验收归档后另立文档）。
+见 [docs/superpowers/plans/](docs/superpowers/plans/)（Plan A/B/C 已完成；Plan D（i18n、自动更新、权限引导、CI 矩阵）与后续里程碑在前一计划验收归档后另立文档）。
 
 ## 开发环境
 
