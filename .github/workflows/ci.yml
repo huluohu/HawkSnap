@@ -1,5 +1,5 @@
-# HawkSnap CI（plan D2）：三平台 Rust 测试矩阵 + 前端测试/构建 + G6 i18n 覆盖率门
-# + G1 体积断言。D6 将把 size 扩为正式 release 流水线（tag 触发三平台产物 + updater feed）。
+# HawkSnap CI（plan D2/D6）：三平台 Rust 测试矩阵 + 前端测试/构建 + G6 i18n 覆盖率门
+# + G1 体积断言 + tag 触发的三平台发布流水线（产物 + updater latest.json 草稿 Release）。
 name: CI
 
 on: [push, pull_request]
@@ -18,9 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # TODO(plan D6): 接入 `cargo clippy --workspace -- -D warnings`。当前存量代码在
+      # TODO: 接入 `cargo clippy --workspace -- -D warnings`。当前存量代码在
       # hawksnap-platform-mac 有 clippy 告警（neg_cmp_op_on_partial_ord），D2 裁定先
-      # 不让 lint 噪音阻塞三平台 bring-up；告警清理后在 D6 收口时启用。
+      # 不让 lint 噪音阻塞三平台 bring-up；D6 收口时仍未清理，启用顺延到告警清零后。
       - name: Install Linux system deps (webkit2gtk / tray / xcap X11+dbus)
         if: runner.os == 'Linux'
         run: |
@@ -55,8 +55,8 @@ jobs:
       - run: npm run check:i18n
 
   size:
-    # G1 体积断言（≤15MB dmg）。tauri build 慢是预期；continue-on-error: false（计划
-    # 裁定：此 job 即 G1 断言本体，D6 转正式 release 流水线时沿用）。
+    # G1 体积断言（≤15MB dmg，plan D2 落地、D6 起为正式门）。tauri build 慢是预期；
+    # continue-on-error: false——此 job 即 G1 断言本体，红 = 不达标，不允许静默。
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -74,3 +74,145 @@ jobs:
         run: npm run tauri build
       - name: check size (G1)
         run: bash scripts/check-size.sh
+
+  # ---- 发布流水线（plan D6）----
+  #
+  # 控制器前置条件（首次 tag 推送前必须完成，缺一签名步骤即硬失败——有意为之，
+  # 未签名产物绝不能进入 Release / updater feed）：
+  #   1. GitHub repo Secrets 配置：
+  #        TAURI_SIGNING_PRIVATE_KEY           — Ed25519 私钥（`npm run tauri signer generate`）
+  #        TAURI_SIGNING_PRIVATE_KEY_PASSWORD  — 私钥口令（无口令则设为空串）
+  #   2. tauri.conf.json 的 plugins.updater.pubkey 填入配对公钥（当前占位
+  #      REPLACE_AT_RELEASE，D8 控制器步骤）。
+  # 两者齐备后：push tag v* → release 三平台构建签名 → publish 组装 latest.json
+  # 并创建【草稿】Release，控制器人工复核后发布（plan D7）。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    # 签名私钥只进本 job 的构建环境。缺失/为空时 tauri CLI 在签名阶段硬失败
+    # （实测两种报错："A public key has been found, but no private key" /
+    # "failed to decode secret key"），本 job 红 = 未签名产物绝不发布（有意为之）。
+    # 注意：tauri.conf.json 的 plugins.updater.pubkey 仍是占位 REPLACE_AT_RELEASE
+    # 时同样硬失败（无法 base64 解码）——pubkey（D8）与 secrets 必须先于首个 tag。
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # tauri v2 Linux 打包依赖：rust-test 集合（webkit/tray/xcap）+ libgtk-3 与
+      # appimage/deb 打包所需（tauri v2 prerequisites；首次实跑若缺项按报错一行补齐）。
+      - name: Install Linux system deps (build + bundle)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libx11-dev libxext-dev libxrandr-dev libxtst-dev \
+            libxkbcommon-dev libdbus-1-dev \
+            libxdo-dev \
+            file wget curl build-essential
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+      # --config 合入 src-tauri/tauri.release.conf.json（内容仅 bundle.createUpdaterArtifacts:
+      # true）。为何独立成覆盖文件而不写进 tauri.conf.json：该开关开启后 tauri CLI 在缺
+      # TAURI_SIGNING_PRIVATE_KEY 时硬失败（"A public key has been found, but no private
+      # key"）——push 分支 / PR 的 keyless 构建（rust-test/size）会全红；只在 release job
+      # 合入，配合上方 secrets 缺失即失败 = 未签名产物绝不发布（有意为之）。
+      # --bundles 各平台只造发布所需（G1 dmg 门槛由 size job 把守）。
+      # 产物布局（tauri v2，createUpdaterArtifacts: true 时 v2 updater 直接用安装器
+      # 本体 + 同名 .sig；macOS 为 .app.tar.gz 归档 + .sig）：
+      #   macOS   target/release/bundle/macos/HawkSnap.app.tar.gz{,.sig} + dmg/*.dmg
+      #   Linux   target/release/bundle/appimage/*_amd64.AppImage{,.sig} + debian/*.deb
+      #   Windows target/release/bundle/nsis/*_x64-setup.exe{,.sig}
+      - name: "tauri build (macOS: app + dmg)"
+        if: runner.os == 'macOS'
+        working-directory: app
+        run: npm run tauri build -- --config src-tauri/tauri.release.conf.json --bundles app dmg
+      - name: "tauri build (Linux: appimage + deb)"
+        if: runner.os == 'Linux'
+        working-directory: app
+        run: npm run tauri build -- --config src-tauri/tauri.release.conf.json --bundles appimage deb
+      - name: "tauri build (Windows: nsis)"
+        if: runner.os == 'Windows'
+        working-directory: app
+        run: npm run tauri build -- --config src-tauri/tauri.release.conf.json --bundles nsis
+      - name: Upload updater payload + artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            target/release/bundle/macos/*.app.tar.gz
+            target/release/bundle/macos/*.app.tar.gz.sig
+            target/release/bundle/dmg/*.dmg
+      - name: Upload updater payload + artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage.sig
+            target/release/bundle/debian/*.deb
+      - name: Upload updater payload + artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/nsis/*-setup.exe.sig
+
+  # 组装 updater feed 并建【草稿】Release：latest.json 的 URL 指向该 tag 的
+  # Release 下载地址（与 tauri.conf.json 的 updater endpoint
+  # releases/latest/download/latest.json 同一通道）；草稿态控制器人工复核、补全
+  # Release 说明（已知限制：Windows beta、G5 N/A、Rust 文案未 i18n）后发布（plan D7）。
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Assemble latest.json (updater feed)
+        run: node scripts/make-latest.mjs --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dist dist --out dist
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "HawkSnap $GITHUB_REF_NAME" \
+            --notes "Draft assembled by CI (plan D6). Controller: review artifacts, finalize release notes (known limitations: Windows beta, G5 N/A, Rust-side strings not yet i18n), then publish (plan D7)." \
+            dist/*
