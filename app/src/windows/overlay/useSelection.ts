@@ -63,8 +63,23 @@ export function useSelection(opts: {
     if (phase !== "selected" || !rect || rect.w < 2 || rect.h < 2) { probe("rejected (guard)"); return; }
     confirmingRef.current = true;
     probe("passed");
-    opts.onConfirm?.(rect, action);
+    // HiDPI 分数坐标修正（0.1 hotfix）：缩放屏上 clientX/Y 可为小数（如 428.75），norm()
+    // 原样保留 → Rust 侧 Rect 是 i32/u32，serde 在 IPC 层直接拒绝浮点 → finish_capture
+    // 失败。出口统一取整（round(w≥2) ≥ 2，既有 w/h≥2 守卫取整后仍成立，无需复检）。
+    const r = {
+      x: Math.round(rect.x), y: Math.round(rect.y),
+      w: Math.round(rect.w), h: Math.round(rect.h),
+    };
+    opts.onConfirm?.(r, action);
   }, [phase, rect, opts]);
+
+  // 失败解锁（0.1 hotfix）：confirm 置位的在途守卫原只有 cancel/reset 两个出口——
+  // finish_capture IPC 失败时守卫仍为 true，本轮所有后续确认都被拒（用户必须 Esc 重选）。
+  // 页面在 onConfirm 的 catch 路径调用本函数解锁，失败后无需 Esc 即可重试。成功路径
+  // 无需调用（成功即 emit_capture_done 关窗）。与 cancel/reset 的差异：不动 phase/rect。
+  const unlockConfirm = useCallback(() => {
+    confirmingRef.current = false;
+  }, []);
 
   // Task 6 click-to-select 直选：跳过拖拽直接以给定 rect 进入 selected（动作浮条随之
   // 出现）。不动 confirmingRef——在途守卫只由 confirm 链管理（controller 裁定 6）；
@@ -72,7 +87,12 @@ export function useSelection(opts: {
   // 短路，陈旧 start 无人再读（下一次 pointerdown 会整体覆盖）。
   const selectRect = useCallback((r: SelRect) => {
     start.current = null;
-    setRect(r);
+    // 与 confirm 出口同理（0.1 hotfix）：AX 帧坐标可为小数，入口即取整——渲染与
+    // Enter 确认整链保持整数（同一 bug 的另一入口）。
+    setRect({
+      x: Math.round(r.x), y: Math.round(r.y),
+      w: Math.round(r.w), h: Math.round(r.h),
+    });
     setPhase("selected");
   }, []);
 
@@ -123,5 +143,5 @@ export function useSelection(opts: {
     return () => window.removeEventListener("keydown", onKey);
   }, [cancel, confirm, phase, opts]);
 
-  return { phase, rect, pointerHandlers, confirm, cancel, reset, selectRect };
+  return { phase, rect, pointerHandlers, confirm, cancel, reset, selectRect, unlockConfirm };
 }

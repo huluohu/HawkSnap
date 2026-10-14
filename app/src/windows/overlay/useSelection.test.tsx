@@ -115,6 +115,47 @@ describe("useSelection", () => {
     expect(onConfirm).toHaveBeenCalledWith({ x: 10, y: 10, w: 50, h: 30 }, "save");
   });
 
+  // —— 0.1 hotfix：HiDPI 分数坐标（clientX/Y 可为小数，Rust Rect 是 i32/u32，serde 拒浮点）——
+
+  it("confirm rounds a fractional rect before onConfirm", () => {
+    // 回归：缩放屏上 clientX/Y 带小数（如 428.75）→ finish_capture 被 serde 拒绝。
+    // onConfirm 必须收到取整后的 rect（x:11, w:50）。
+    const onConfirm = vi.fn();
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600, onConfirm }));
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 10.6, clientY: 10.2 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: 60.4, clientY: 40.4 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
+    act(() => result.current.confirm());
+    // norm: x=10.6→11, y=10.2→10, w=49.8→50, h=30.2→30
+    expect(onConfirm).toHaveBeenCalledWith({ x: 11, y: 10, w: 50, h: 30 }, "copy");
+  });
+
+  it("selectRect rounds a fractional rect (AX frames can be fractional)", () => {
+    // 同一 bug 的另一入口：click-to-select 直选继承 AX 帧的小数坐标，入口即取整。
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600 }));
+    act(() => result.current.selectRect({ x: 5.5, y: 6.5, w: 100.4, h: 50.6 }));
+    expect(result.current.phase).toBe("selected");
+    expect(result.current.rect).toEqual({ x: 6, y: 7, w: 100, h: 51 });
+  });
+
+  it("unlockConfirm releases the in-flight guard so a failed confirm can retry without Esc", () => {
+    // 回归（hotfix 2）：finish_capture IPC 失败时页面在 catch 里调 unlockConfirm。
+    // 模拟失败 = onConfirm 正常返回（真页面的 async 回调内部自吞错，promise 不 reject）
+    // 且无人解锁——解锁前第二次 confirm 必被 in-flight 守卫拒绝。
+    const onConfirm = vi.fn();
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600, onConfirm }));
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 10, clientY: 10 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: 60, clientY: 40 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
+    act(() => result.current.confirm());
+    expect(onConfirm).toHaveBeenCalledTimes(1); // 守卫置位，链"失败"在途
+    act(() => result.current.confirm());
+    expect(onConfirm).toHaveBeenCalledTimes(1); // 未解锁 → 仍被拒
+    act(() => result.current.unlockConfirm());
+    act(() => result.current.confirm());
+    expect(onConfirm).toHaveBeenCalledTimes(2); // 解锁后重试通过
+  });
+
   // —— Task 4：方向键微调 + 磁吸 ——
 
   const arrowKey = (key: string, shift = false) => {

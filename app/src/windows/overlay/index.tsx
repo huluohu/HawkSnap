@@ -97,9 +97,24 @@ export default function OverlayWindow() {
     dlog("mounted, label=" + (window.__LABEL__ ?? "none"));
   }, []);
 
+  // Snipaste 式十字准线（0.1 hotfix 3）：透明无边框 WKWebView 上 CSS cursor:crosshair
+  // 不可靠（macOS 不保证合成光标生效），改为自绘两条 1px 线随指针移动。零 React state、
+  // 零 canvas 重绘：window 级 pointermove 直写 DOM ref 的 style.transform（合成器级
+  // 位移，无 layout）。初始化位移 -100px（屏外），首次移动前不显示任何线。
+  const crossHRef = useRef<HTMLDivElement>(null);
+  const crossVRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (crossHRef.current) crossHRef.current.style.transform = `translateY(${e.clientY}px)`;
+      if (crossVRef.current) crossVRef.current.style.transform = `translateX(${e.clientX}px)`;
+    };
+    window.addEventListener("pointermove", onMove);
+    return () => window.removeEventListener("pointermove", onMove);
+  }, []);
+
   // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用。
   // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
-  const { phase, rect, pointerHandlers, confirm, reset, selectRect } = useSelection({
+  const { phase, rect, pointerHandlers, confirm, reset, selectRect, unlockConfirm } = useSelection({
     width: display?.width ?? 0, height: display?.height ?? 0,
     // bounds = 本 display 的逻辑边界（选区坐标是 display 本地系，故 x/y 恒为 0——
     // payload 的 display.x/y 是全局多屏坐标，直接用会破坏副屏上的夹取）
@@ -132,6 +147,9 @@ export default function OverlayWindow() {
         // 主窗口的 capture-error 横幅（ACL core:default 含 event emit）。
         console.error("finish_capture failed", err);
         void emit("hawk://capture-error", String(err));
+        // 失败解锁在途守卫（0.1 hotfix 2）：否则 confirm 的 in-flight 标志只有
+        // cancel/reset 能清，一次 IPC 失败就砖死本轮所有重试（用户被迫 Esc 重选）。
+        unlockConfirm();
       }
     },
     onCancel: () => {
@@ -368,6 +386,15 @@ export default function OverlayWindow() {
         style={{ position: "fixed", inset: 0, cursor: "crosshair" }}
         {...clickAwareHandlers}
         onDoubleClick={() => confirm()} />
+      {/* 十字准线（0.1 hotfix 3）：横竖两条 1px 线，difference 混合在任意底色可见；
+          pointerEvents:none 不拦事件，z 5 低于动作浮条（z 10）。覆盖层常驻复用，
+          组件只在 display 就绪后渲染，故线随窗口生命周期天然存在。 */}
+      <div ref={crossHRef} style={{ position: "fixed", left: 0, right: 0, top: 0, height: 1,
+        background: "rgba(255,255,255,0.8)", mixBlendMode: "difference",
+        pointerEvents: "none", zIndex: 5, transform: "translateY(-100px)" }} />
+      <div ref={crossVRef} style={{ position: "fixed", top: 0, bottom: 0, left: 0, width: 1,
+        background: "rgba(255,255,255,0.8)", mixBlendMode: "difference",
+        pointerEvents: "none", zIndex: 5, transform: "translateX(-100px)" }} />
       {/* 选区确认浮条：canvas 的兄弟节点（fixed 定位）。pointer/dblclick 处理器都只挂在
           canvas 元素上，浮条内的 mousedown/双击按构造不进入选区状态机——既不清选区也不
           触发拖拽/双击确认。Enter 缺省 confirm() = "copy"（语义裁定：保存须显式点按钮）。 */}
