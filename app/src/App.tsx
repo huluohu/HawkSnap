@@ -20,6 +20,7 @@ interface Settings {
   launchAtLogin: boolean;
   appearance: string; // "system" | "light" | "dark"
   language: string; // "system" | "zh-CN" | "en-US"（服务端 sanitize 兜底，D1）
+  updateEnabled: boolean; // 自动更新开关（D3；服务端不 sanitize，bool 无脏值）
 }
 
 // 表单态：saveDir 归一为 string（null ↔ "" 双向转换），便于受控输入。
@@ -35,6 +36,7 @@ const DEFAULTS: SettingsForm = {
   launchAtLogin: false,
   appearance: "system",
   language: "system",
+  updateEnabled: true,
 };
 
 const toForm = (s: Settings): SettingsForm => ({ ...s, saveDir: s.saveDir ?? "" });
@@ -44,6 +46,35 @@ const toPayload = (f: SettingsForm): Settings => ({
 });
 
 type HotkeySlot = "hotkeyCapture" | "hotkeyPin" | "hotkeyRecord";
+
+// —— 自动更新（D3）—— 与后端 updater.rs 对齐 ——
+interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  currentVersion: string;
+}
+
+// hawk://update-progress 载荷（serde camelCase）：total 可能缺失（Content-Length 未知）。
+interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
+// 更新区状态机：idle → checking → latest | available → downloading → installed。
+type UpdateState =
+  | { phase: "idle" }
+  | { phase: "checking" }
+  | { phase: "latest" }
+  | { phase: "available"; info: UpdateInfo }
+  | { phase: "downloading"; progress: UpdateProgress | null }
+  | { phase: "installed" };
+
+// 后端哨兵（updater.rs ERR_NOT_CONFIGURED）：更新通道未配置（占位公钥期常态）——
+// 映射为 i18n 文案而非报错。双端字符串一致由 updater.rs 单测 + i18n.test.ts 兜底。
+const ERR_UPDATER_NOT_CONFIGURED = "updater_not_configured";
+
+// 字节 → MB 展示（一位小数；进度文本里的数字不是文案，不入词典）。
+const fmtMb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
 
 // 热键注册失败载荷（D0-⑤）：与后端 HotkeyError（serde camelCase）对齐——kind 供横幅
 // 归因，message 为人类可读文案（注册失败原因或媒体键降级提示）。kind 的展示名走
@@ -92,6 +123,8 @@ function App() {
   const [capturing, setCapturing] = useState<HotkeySlot | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveOk, setSaveOk] = useState(false);
+  const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -186,6 +219,71 @@ function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [capturing]);
 
+  // 自动更新（D3）：下载进度 push 通道。仅 downloading 相消费；其他相收到的
+  // 迟到事件（上一次安装的尾巴）直接忽略，防止进度文本串台。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<UpdateProgress>("hawk://update-progress", (e) => {
+      setUpdateState((s) =>
+        s.phase === "downloading" ? { phase: "downloading", progress: e.payload } : s,
+      );
+    })
+      .then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 手动检查更新（manual=true 覆盖 update_enabled 开关——用户显式动作）。
+  const checkForUpdates = () => {
+    setUpdateError(null);
+    setUpdateState({ phase: "checking" });
+    invoke<UpdateInfo | null>("check_for_updates", { manual: true })
+      .then((info) =>
+        setUpdateState(info ? { phase: "available", info } : { phase: "latest" }),
+      )
+      .catch((e) => {
+        setUpdateState({ phase: "idle" });
+        if (String(e) === ERR_UPDATER_NOT_CONFIGURED) {
+          setUpdateError(t("settings.updates.notConfigured"));
+        } else {
+          setUpdateError(t("banner.updateError", { message: String(e) }));
+        }
+      });
+  };
+
+  // 下载并安装：进度经 hawk://update-progress（上方 listener 写入 downloading 相）。
+  // Ok → installed（提示重启，不自动重启）；Err → 横幅 + 回 idle 可重试。
+  const installUpdate = () => {
+    setUpdateError(null);
+    setUpdateState((s) =>
+      s.phase === "available" ? { phase: "downloading", progress: null } : s,
+    );
+    invoke<void>("install_update")
+      .then(() => setUpdateState({ phase: "installed" }))
+      .catch((e) => {
+        setUpdateState({ phase: "idle" });
+        if (String(e) === ERR_UPDATER_NOT_CONFIGURED) {
+          setUpdateError(t("settings.updates.notConfigured"));
+        } else {
+          setUpdateError(t("banner.updateError", { message: String(e) }));
+        }
+      });
+  };
+
+  // 立即重启（AppHandle::restart 不返回，进程直接换成新版本）。
+  const restartApp = () => {
+    invoke<void>("restart_app").catch((e) =>
+      setUpdateError(t("banner.updateError", { message: String(e) })),
+    );
+  };
+
   // 面板入口（C6）：与 F1/F2 热键、托盘同链路（panel_trigger → start_capture_flow /
   // pin_latest），失败经 hawk://capture-error 横幅回流。热键名随设置回显（C7）。
   const trigger = (action: "capture" | "pin") => {
@@ -245,6 +343,11 @@ function App() {
       {settingsError && (
         <div role="alert" style={banner}>
           {t("banner.settingsError", { message: settingsError })}
+        </div>
+      )}
+      {updateError && (
+        <div role="alert" style={banner}>
+          {updateError}
         </div>
       )}
       <h1>HawkSnap</h1>
@@ -393,6 +496,75 @@ function App() {
               <option value="zh-CN">{t("settings.langZh")}</option>
               <option value="en-US">{t("settings.langEn")}</option>
             </select>
+          </div>
+        </div>
+
+        <div style={fieldRow}>
+          <label style={fieldLabel} htmlFor="update-enabled">{t("settings.updates")}</label>
+          <div style={{ display: "grid", gap: 8 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                id="update-enabled"
+                type="checkbox"
+                checked={form.updateEnabled}
+                onChange={(e) => setField("updateEnabled", e.target.checked)}
+              />
+              {t("settings.updatesAutoDesc")}
+            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                style={entryBtn}
+                onClick={checkForUpdates}
+                disabled={updateState.phase === "checking" || updateState.phase === "downloading"}
+              >
+                {t("settings.checkUpdates")}
+              </button>
+              {updateState.phase === "checking" && (
+                <span style={{ color: "#666" }}>{t("settings.updates.checking")}</span>
+              )}
+              {updateState.phase === "latest" && (
+                <span style={{ color: "#3c763d" }}>{t("settings.updates.latest")}</span>
+              )}
+              {updateState.phase === "available" && (
+                <span style={{ color: "#3c763d" }}>
+                  {t("settings.updates.available", { version: updateState.info.version })}
+                </span>
+              )}
+              {updateState.phase === "downloading" && (
+                <span style={{ color: "#666" }}>
+                  {updateState.progress == null
+                    ? t("settings.updates.downloading")
+                    : updateState.progress.total != null
+                      ? t("settings.updates.progressKnown", {
+                          a: fmtMb(updateState.progress.downloaded),
+                          b: fmtMb(updateState.progress.total),
+                        })
+                      : t("settings.updates.progressUnknown", {
+                          a: fmtMb(updateState.progress.downloaded),
+                        })}
+                </span>
+              )}
+              {updateState.phase === "installed" && (
+                <span style={{ color: "#3c763d" }}>{t("settings.updates.installed")}</span>
+              )}
+              {updateState.phase === "available" && (
+                <button type="button" style={entryBtn} onClick={installUpdate}>
+                  {t("settings.updates.downloadInstall")}
+                </button>
+              )}
+              {updateState.phase === "installed" && (
+                <button type="button" style={entryBtn} onClick={restartApp}>
+                  {t("settings.updates.restart")}
+                </button>
+              )}
+            </div>
+            {/* 更新说明简版（计划裁定：下载进度级占位，完整 changelog 渲染归 M2）。 */}
+            {updateState.phase === "available" && updateState.info.notes && (
+              <div style={{ color: "#666", fontSize: 13, whiteSpace: "pre-wrap" }}>
+                {updateState.info.notes}
+              </div>
+            )}
           </div>
         </div>
 

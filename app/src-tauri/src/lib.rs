@@ -8,6 +8,7 @@ mod perf;
 mod pins;
 mod settings;
 mod single_instance;
+mod updater;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -25,6 +26,11 @@ pub fn run() {
             let builder = builder.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
             builder.build()
         })
+        // D3 自动更新：updater 2.13.x 的插件注册是纯状态管理（UpdaterState manage），
+        // 不解析 pubkey——tauri.conf.json 的占位公钥 REPLACE_AT_RELEASE（D7 填真钥）
+        // 不会让注册或启动失败（非致命，同 hotkey/历史库裁定）。占位期的用户面行为
+        // 由 updater.rs 的 channel_configured 短路兜底（检查返回「未配置」语义）。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture,
             overlay::cancel_capture, overlay::emit_capture_done,
@@ -35,7 +41,8 @@ pub fn run() {
             history::history_list, history::history_delete,
             pins::pin_latest, pins::pin_set_opacity, pins::pin_zoom,
             pins::pin_close, pins::pin_close_all,
-            panel::panel_trigger
+            panel::panel_trigger,
+            updater::check_for_updates, updater::install_update, updater::restart_app
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；

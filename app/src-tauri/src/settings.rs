@@ -15,6 +15,7 @@ pub struct Settings {
     pub launch_at_login: bool,    // 默认 false
     pub appearance: String,       // "system"|"light"|"dark"，默认 "system"
     pub language: String,         // "system"|"zh-CN"|"en-US"，默认 "system"（D1 i18n）
+    pub update_enabled: bool,     // 默认 true；更新检查是 spec §5 唯一新增外联（D3）
 }
 
 impl Default for Settings {
@@ -29,6 +30,7 @@ impl Default for Settings {
             launch_at_login: false,
             appearance: "system".into(),
             language: "system".into(),
+            update_enabled: true,
         }
     }
 }
@@ -192,6 +194,7 @@ mod tests {
         assert!(!s.launch_at_login);
         assert_eq!(s.appearance, "system");
         assert_eq!(s.language, "system");
+        assert!(s.update_enabled, "自动更新默认开启（spec §5，可关闭）");
     }
 
     #[test]
@@ -208,10 +211,12 @@ mod tests {
             launch_at_login: true,
             appearance: "dark".into(),
             language: "zh-CN".into(),
+            update_enabled: false,
         };
         s.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();
         assert_eq!(s, loaded, "save→load 必须全等");
+        assert!(!loaded.update_enabled, "update_enabled 必须随文件持久化（false 不被默认值吞掉）");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

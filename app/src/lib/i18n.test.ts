@@ -80,4 +80,11 @@ describe("i18n", () => {
       expect(enDict[`hotkey.kind.${kind}`]).toBeTruthy();
     }
   });
+
+  // D3：后端哨兵 updater_not_configured（Rust updater.rs ERR_NOT_CONFIGURED）在前端
+  // 特判后映射到本 key——两端字符串一致性由 Rust 侧同名单测兜底，这里断言 key 在盘。
+  it("updater_not_configured_key_exists_in_both_dictionaries", () => {
+    expect(zhDict["settings.updates.notConfigured"]).toBeTruthy();
+    expect(enDict["settings.updates.notConfigured"]).toBeTruthy();
+  });
 });

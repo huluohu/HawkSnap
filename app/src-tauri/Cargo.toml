@@ -31,10 +31,23 @@ tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 # 开机自启（C7）：仅写本地登录项（LaunchAgent），无外联。
 tauri-plugin-autostart = "2"
+# 自动更新（D3）：官方 updater 插件，内置 Ed25519（minisign）签名校验。更新检查是
+# spec §5 唯一新增外联，经 settings.update_enabled 可关闭。
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arboard = "3"
 chrono = "0.4"
+
+# G7 伪签名集成测试：tiny_http 起本地静态源充当更新通道；tauri "test" feature 提供无
+# 窗口的 mock app（updater_builder 需要插件状态挂在一个 App 上）。feature 仅测试构建
+# 生效（dev-dependencies 不参与常规 build），不污染发布产物。
+[dev-dependencies]
+tiny_http = "0.12"
+tauri = { version = "2", features = ["test"] }
+# G7 fixture 自洽性对照（未篡改字节验签通过）：直接复用插件的验签原语与编码。
+minisign-verify = "0.3"
+base64 = "0.22"
 
 # 媒体键 F1 兼容（Task 13）：NSEvent 全局监听 systemDefined（亮度下键）事件。
 # 0.3.2 已在依赖树（wry）中，features 只增不改版本。

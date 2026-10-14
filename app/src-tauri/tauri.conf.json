@@ -29,5 +29,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/guxiaolong/HawkSnap/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_AT_RELEASE"
+    }
   }
 }
