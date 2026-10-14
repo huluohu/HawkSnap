@@ -104,8 +104,8 @@ pub async fn check_for_updates(
     }))
 }
 
-/// 下载并安装更新（check → download_and_install）。验签失败 → Err 且零落盘（插件在
-/// verify_signature 通过后才动安装目录，G7 集成测试证明）。进度经
+/// 下载并安装更新（check → download → verify → install）。验签失败 → Err 且零落盘
+/// （插件在 verify_signature 通过后才动安装目录，G7 集成测试证明）。进度经
 /// hawk://update-progress 推送；进度事件按 ≥512KB 步进节流，避免大更新打爆 IPC。
 /// 安装成功后不自动重启（macOS/Linux 需 relaunch，前端提示用户点「立即重启」）。
 #[tauri::command(async)]
@@ -124,17 +124,20 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     let Some(update) = update else {
         return Ok(());
     };
-    let handle = app.clone();
+    // 拆 download/install（download_and_install 的等价两步）：on_chunk 以可变借用
+    // 持有计数器，download 返回后借用结束——完成事件才能拿到真实字节数（评审
+    // Fix 2：原实现 move 进闭包，完成事件恒 0/0）。
+    let emit_handle = app.clone();
     let mut downloaded: u64 = 0;
     let mut last_emitted: u64 = 0;
-    update
-        .download_and_install(
-            move |chunk, total| {
+    let bytes = update
+        .download(
+            |chunk, total| {
                 downloaded += chunk as u64;
-                // 节流：距上次发射 ≥512KB 才推（或已接近完成由最终状态覆盖）。
+                // 节流：距上次发射 ≥512KB 才推（完成事件由 download 后补发）。
                 if downloaded - last_emitted >= 512 * 1024 {
                     last_emitted = downloaded;
-                    let _ = handle.emit(
+                    let _ = emit_handle.emit(
                         "hawk://update-progress",
                         UpdateProgress { downloaded, total },
                     );
@@ -144,11 +147,13 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         )
         .await
         .map_err(err)?;
+    update.install(bytes).map_err(err)?;
+    // 完成事件：downloaded == total → 前端渲染 100%（此时数字必然真实）。
     let _ = app.emit(
         "hawk://update-progress",
         UpdateProgress {
             downloaded,
-            total: Some(downloaded), // downloaded == total → 前端渲染 100%
+            total: Some(downloaded),
         },
     );
     Ok(())

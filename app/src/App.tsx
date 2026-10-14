@@ -73,6 +73,11 @@ type UpdateState =
 // 映射为 i18n 文案而非报错。双端字符串一致由 updater.rs 单测 + i18n.test.ts 兜底。
 const ERR_UPDATER_NOT_CONFIGURED = "updater_not_configured";
 
+// 启动静默检查去重：面板会被 idle_reaper 销毁重建（webview 重挂载），每次重挂载
+// 都打一次更新接口是惊扰——本模块级标记保证每次应用运行（webview 生命周期）只自动
+// 检查一次；用户点「检查更新」不受此限（显式动作）。
+let autoCheckFired = false;
+
 // 字节 → MB 展示（一位小数；进度文本里的数字不是文案，不入词典）。
 const fmtMb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
 
@@ -238,6 +243,20 @@ function App() {
       disposed = true;
       unlisten?.();
     };
+  }, []);
+
+  // 启动静默检查（评审 Fix 1：让 update_enabled 真正门控自动检查）。manual=false 时
+  // 门控全在命令侧：开关关闭 → Ok(None)；占位公钥 → 同样 Ok(None)——两者都渲染为无。
+  // 只有真的发现新版本才出「发现新版本 vX」状态；失败静默降级（spec §9 精神：不打扰，
+  // 用户可随时手动检查获知失败原因）。挂载即发（命令自读服务端设置，无需等表单水合）。
+  useEffect(() => {
+    if (autoCheckFired) return;
+    autoCheckFired = true;
+    invoke<UpdateInfo | null>("check_for_updates", { manual: false })
+      .then((info) => {
+        if (info) setUpdateState((s) => (s.phase === "idle" ? { phase: "available", info } : s));
+      })
+      .catch(() => {});
   }, []);
 
   // 手动检查更新（manual=true 覆盖 update_enabled 开关——用户显式动作）。
