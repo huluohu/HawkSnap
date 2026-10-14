@@ -1,8 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
-import { t, setLanguage, type LanguageSetting } from "../../lib/i18n";
+import {
+  t,
+  setLanguage,
+  getLanguage,
+  subscribe,
+  type LanguageSetting,
+} from "../../lib/i18n";
 import { useSelection, type SelRect, type ConfirmAction } from "./useSelection";
 import type { Rect } from "./geometry";
 import { toLocalHover, type HoverFrame } from "./hover";
@@ -46,15 +52,11 @@ async function fetchRaw(url: string): Promise<ArrayBuffer> {
 }
 
 export default function OverlayWindow() {
+  // 语言（D1 + 评审修正）：订阅 i18n 语言态——面板保存新语言后，此处的 setLanguage
+  // 触发本组件重渲染，下一轮捕获的动作浮条文案即新语言（覆盖层常驻复用、无挂载时机）。
+  useSyncExternalStore(subscribe, getLanguage);
   const [display, setDisplay] = useState<Display | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // 语言（D1）：覆盖层是独立 webview，i18n 模块态默认跟随系统；显式设置需挂载时拉取
-  // 一次 settings 对齐（与主窗口同源）。失败静默——保持系统语言兜底即可用。
-  useEffect(() => {
-    invoke<{ language: string }>("get_settings")
-      .then((s) => setLanguage(s.language as LanguageSetting))
-      .catch(() => {});
-  }, []);
   // 覆盖层窗口常驻复用（Plan B Task 1）：页面生命周期跨越多轮捕获，此标志每轮 payload
   // 到达时复位，保证 hawk://overlay-shown 每轮捕获重发一次（bench 门闩按轮与 hotkey 配对）。
   const shownRef = useRef(false);
@@ -121,6 +123,12 @@ export default function OverlayWindow() {
     listen<Display[]>("hawk://overlay-ready", (e) => {
       const mine = e.payload.find((d) => `overlay-${d.displayId}` === window.__LABEL__);
       if (mine) {
+        // 语言逐轮对齐（评审修正）：覆盖层常驻复用，挂载期同步会被面板后续的语言切换
+        // 冻结在旧值——每轮 payload 到达时拉一次 settings（µs 级小 IPC）重设 i18n 态；
+        // 与 setDisplay 的先后序无关，谁后到谁触发订阅重渲染，浮条文案必为新语言。
+        void invoke<{ language: string }>("get_settings")
+          .then((s) => setLanguage(s.language as LanguageSetting))
+          .catch(() => {});
         // 代数守卫（终审 wave）：旧代迟到 payload 直接丢弃（见 maxFlowRef 注），
         // 绝不 setDisplay / reset。等值放行：同代的三连发补显仍生效。
         if (mine.flow < maxFlowRef.current) return;
