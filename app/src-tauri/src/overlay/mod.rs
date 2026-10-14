@@ -11,7 +11,11 @@ mod hotkey;
 pub use candidates::snap_candidates;
 pub use delay::{cancel_delayed_capture, countdown_remaining, start_delayed_capture};
 pub use flow::{cancel_capture, emit_capture_done, start_capture_flow};
-pub use hotkey::{hotkey_error, register_hotkeys};
+// reregister_from_settings / reregister_with 只在 hotkey.rs 内部链路使用（setup 经
+// register_hotkeys），不在此重导出（重导出无人引用会挂 unused_imports）。
+pub use hotkey::{hotkey_error, register_hotkeys, register_one, HotkeyKind};
+// 保存管线（settings.rs apply_pipeline）按注册序逐项注册热键：crate 内共享，不外暴。
+pub(crate) use hotkey::register_in_order;
 #[cfg(target_os = "macos")]
 pub use hotkey::{register_hover_probe, register_media_key_f1};
 

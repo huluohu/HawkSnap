@@ -26,55 +26,129 @@ pub fn register_hover_probe(app: &AppHandle) -> Result<(), String> {
 }
 
 pub fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut};
+    // C7：热键自设置读取（settings.json 缺失/损坏 → Settings::default = F1/F2/F6），
+    // 注册失败语义与拆分前一致：Err 上抛 + 落 pull 通道（HOTKEY_ERROR，首错优先），
+    // lib.rs 的 emit/拉面板逻辑不变。
+    let settings = crate::settings::Settings::load(app);
+    reregister_from_settings(app, &settings).inspect_err(|msg| {
+        let mut slot = HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            // 首错优先（通道槽位只有一个）：register_in_order 返回的即注册序首个错误
+            *slot = Some(msg.clone());
+        }
+    })
+}
+
+/// 热键角色：注册序 capture → pin → record 下决定组合键触发哪个处理器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyKind {
+    Capture,
+    Pin,
+    Record,
+}
+
+/// F6 占位（C7）：触发时只发「即将推出」横幅事件（App.tsx 横幅复用），不做任何录屏。
+const RECORD_COMING_SOON: &str = "录屏功能将在后续版本提供";
+
+/// 按注册序（capture → pin → record）逐项调用 register_fn；全部尝试（前项失败不阻断
+/// 后项——拆分前 F1 被占用时 F2 仍注册成功的行为保留），任一失败 → 返回首个错误。
+/// 与 AppHandle 解耦（app 由 register_fn 闭包捕获）：settings.rs 的保存管线与单测共用。
+pub(crate) fn register_in_order(
+    settings: &crate::settings::Settings,
+    mut register_fn: impl FnMut(&str, HotkeyKind) -> Result<(), String>,
+) -> Result<(), String> {
+    let jobs = [
+        (settings.hotkey_capture.as_str(), HotkeyKind::Capture),
+        (settings.hotkey_pin.as_str(), HotkeyKind::Pin),
+        (settings.hotkey_record.as_str(), HotkeyKind::Record),
+    ];
+    let mut first_err: Option<String> = None;
+    for (combo, kind) in jobs {
+        if let Err(e) = register_fn(combo, kind) {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+/// 注册单个组合并挂对应处理器（生产 register_fn）。Shortcut::from_str 是插件的热键
+/// 字符串解析器（"F1"、"Cmd+Shift+A"，大小写不敏感）。on_shortcut 注册快捷键并挂处理器
+/// （勿再单独 register：同一组合二次注册会被 macOS 以 eventHotKeyExistsErr 拒绝）。
+/// 热键回调在主线程（Carbon 事件）触发，而窗口建窗/关窗类操作禁止在主线程做
+/// （tauri-runtime-wry 在主线程处理 Close 消息会直接 panic），故处理器只 spawn 独立
+/// 线程执行，热键处理立即返回。
+pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<(), String> {
+    use std::str::FromStr;
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+    let shortcut =
+        Shortcut::from_str(combo).map_err(|e| format!("热键 {combo} 无法解析: {e}"))?;
     let gs = app.global_shortcut();
-    let f1 = Shortcut::new(None, Code::F1);
-    // C7: settings.hotkey_pin —— 当前硬编码 "F2"（plan C5 裁定，C7 切到 settings）
-    let f2 = Shortcut::new(None, Code::F2);
     let app2 = app.clone();
-    // on_shortcut 注册快捷键并挂处理器（勿再单独 register：同一组合二次注册会被 macOS
-    // 以 eventHotKeyExistsErr 拒绝）。热键回调在主线程（Carbon 事件）触发，而窗口
-    // 建窗/关窗类操作禁止在主线程做（tauri-runtime-wry 在主线程处理 Close 消息会直接
-    // panic），故整个流程放到独立线程执行，热键处理立即返回。
-    gs.on_shortcut(f1, move |_app, _shortcut, event| {
-        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-            let app = app2.clone();
-            std::thread::spawn(move || trigger_capture_flow(&app));
-        }
-    })
-    .map_err(|e| {
-        let msg = format!("F1 注册失败（可能被占用）: {e}");
-        // 除返回值外落入 pull 通道（HOTKEY_ERROR）：setup 期的 push emit 早于前端 listen 必丢
-        *HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
-        msg
-    })?;
-    // F2 贴图：注册失败语义与 F1 完全一致（on_shortcut 的 Err 向上传播由 setup 的
-    // hotkey-error 通道统一处理，同时落 pull 通道补 setup 期丢失；不单独做占用检查）。
-    // 回调线程派发同 F1：pin_latest 的窗口创建经 run_on_main_thread 交付主线程，
-    // 此处线程只为让热键回调立即返回。
-    let app2 = app.clone();
-    gs.on_shortcut(f2, move |_app, _shortcut, event| {
-        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-            // 探针（常驻，廉价）：E2E 判别「F2 回调没进来」vs「进来了但没出窗」。
-            // 注意 global-hotkey 0.8 的 Code::F2 → Carbon 0x78=120（99 是 kVK_F3）。
-            eprintln!("[hawksnap] F2 热键触发（pin_latest）");
-            let app = app2.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = crate::pins::pin_latest(app.clone()) {
-                    let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+    match kind {
+        HotkeyKind::Capture => gs
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    let app = app2.clone();
+                    std::thread::spawn(move || trigger_capture_flow(&app));
                 }
-            });
-        }
-    })
-    .map_err(|e| {
-        let msg = format!("F2 注册失败（可能被占用）: {e}");
-        if HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
-            // F1 已有错误时保留 F1 的（首错优先，通道槽位只有一个）
-            *HOTKEY_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
-        }
-        msg
-    })?;
-    Ok(())
+            })
+            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}")),
+        HotkeyKind::Pin => gs
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    // 探针（常驻，廉价）：E2E 判别「pin 回调没进来」vs「进来了但没出窗」。
+                    // 注意 global-hotkey 0.8 的 Code::F2 → Carbon 0x78=120（99 是 kVK_F3）。
+                    eprintln!("[hawksnap] F2 热键触发（pin_latest）");
+                    let app = app2.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::pins::pin_latest(app.clone()) {
+                            let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                        }
+                    });
+                }
+            })
+            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}")),
+        HotkeyKind::Record => gs
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    let app = app2.clone();
+                    std::thread::spawn(move || {
+                        use tauri::Emitter;
+                        let _ = app.emit("hawk://coming-soon", RECORD_COMING_SOON);
+                    });
+                }
+            })
+            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}")),
+    }
+}
+
+/// C7：按设置重注册全部热键——先 unregister_all 旧组合，再按 capture → pin → record
+/// 注册新组合。任一失败 → Err（调用方中止保存）。注意：失败时旧组合已注销、新组合半数
+/// 可能已注册（运行态半新半旧），设置文件保持旧值——重启或下次成功保存自愈（计划裁定
+/// 语义，不做旧热键回滚注册）。注册经插件 run_main_thread 交付主线程（2.4.1
+/// register_internal/unregister_all 均已自带），任意线程可调——set_settings(async) 从
+/// tokio 线程调用安全。
+pub fn reregister_from_settings(
+    app: &AppHandle,
+    settings: &crate::settings::Settings,
+) -> Result<(), String> {
+    reregister_with(app, settings, register_one)
+}
+
+/// reregister 的可注入缝（计划 C7 裁定）：register_fn 由调用方注入，测试注入 fake
+/// （AppHandle 不可造，热键字符串经 settings.rs 的 register_in_order 间接验证）。
+pub fn reregister_with(
+    app: &AppHandle,
+    settings: &crate::settings::Settings,
+    register_fn: impl Fn(&AppHandle, &str, HotkeyKind) -> Result<(), String>,
+) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| format!("注销旧热键失败: {e}"))?;
+    register_in_order(settings, |combo, kind| register_fn(app, combo, kind))
 }
 
 /// F1（Carbon）与媒体键（NSEvent 亮度下）两条触发通道共用的入口：300ms 去重窗内只启动

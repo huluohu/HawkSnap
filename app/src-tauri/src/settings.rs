@@ -52,6 +52,9 @@ impl Settings {
         })
     }
 
+    /// C1 门面 API（计划接口）：落盘到 settings_path。C7 起 set_settings 走 apply_pipeline
+    /// 的 save_to（路径注入），本包装保留为既定接口。
+    #[allow(dead_code)]
     pub fn save(&self, app: &AppHandle) -> Result<(), String> {
         let path = settings_path(app);
         self.save_to(&path)
@@ -71,12 +74,16 @@ impl Settings {
         serde_json::from_str(&text).map_err(|e| e.to_string())
     }
 
-    /// 归一化：jpeg_quality clamp 1..=100；output_format 非 "jpeg" 一律 "png"。
+    /// 归一化：jpeg_quality clamp 1..=100；output_format 非 "jpeg" 一律 "png"；
+    /// save_dir 空/全空白 → None（C7「恢复默认」清空为空串/null 的双形态归一）。
     /// 在保存边界统一执行，脏输入（前端/手改）永远落不出非法值。
-    fn sanitized(mut self) -> Self {
+    pub(crate) fn sanitized(mut self) -> Self {
         self.jpeg_quality = self.jpeg_quality.clamp(1, 100);
         if self.output_format != "jpeg" {
             self.output_format = "png".into();
+        }
+        if self.save_dir.as_deref().is_some_and(|d| d.trim().is_empty()) {
+            self.save_dir = None;
         }
         self
     }
@@ -89,15 +96,61 @@ pub fn get_settings(app: AppHandle) -> Settings {
 
 #[tauri::command(async)]
 pub fn set_settings(app: AppHandle, s: Settings) -> Result<Settings, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    // 热键重注册第一步：注销旧组合（unregister_all 经插件 run_main_thread 交付主线程，
+    // async 命令跑在 tokio 线程，安全）。注销本身失败同样视为注册侧失败 → Err 不落盘。
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| format!("注销旧热键失败: {e}"))?;
+    let path = settings_path(&app);
+    // 保存管线（可测内核）：sanitize → 按序注册热键（任一失败 → Err 且不落盘，文件保持
+    // 旧值）→ 自启切换（best-effort，裁定：不因登录项失败拖垮保存）→ 落盘 → 返回生效设置。
+    // 运行态注：注册失败时旧热键已注销、新组合可能半数已注册（半新半旧），文件保持旧值
+    // ——重启或下次成功保存自愈（reregister_from_settings 注，计划裁定不做回滚注册）。
+    apply_pipeline(
+        s,
+        &path,
+        |combo, kind| crate::overlay::register_one(&app, combo, kind),
+        |enable| apply_launch_at_login(&app, enable),
+    )
+}
+
+/// set_settings 的可测内核（AppHandle-free）：sanitize → 按序注册热键（失败中止、不落盘）
+/// → 自启（best-effort 回调）→ 落盘 → 返回生效设置。生产路径由 set_settings 注入真实
+/// 注册（register_one）与自启（apply_launch_at_login）闭包；单测注入 fake（见 tests）。
+fn apply_pipeline(
+    s: Settings,
+    path: &std::path::Path,
+    register_fn: impl FnMut(&str, crate::overlay::HotkeyKind) -> Result<(), String>,
+    autostart_fn: impl FnOnce(bool),
+) -> Result<Settings, String> {
     let s = s.sanitized();
-    s.save(&app)?;
-    // C7: apply hotkeys & autostart
+    crate::overlay::register_in_order(&s, register_fn)?;
+    autostart_fn(s.launch_at_login);
+    s.save_to(path)?;
     Ok(s)
+}
+
+/// 开机自启（C7）：经 tauri-plugin-autostart 的 ManagerExt（AutoLaunchManager）切换
+/// 登录项（macOS LaunchAgent，仅写本地）。裁定：best-effort——切换失败仅 eprintln，
+/// 绝不影响整个保存的成败（登录项是旁路能力；失败可见性走日志，横幅留给热键冲突）。
+fn apply_launch_at_login(app: &AppHandle, enable: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let result = if enable {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    if let Err(e) = result {
+        eprintln!("[hawksnap] 开机自启切换失败（enable={enable}）: {e}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay::{register_in_order, HotkeyKind};
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -154,5 +207,64 @@ mod tests {
         assert_eq!(base().sanitized().output_format, "png", "非 jpeg → png");
         let jpeg = Settings { output_format: "jpeg".into(), ..base() };
         assert_eq!(jpeg.sanitized().output_format, "jpeg", "合法 jpeg 保留");
+    }
+
+    // —— C7：set_settings 应用管线 ——
+
+    #[test]
+    fn apply_hotkey_failure_keeps_file() {
+        // Plan C7 Step 1（计划裁定）：注册走注入而非真注册（AppHandle 不可造）。任一热键
+        // 注册失败 → 返回 Err 且文件内容不变（设置不落盘，前端据此回显旧值）。自启以回调
+        // 注入，测试绝不触碰真实登录项。
+        let dir = temp_dir("apply-failure");
+        let path = dir.join("settings.json");
+        let original = Settings::default();
+        original.save_to(&path).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // 第三个（record = "Cmd+Q"）注册失败：验证失败发生在序列后段时同样中止保存
+        let bad = Settings { hotkey_record: "Cmd+Q".into(), ..original.clone() };
+        let mut autostart_calls: Vec<bool> = Vec::new();
+        let result = apply_pipeline(
+            bad,
+            &path,
+            |combo, _kind| if combo == "Cmd+Q" { Err("被占用".into()) } else { Ok(()) },
+            |enable| autostart_calls.push(enable),
+        );
+        assert!(result.is_err(), "任一热键注册失败必须整体 Err");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after, "注册失败时文件必须保持旧值（不落盘）");
+        assert!(
+            autostart_calls.is_empty(),
+            "热键失败中止时不得执行自启切换（顺序：热键 → 自启 → 落盘）"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reregister_uses_settings_strings() {
+        // 注入 register_fn 捕获收到的 (combo, kind)：顺序必须 capture → pin → record，
+        // 字符串逐字取自设置（Shortcut::from_str 解析是插件域，不在此测）。
+        let s = Settings {
+            hotkey_capture: "Cmd+Shift+A".into(),
+            hotkey_pin: "F9".into(),
+            hotkey_record: "Ctrl+Alt+7".into(),
+            ..Default::default()
+        };
+        let mut seen: Vec<(String, HotkeyKind)> = Vec::new();
+        let result = register_in_order(&s, |combo, kind| {
+            seen.push((combo.to_string(), kind));
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(
+            seen,
+            vec![
+                ("Cmd+Shift+A".to_string(), HotkeyKind::Capture),
+                ("F9".to_string(), HotkeyKind::Pin),
+                ("Ctrl+Alt+7".to_string(), HotkeyKind::Record),
+            ],
+            "注册序与字符串必须逐字来自设置"
+        );
     }
 }

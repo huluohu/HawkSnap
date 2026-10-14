@@ -14,6 +14,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 2.4.x 起插件不再提供自由函数 init()，改用 Builder::new().build()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // C7 开机自启：autostart 2.7.0 同样无自由函数 init()（计划所写
+        // init(MacosLauncher::LaunchAgent, None) 为旧版签名），Builder.build() 适配；
+        // macOS 用 LaunchAgent（登录项 plist，仅写本地）。macos_launcher 仅 macOS 编译，
+        // 非 macOS 用 Builder 默认值（文档默认即 LaunchAgent，跨平台语义不变）。
+        .plugin({
+            let builder = tauri_plugin_autostart::Builder::new();
+            #[cfg(target_os = "macos")]
+            let builder = builder.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+            builder.build()
+        })
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture,
             overlay::cancel_capture, overlay::emit_capture_done,

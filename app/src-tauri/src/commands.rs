@@ -136,12 +136,14 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
         // 报“数据不齐”——属预期守护而非缺陷。
         crate::perf::mark("clipboard_done");
     }
-    // 4) 保存：编码只发生在保存路径；格式/质量来自设置（C2）。每次读小 JSON 文件
-    // （µs 级）——裁定 2：不为缓存引状态，profile 有实测成本再缓存。
+    // 4) 保存：编码只发生在保存路径；格式/质量/目录均来自设置（C2 + C7 接线）。每次读
+    // 小 JSON 文件（µs 级）——裁定 2：不为缓存引状态，profile 有实测成本再缓存。
     let mut saved_to = None;
     if req.save {
         let settings = crate::settings::Settings::load(&app);
-        let dir = dirs_picture_dir().ok_or("no picture dir")?;
+        // C7 保存目录接线（控制器追加）：settings.save_dir Some(非空) → 用户目录；
+        // None → 默认 ~/Pictures/HawkSnap（与 C2 之前行为一致）。
+        let dir = resolve_save_dir(&settings).ok_or("no picture dir")?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let (bytes, ext) = if settings.output_format == "jpeg" {
             (
@@ -294,6 +296,15 @@ fn dirs_picture_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Pictures/HawkSnap"))
 }
 
+/// C7：保存目录解析——settings.save_dir 优先（sanitized 已把空白串归一为 None），
+/// None → 默认 ~/Pictures/HawkSnap。AppHandle-free，独立成函数便于单测。
+fn resolve_save_dir(settings: &crate::settings::Settings) -> Option<std::path::PathBuf> {
+    match settings.save_dir.as_deref() {
+        Some(dir) if !dir.trim().is_empty() => Some(std::path::PathBuf::from(dir)),
+        _ => dirs_picture_dir(),
+    }
+}
+
 /// 前台应用名：恒 None（占位）。原「Plan B 接 window 检测后替换」的说法已过时——
 /// window/AX 检测在 Plan B 落地时只做了悬停高亮与磁吸候选，未包含 frontmost 名称
 /// 查询；保存文件名与历史 app 字段（C4）暂用 "HawkSnap"。接入点：CGWindowListCopyWindowInfo
@@ -338,6 +349,27 @@ mod tests {
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"frameUrl\":\"hawk-grab:///tmp/a.raw\""));
         assert!(!s.contains("pngUrl"), "旧字段不得残留");
+    }
+
+    #[test]
+    fn save_dir_resolves_from_settings() {
+        // C7 保存目录接线（控制器追加）：settings.save_dir Some(非空) → 用户目录；
+        // None → 默认 ~/Pictures/HawkSnap；空白串已被 sanitized 归一为 None → 默认。
+        let custom =
+            crate::settings::Settings { save_dir: Some("/tmp/hs-custom".into()), ..Default::default() };
+        assert_eq!(
+            resolve_save_dir(&custom),
+            Some(std::path::PathBuf::from("/tmp/hs-custom")),
+            "自定义目录优先于默认"
+        );
+        let home = std::env::var_os("HOME").expect("测试环境必须有 HOME");
+        let default_dir =
+            Some(std::path::PathBuf::from(home).join("Pictures/HawkSnap"));
+        assert_eq!(resolve_save_dir(&crate::settings::Settings::default()), default_dir);
+        let blank = crate::settings::Settings { save_dir: Some("   ".into()), ..Default::default() }
+            .sanitized();
+        assert_eq!(blank.save_dir, None, "空白 save_dir 必须被 sanitize 归一为 None");
+        assert_eq!(resolve_save_dir(&blank), default_dir);
     }
 
     #[test]

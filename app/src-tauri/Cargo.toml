@@ -29,6 +29,8 @@ rusqlite.workspace = true
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
+# 开机自启（C7）：仅写本地登录项（LaunchAgent），无外联。
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arboard = "3"
