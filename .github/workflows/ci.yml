@@ -103,6 +103,11 @@ jobs:
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # macOS 产物用 HawkSnapCodesign 自签证书签名：TCC 授权按证书锚定，用户升级后
+      # 屏幕录制/辅助功能授权持久（adhoc 签名每次构建失配）。bundler 检测到
+      # APPLE_CERTIFICATE 即自动签名；secrets 未配置时仅 macOS 产物退回 adhoc（有告警）。
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

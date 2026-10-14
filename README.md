@@ -90,3 +90,11 @@ macOS 默认把 F1 当作亮度降低键（「将 F1、F2 等键用作标准功�
 - 72 小时长时录屏稳定性（G5）自 M2 起测；
 - 错误提示等 Rust 侧文案暂为中文（界面已双语，Rust 侧 i18n 归后续版本）；
 - 热键冲突时仅提示保存失败，不列出占用该热键的其他应用（macOS 无公开 API），自动候选键建议留 M2 评估。
+
+## 签名与权限说明
+
+本地构建使用 `HawkSnapCodesign` 自签证书（证书锚定，跨构建 TCC 授权持久）。换机或重建证书后：
+`security import sign3.p12` + `security add-trusted-cert -r trustRoot crt.pem`（证书文件在维护者的
+`~/.tauri/codesign/`），构建后执行 `scripts/sign-local.sh` 重签。首次授权屏幕录制：系统设置 →
+隐私与安全性 → 录屏与系统录音 → + 添加 HawkSnap。CI 发布构建经 `APPLE_CERTIFICATE`/
+`APPLE_CERTIFICATE_PASSWORD` secrets 注入同一证书（tauri bundler 自动签名）。
