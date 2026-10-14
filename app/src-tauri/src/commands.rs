@@ -282,9 +282,11 @@ pub fn release_captures() {
     }
 }
 
-/// C4：保存成功后的历史入库链（缩略图生成 → thumbs/<stem>.png 落盘 → history::record）。
-/// 独立成函数便于整体 `?` 短路：任一步失败即 Err，由调用方 eprintln 降级（历史是旁路，
-/// 不回滚、不重试、不影响 CaptureOutcome）。
+/// C4：保存成功后的历史入库链（缩略图生成 → thumbs/<stem>.png 落盘 → history::record
+/// → prune 保留最新 500 条）。独立成函数便于整体 `?` 短路：任一步失败即 Err，由调用方
+/// eprintln 降级（历史是旁路，不回滚、不重试、不影响 CaptureOutcome）；prune 失败在
+/// 函数内自降级（终审 Fix 1），不占用链的 Err 通道——record 已成功，报「入库失败」
+/// 会误导。
 fn record_history(
     app: &AppHandle,
     path: &std::path::Path,
@@ -312,6 +314,13 @@ fn record_history(
         physical.h as i64,
         "HawkSnap",
     )?;
+    // C3 保留策略（终审 Fix 1，plan C3「record 后调用」）：入库成功后即裁剪至最新
+    // 500 条——此前 prune 无生产调用点，是死代码。best-effort 旁路语义与整条链一致：
+    // 裁剪失败仅 eprintln 降级，不影响本次已完成的入库与保存。裁剪语义由 history.rs
+    // 的 prune_keeps_newest_max 单测覆盖；接线本身 AppHandle 绑定，不做单测（同 C4）。
+    if let Err(e) = crate::history::prune(app, 500) {
+        eprintln!("[hawksnap] 历史裁剪失败: {e}");
+    }
     Ok(())
 }
 

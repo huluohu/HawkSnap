@@ -206,7 +206,7 @@ function App() {
     <main className="container">
       {hotkeyError && (
         <div role="alert" style={banner}>
-          全局热键注册失败，F1 截图不可用：{hotkeyError}
+          全局热键注册失败，{form.hotkeyCapture} 截图不可用：{hotkeyError}
         </div>
       )}
       {captureError && (

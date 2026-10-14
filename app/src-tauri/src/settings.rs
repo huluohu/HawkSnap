@@ -104,7 +104,7 @@ pub fn set_settings(app: AppHandle, s: Settings) -> Result<Settings, String> {
         .map_err(|e| format!("注销旧热键失败: {e}"))?;
     let path = settings_path(&app);
     // 保存管线（可测内核）：sanitize → 按序注册热键（任一失败 → Err 且不落盘，文件保持
-    // 旧值）→ 自启切换（best-effort，裁定：不因登录项失败拖垮保存）→ 落盘 → 返回生效设置。
+    // 旧值）→ 自启切换（best-effort，仅在与文件旧值不同时执行）→ 落盘 → 返回生效设置。
     // 运行态注：注册失败时旧热键已注销、新组合可能半数已注册（半新半旧），文件保持旧值
     // ——重启或下次成功保存自愈（reregister_from_settings 注，计划裁定不做回滚注册）。
     apply_pipeline(
@@ -116,8 +116,9 @@ pub fn set_settings(app: AppHandle, s: Settings) -> Result<Settings, String> {
 }
 
 /// set_settings 的可测内核（AppHandle-free）：sanitize → 按序注册热键（失败中止、不落盘）
-/// → 自启（best-effort 回调）→ 落盘 → 返回生效设置。生产路径由 set_settings 注入真实
-/// 注册（register_one）与自启（apply_launch_at_login）闭包；单测注入 fake（见 tests）。
+/// → 自启（best-effort 回调，仅当与文件旧值不同才调用，终审 Fix 4）→ 落盘 → 返回生效
+/// 设置。生产路径由 set_settings 注入真实注册（register_one）与自启
+/// （apply_launch_at_login）闭包；单测注入 fake（见 tests）。
 fn apply_pipeline(
     s: Settings,
     path: &std::path::Path,
@@ -126,7 +127,14 @@ fn apply_pipeline(
 ) -> Result<Settings, String> {
     let s = s.sanitized();
     crate::overlay::register_in_order(&s, register_fn)?;
-    autostart_fn(s.launch_at_login);
+    // 自启 only-if-changed（终审 Fix 4）：此刻尚未落盘，load_from 读到的是文件中的旧值
+    // ——仅当 launch_at_login 与旧值不同才切换登录项，省掉每次保存对 LaunchAgent 的
+    // 无谓 enable/disable 往返。文件不存在/不可读（首次保存、手改损坏）无旧值可比，
+    // 按需执行，行为与改动前一致；切换失败仍由 apply_launch_at_login 内 eprintln 降级。
+    let old = Settings::load_from(path).ok();
+    if old.map(|o| o.launch_at_login) != Some(s.launch_at_login) {
+        autostart_fn(s.launch_at_login);
+    }
     s.save_to(path)?;
     Ok(s)
 }
