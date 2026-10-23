@@ -11,6 +11,10 @@ pub mod permissions;
 #[cfg(target_os = "macos")]
 pub mod pin;
 
+// M6 基础录屏：纯逻辑（暂停平移时钟/单调门/输出路径/MP4 时长解析）跨平台；
+// SCStream→AVAssetWriter 管线仅 macOS（绑定栈见 record.rs 模块注）。
+pub mod record;
+
 use hawksnap_core::capture::{CaptureError, ScreenFrame, ScreenGrabber};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};

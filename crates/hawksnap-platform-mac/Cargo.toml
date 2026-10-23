@@ -26,7 +26,9 @@ core-foundation = "0.10"
 # （NSImage 的 initWithCGImage 入口）；core-graphics 直连依赖补 CGDataProvider
 # （app-kit 的传递 features 不含它，而 CGImage::new 需要 CGDataProvider）。
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSRunLoop"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSArray", "NSDictionary", "NSError", "NSValue", "NSString", "NSURL", "NSRunLoop",
+] }
 objc2-core-foundation = "0.3"
 objc2-core-graphics = { version = "0.3", features = ["CGColor", "CGColorSpace", "CGDataProvider", "CGImage"] }
 objc2-app-kit = { version = "0.3", features = [
@@ -34,3 +36,31 @@ objc2-app-kit = { version = "0.3", features = [
     "NSImageView", "NSResponder", "NSRunningApplication", "NSScreen",
     "NSView", "NSWindow", "objc2-core-graphics",
 ] }
+
+# M6 录屏绑定栈（绑定可用性裁定见 src/record.rs 模块注 + 任务报告）：
+# objc2-screen-capture-kit 0.3.2 与 objc2 0.6 生态同版（锁文件其余 objc2-* 均 0.3.2，
+# 全部经 wry/tauri 已在依赖树，features 只增不改版本解析；screen-capture-kit 是唯一
+# 新增 crate）。features 按用到的头文件取：SCShareableContent（含 SCDisplay/
+# SCContentFilter）+ SCStream（含 SCStreamConfiguration/Output/Delegate）+ SCError。
+# AVFoundation 侧 AVAssetWriter/Input/PixelBufferAdaptor（MP4 mux + 内部 VT 硬编），
+# AVMediaFormat（AVMediaTypeVideo/Audio）+ AVVideoSettings（AVVideoCodecH264）；
+# block2：getShareableContent/finishWriting 的 completion handler 块。
+# core-media（CMTime/CMSampleBuffer 新时间戳副本）与 core-video（CVPixelBuffer/
+# 像素格式常量）均已在树，features 只增。dispatch2 0.3：SCStreamOutput 回调队列
+# （screen-capture-kit 0.3.2 要求 >=0.3，wry 树内 0.2 为旧命名 Queue——0.3 更名
+# DispatchQueue；双版本共存为 objc2 生态常规）。
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCShareableContent", "SCStream", "SCError",
+] }
+objc2-av-foundation = { version = "0.3", features = [
+    "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings", "block2",
+    "objc2-core-media", "objc2-core-video",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMBase", "CMTime", "CMSampleBuffer", "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer"] }
+block2 = "0.6"
+dispatch2 = "0.3"
+# M6：输出文件名时间戳（%Y-%m-%d-%H%M%S）+ soak 采样 CSV 行时间；与 app 层同版。
+chrono = "0.4"

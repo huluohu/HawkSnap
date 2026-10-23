@@ -22,7 +22,7 @@
   "settings.hotkeyLabel": "Hotkeys",
   "settings.slot.capture": "Start capture",
   "settings.slot.pin": "Pin",
-  "settings.slot.record": "Record (placeholder)",
+  "settings.slot.record": "Record",
   "settings.pressCombo": "Press a key combo… (Esc to cancel)",
   "settings.outputFormat": "Output format",
   "settings.quality": "Quality {n}",
@@ -100,5 +100,11 @@
   "editor.tool.mosaic": "Mosaic",
   "editor.tool.step": "Step",
   "editor.saved": "Saved",
-  "editor.saveFailed": "Save failed: {message}"
+  "editor.saveFailed": "Save failed: {message}",
+  "record.barLabel": "HawkSnap Recording",
+  "record.pause": "Pause",
+  "record.resume": "Resume",
+  "record.stop": "Stop",
+  "record.paused": "Paused",
+  "banner.recordError": "Recording failed: {message}"
 }

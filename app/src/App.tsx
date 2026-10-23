@@ -123,7 +123,7 @@ function App() {
   useSyncExternalStore(subscribe, getLanguage);
   const [hotkeyError, setHotkeyError] = useState<HotkeyErrorPayload | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const [comingSoon, setComingSoon] = useState<string | null>(null);
+  const [recordError, setRecordError] = useState<string | null>(null);
   const [form, setForm] = useState<SettingsForm>(DEFAULTS);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [capturing, setCapturing] = useState<HotkeySlot | null>(null);
@@ -180,17 +180,12 @@ function App() {
     };
   }, []);
 
-  // F6 占位（C7）：热键触发后端 emit「即将推出」，复用横幅展示，数秒后自动消隐。
+  // 录屏失败横幅（M6）：F6 toggle / 悬浮条操作的录屏错误经 hawk://record-error 回流
+  // （panel::show_record_error 懒拉主面板后 emit——与 capture-error 同款不静默收尾）。
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    listen<string>("hawk://coming-soon", (e) => {
-      setComingSoon(e.payload);
-      window.setTimeout(
-        () => setComingSoon((cur) => (cur === e.payload ? null : cur)),
-        4000,
-      );
-    })
+    listen<string>("hawk://record-error", (e) => setRecordError(e.payload))
       .then((un) => {
         if (disposed) un();
         else unlisten = un;
@@ -409,9 +404,9 @@ function App() {
           {t("banner.captureError", { message: captureError })}
         </div>
       )}
-      {comingSoon && (
-        <div role="status" style={{ ...banner, borderColor: "#f0ad4e", background: "#fcf8e3", color: "#8a6d3b" }}>
-          {comingSoon}
+      {recordError && (
+        <div role="alert" style={banner}>
+          {t("banner.recordError", { message: recordError })}
         </div>
       )}
       {settingsError && (
@@ -466,6 +461,10 @@ function App() {
                       loading="lazy"
                       style={thumb}
                     />
+                  ) : shot.app === "recording" ? (
+                    // 录屏条目（M6）：无缩略图 → 🎬 占位（贴图/重新编辑对 MP4 无意义，
+                    // 下方动作区隐藏；打开目录/删除照常）。
+                    <div style={{ ...thumb, background: "#e9e9ee", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }} aria-hidden="true">🎬</div>
                   ) : (
                     <div style={{ ...thumb, background: "#e9e9ee" }} aria-hidden="true" />
                   )}
@@ -487,10 +486,13 @@ function App() {
                         {t("history.delete")}
                       </button>
                     )}
-                    {/* M2 Task M3：重新编辑启用——editor_open（origin=null） */}
-                    <button style={tileBtn} onClick={() => reeditShot(shot.path)}>
-                      {t("history.reedit")}
-                    </button>
+                    {/* M2 Task M3：重新编辑启用——editor_open（origin=null）；录屏条目
+                        不提供（MP4 非编辑器输入，M6 裁定） */}
+                    {shot.app !== "recording" && (
+                      <button style={tileBtn} onClick={() => reeditShot(shot.path)}>
+                        {t("history.reedit")}
+                      </button>
+                    )}
                   </div>
                 </div>
               );

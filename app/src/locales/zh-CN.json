@@ -22,7 +22,7 @@
   "settings.hotkeyLabel": "热键",
   "settings.slot.capture": "开始捕获",
   "settings.slot.pin": "贴图",
-  "settings.slot.record": "录屏（占位）",
+  "settings.slot.record": "录屏",
   "settings.pressCombo": "按下组合键…（Esc 取消）",
   "settings.outputFormat": "输出格式",
   "settings.quality": "质量 {n}",
@@ -100,5 +100,11 @@
   "editor.tool.mosaic": "马赛克",
   "editor.tool.step": "序号",
   "editor.saved": "已保存",
-  "editor.saveFailed": "保存失败：{message}"
+  "editor.saveFailed": "保存失败：{message}",
+  "record.barLabel": "HawkSnap 录屏",
+  "record.pause": "暂停",
+  "record.resume": "恢复",
+  "record.stop": "停止",
+  "record.paused": "已暂停",
+  "banner.recordError": "录屏失败：{message}"
 }

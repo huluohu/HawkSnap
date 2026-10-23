@@ -50,6 +50,16 @@ pub fn show_capture_error(app: &AppHandle, msg: String) {
     let _ = tauri::Emitter::emit(app, "hawk://capture-error", msg);
 }
 
+/// record-error 的可见投递（M6）：与 show_capture_error 同款懒拉面板——录屏错误走
+/// 独立通道 + 独立 i18n 文案（banner.recordError「录屏失败：…」），不复用截图文案。
+/// 必须在非主线程调用（同上）。
+pub fn show_record_error(app: &AppHandle, msg: String) {
+    if let Err(e) = ensure_main_panel(app) {
+        eprintln!("[hawksnap] record-error 反馈面板拉起失败: {e}");
+    }
+    let _ = tauri::Emitter::emit(app, "hawk://record-error", msg);
+}
+
 /// 面板入口按钮（C6 最小真实版）：「截图」「贴图」两枚入口与 F1/F2 热键、托盘
 /// 同链路同反馈（失败均 emit hawk://capture-error → 面板横幅）。fire-and-forget：
 /// spawn 后立即返回 Ok，错误经事件通道回流（spec §9 不静默）。

@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "recording-bar",
+  "description": "Capability for the M6 recording status bar window (label `recording-bar`); covers event listen (hawk://record-tick) and command invoke (record_status / record_pause / record_resume / record_stop) used by the recording-bar page",
+  "windows": ["recording-bar"],
+  "permissions": [
+    "core:default"
+  ]
+}

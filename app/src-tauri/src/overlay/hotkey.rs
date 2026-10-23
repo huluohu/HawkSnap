@@ -67,9 +67,6 @@ impl std::fmt::Display for HotkeyError {
     }
 }
 
-/// F6 占位（C7）：触发时只发「即将推出」横幅事件（App.tsx 横幅复用），不做任何录屏。
-const RECORD_COMING_SOON: &str = "录屏功能将在后续版本提供";
-
 /// 按注册序（capture → pin → record）逐项调用 register_fn；全部尝试（前项失败不阻断
 /// 后项——拆分前 F1 被占用时 F2 仍注册成功的行为保留），任一失败 → 返回首个错误
 /// （带角色归因，D0-⑤）。与 AppHandle 解耦（app 由 register_fn 闭包捕获）：settings.rs
@@ -137,21 +134,17 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
         HotkeyKind::Record => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
+                    eprintln!("[hawksnap] {combo_owned} 热键触发（record toggle）");
                     let app = app2.clone();
                     std::thread::spawn(move || {
-                        // D0-②：启动零窗口时 coming-soon 横幅无窗可显——先拉主面板再
-                        // emit（与 lib.rs 热键失败路径同款纪律：本线程即非主线程，建窗
-                        // 合法；拉起失败仅 eprintln，横幅退化为 push 通道尽力投递）。
-                        if let Err(e) = crate::panel::ensure_main_panel(&app) {
-                            eprintln!("[hawksnap] coming-soon 反馈面板拉起失败: {e}");
+                        // M6 录屏 toggle：空闲 → 启动全屏录制；录制/暂停中 → 停止。
+                        // toggle 内部含权限预检/建窗（非主线程 ✓）/阻塞收尾（stop ≤25s，
+                        // 热键线程可承受——与托盘入口同款纪律）。
+                        if let Err(e) = crate::recording::toggle(&app) {
+                            // 错误横幅可见化：懒拉主面板（show_record_error，非主线程合法），
+                            // 拉起失败仅 eprintln，横幅退化为 push 通道尽力投递。
+                            crate::panel::show_record_error(&app, e);
                         }
-                        use tauri::Emitter;
-                        // D0-①：占位文案带上本次实际注册的组合（设置读取，默认 F6）。
-                        let settings = crate::settings::Settings::load(&app);
-                        let _ = app.emit(
-                            "hawk://coming-soon",
-                            format!("{RECORD_COMING_SOON}（{}）", settings.hotkey_record),
-                        );
                     });
                 }
             })
