@@ -13,6 +13,7 @@ import { useSelection, type SelRect, type ConfirmAction } from "./useSelection";
 import type { Rect } from "./geometry";
 import { toLocalHover, type HoverFrame } from "./hover";
 import { barPosition } from "./actionBar";
+import { hexOf, rgbOf, rulerTicks, samplePixel, type Rgb } from "./picker";
 
 type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string; flow: number };
 
@@ -77,6 +78,27 @@ export default function OverlayWindow() {
   // （绘制按 phase 门控，见重绘 effect）。
   const [hoverRect, setHoverRect] = useState<Rect | null>(null);
 
+  // —— M2 Task M5 取色器（Snipaste 式）——
+  // C 进入/退出拾色模式；移动 = 浮签跟随光标实时显示光标下像素（冻结帧缓冲直采，
+  // 零 IPC）；点击 = 复制 HEX + 退出拾色 + 「已复制」闪样；Esc 仅退出拾色
+  // （useSelection 的 keysSuppressed 挡住 hook 内的 Esc-cancel/Enter-confirm，
+  // 否则第一次 Esc 会连截图一起取消）。
+  const [pickerMode, setPickerMode] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+  // 冻结帧原始字节（重绘 effect 校验字节长后缓存）：拾色采样的同步数据源。
+  // 新一轮 payload 开始装载时先置空（陈旧帧不可采），画成功即回填。
+  const frameBufRef = useRef<ArrayBuffer | null>(null);
+  // 浮签 DOM refs：位置/内容由 pointermove 直写（同十字准线的零 state 模式，
+  // 60fps 移动不触发 React 重渲染、更不触发 canvas 重绘）。
+  const pickerChipRef = useRef<HTMLDivElement>(null);
+  const pickerSwatchRef = useRef<HTMLDivElement>(null);
+  const pickerHexRef = useRef<HTMLSpanElement>(null);
+  const pickerRgbRef = useRef<HTMLSpanElement>(null);
+  // 拾色中的按下起点：区分「按下发生在拾色内」（up = 拾取）与「拖拽中按 C 后松开」
+  // （up 放行原链收尾拖拽态，不拾取）。
+  const pickerDownRef = useRef<{ x: number; y: number } | null>(null);
+
   // Snipaste 式十字准线（0.1 hotfix 3）：透明无边框 WKWebView 上 CSS cursor:crosshair
   // 不可靠（macOS 不保证合成光标生效），改为自绘两条 1px 线随指针移动。零 React state、
   // 零 canvas 重绘：window 级 pointermove 直写 DOM ref 的 style.transform（合成器级
@@ -92,6 +114,64 @@ export default function OverlayWindow() {
     return () => window.removeEventListener("pointermove", onMove);
   }, []);
 
+  // —— M2 Task M5 取色器：键盘进出 + 浮签跟随 ——
+
+  // C 进入/退出拾色（预确认全程可用：idle/dragging/selected 均为合法时机）；
+  // Esc 仅退出拾色态（hook 侧 keysSuppressed 已挡住其 cancel/confirm，这里只管
+  // 退出）。修饰键组合（⌘C 等）不劫持；e.repeat 忽略长按连发。
+  useEffect(() => {
+    if (!display) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && pickerMode) {
+        pickerDownRef.current = null;
+        setPickerMode(false);
+        return;
+      }
+      if ((e.key === "c" || e.key === "C")
+        && !e.metaKey && !e.ctrlKey && !e.altKey && !e.repeat) {
+        setPickerMode((m) => !m);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [display, pickerMode]);
+
+  // 浮签跟随（零 React state：位置/颜色直写 DOM，同十字准线模式——60fps 移动既
+  // 不触发重渲染也不触发 canvas 重绘）。位置 = 光标 16px 右下，贴近视口右/下缘
+  // 翻转到左/上；颜色 = 光标处物理像素（冻结帧缓冲直采，零 IPC）。帧缓冲未就绪
+  // （装载中/失败）时只动位置不更新颜色，绝不展示脏色。
+  const PICKER_CHIP_W = 178;
+  const PICKER_CHIP_H = 46;
+  const PICKER_GAP = 16;
+  useEffect(() => {
+    if (!pickerMode || !display) return;
+    const pw = Math.round(display.width * display.scale);
+    const onMove = (e: PointerEvent) => {
+      const chip = pickerChipRef.current;
+      if (!chip) return;
+      const flipX = e.clientX + PICKER_GAP + PICKER_CHIP_W > window.innerWidth;
+      const flipY = e.clientY + PICKER_GAP + PICKER_CHIP_H > window.innerHeight;
+      const left = flipX ? e.clientX - PICKER_GAP - PICKER_CHIP_W : e.clientX + PICKER_GAP;
+      const top = flipY ? e.clientY - PICKER_GAP - PICKER_CHIP_H : e.clientY + PICKER_GAP;
+      chip.style.transform = `translate(${left}px, ${top}px)`;
+      const buf = frameBufRef.current;
+      if (!buf) return;
+      const rgba = samplePixel(buf, pw, e.clientX * display.scale, e.clientY * display.scale);
+      if (!rgba) return;
+      const rgb: Rgb = [rgba[0], rgba[1], rgba[2]];
+      if (pickerSwatchRef.current) pickerSwatchRef.current.style.background = hexOf(rgb);
+      if (pickerHexRef.current) pickerHexRef.current.textContent = hexOf(rgb);
+      if (pickerRgbRef.current) pickerRgbRef.current.textContent = rgbOf(rgb);
+    };
+    window.addEventListener("pointermove", onMove);
+    return () => window.removeEventListener("pointermove", onMove);
+  }, [pickerMode, display]);
+
+  // 闪样计时器清理（同 editor 的 ocrFlash 模式）：卸载不悬挂。
+  useEffect(() => () => {
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+  }, []);
+
   // cancel 的职责由 hook 内部的 Esc keydown 监听承担（会回调 onCancel），页面无需直接引用。
   // 声明须先于下方 listen effect：其依赖数组在渲染期取 reset（TDZ）。
   const { phase, rect, pointerHandlers, confirm, reset, selectRect, unlockConfirm } = useSelection({
@@ -100,6 +180,8 @@ export default function OverlayWindow() {
     // payload 的 display.x/y 是全局多屏坐标，直接用会破坏副屏上的夹取）
     bounds: display ? { x: 0, y: 0, w: display.width, h: display.height } : undefined,
     candidatesRef,
+    // M2 M5：拾色中 Esc/Enter 归拾色器（见 pickerMode 声明处注）
+    keysSuppressed: pickerMode,
     onConfirm: async (r: SelRect, action: ConfirmAction) => {
       if (!display) return;
       const myFlow = flowRef.current;
@@ -182,6 +264,14 @@ export default function OverlayWindow() {
         setDisplay(mine);          // 新对象身份必触发重绘 effect
         reset();                   // 新一轮捕获：清选区与 in-flight 守卫
         setHoverRect(null);        // 新一轮：清上一轮的悬停框（否则 idle 态会画陈旧高亮）
+        // 新一轮：清上一轮的拾色态与闪样（覆盖层常驻复用，state 跨轮存活）
+        setPickerMode(false);
+        pickerDownRef.current = null;
+        setCopied(null);
+        if (copiedTimerRef.current !== null) {
+          window.clearTimeout(copiedTimerRef.current);
+          copiedTimerRef.current = null;
+        }
         flowRef.current += 1;      // 代际自增：作废所有在途旧 confirm 链（见 flowRef 注）
         shownRef.current = false;  // 每轮捕获重发 overlay-shown（见上方 shownRef 注）
         // Task 4：每轮流程拉取一次窗口候选（snap_candidates 返回全局逻辑坐标）。
@@ -280,6 +370,75 @@ export default function OverlayWindow() {
     },
   };
 
+  // —— M2 Task M5：拾取点击 + 复制 ——
+
+  // 剪贴板写入（与 editor/index.tsx 同款降级策略）：navigator.clipboard 优先
+  // （拾取点击的手势内调用），失败降级 execCommand。裁定不走 Rust arboard：
+  // 不为纯前端值新增 IPC 命令与 capability 变更——editor 的 OCR/保存复制已在
+  // 同一机制上交付，行为一致且采样/复制全链保持前端闭环。
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+  };
+
+  // 拾取：退出拾色 → 光标处采样 → 复制 HEX → 「已复制」闪样 1.4s（同 editor 闪样
+  // 模式：state + 定时器）。帧缓冲不可用仅退出（不闪假成功）。flow 守卫：复制在途
+  // 时新一轮 payload 已到（窗口可能已隐藏重用），迟到的闪样不得写进新一轮。
+  const pickAt = (cx: number, cy: number) => {
+    setPickerMode(false);
+    if (!display) return;
+    const buf = frameBufRef.current;
+    if (!buf) return;
+    const pw = Math.round(display.width * display.scale);
+    const rgba = samplePixel(buf, pw, cx * display.scale, cy * display.scale);
+    if (!rgba) return;
+    const hex = hexOf([rgba[0], rgba[1], rgba[2]]);
+    const myFlow = flowRef.current;
+    void copyText(hex).then(() => {
+      if (flowRef.current !== myFlow) return;
+      setCopied(hex);
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => setCopied(null), 1400);
+    });
+  };
+
+  // 拾色点击接管（包在 clickAwareHandlers 外）：down/up 都不放行选区状态机——拾色
+  // 期间选区保持原样。up 且按下发生在拾色内 → pickAt；按下早于拾色（拖拽中按 C 后
+  // 松开）→ 放行原 up 收尾拖拽态（那次按压不是拾取手势）。
+  const pickerAwareHandlers = {
+    ...clickAwareHandlers,
+    onPointerDown: (e: { clientX: number; clientY: number }) => {
+      if (pickerMode) {
+        pickerDownRef.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+      clickAwareHandlers.onPointerDown(e);
+    },
+    onPointerUp: (e: { clientX: number; clientY: number }) => {
+      if (pickerMode) {
+        const down = pickerDownRef.current;
+        pickerDownRef.current = null;
+        if (!down) {
+          clickAwareHandlers.onPointerUp(e);
+          return;
+        }
+        pickAt(e.clientX, e.clientY);
+        return;
+      }
+      clickAwareHandlers.onPointerUp(e);
+    },
+  };
+
   // 冻结帧 + 遮罩 + 选区：rect/display 变化时重绘。常驻复用下每轮 payload 的 frameUrl
   // 携带后端版本化文件名（capture_screens 按时间戳命名，Plan B Task 1 cache-bust），
   // URL 变化即绕开 Webview 缓存，无需前端追加 query。Task 2b：帧为原始物理 RGBA 文件，
@@ -292,6 +451,9 @@ export default function OverlayWindow() {
     if (!canvas || !display) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    // M2 M5：旧帧字节即刻失效（新一轮装载期拾色无源可采，不展示陈旧颜色）；
+    // 校验通过后由 draw 回填。
+    frameBufRef.current = null;
     // 物理尺寸 = 逻辑 × scale（与 capture_screens/CaptureMeta 同一公式）
     const pw = Math.round(display.width * display.scale);
     const ph = Math.round(display.height * display.scale);
@@ -314,6 +476,8 @@ export default function OverlayWindow() {
         console.error(`冻结帧字节数不符：got ${buf.byteLength}, expect ${pw * ph * 4}`);
         return;
       }
+      // M2 M5：字节长校验通过后缓存原始帧——拾色采样源（零 IPC，picker.ts 直索引）
+      frameBufRef.current = buf;
       const frame = new ImageData(new Uint8ClampedArray(buf), pw, ph);
       // 背衬 = 物理像素，CSS 尺寸 = 逻辑像素：Retina 下逐像素清晰（顺带修复旧实现
       // 逻辑画布被浏览器插值放大的发软问题）。重设 width/height 同时重置 ctx 状态。
@@ -354,6 +518,26 @@ export default function OverlayWindow() {
         ctx.fillRect(rect.x + rect.w - tw, rect.y + rect.h + 6, tw, 20);
         ctx.fillStyle = "#0D1522";
         ctx.fillText(label, rect.x + rect.w - tw + 6, rect.y + rect.h + 20);
+        // M2 M5 像素标尺：上/左边缘外侧 2px 起的刻度线（每 10px 短刻 4px、每 50px
+        // 长刻 8px，半透明白）。纯 canvas 按当前 rect 现算、无新 state——拖拽与
+        // 选中态都画（rect 非空即此两态），rect 变化天然随本 effect 刷新；选区
+        // 过短（<20px）时 rulerTicks 返回空、整体跳过（只剩噪音的标尺不画）。
+        if (rect.w >= 20 && rect.h >= 20) {
+          ctx.strokeStyle = "rgba(255,255,255,0.5)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (const tk of rulerTicks(rect.w)) {
+            const x = rect.x + tk.at + 0.5; // +0.5 对齐像素网格（dpr=1 下 1px 线不虚）
+            ctx.moveTo(x, rect.y - 2 - (tk.major ? 8 : 4));
+            ctx.lineTo(x, rect.y - 2);
+          }
+          for (const tk of rulerTicks(rect.h)) {
+            const y = rect.y + tk.at + 0.5;
+            ctx.moveTo(rect.x - 2 - (tk.major ? 8 : 4), y);
+            ctx.lineTo(rect.x - 2, y);
+          }
+          ctx.stroke();
+        }
       }
       // 本轮冻结帧画出后回报一次（Rust 侧 mark_overlay_shown_once 只记每轮首个，
       // 门闩与 hotkey 1:1 配对）；shownRef 已在下一轮 payload 到达时复位
@@ -375,7 +559,7 @@ export default function OverlayWindow() {
     <>
       <canvas ref={canvasRef}
         style={{ position: "fixed", inset: 0, cursor: "crosshair" }}
-        {...clickAwareHandlers}
+        {...pickerAwareHandlers}
         onDoubleClick={() => confirm()} />
       {/* 十字准线（0.1 hotfix 3）：横竖两条 1px 线，difference 混合在任意底色可见；
           pointerEvents:none 不拦事件，z 5 低于动作浮条（z 10）。覆盖层常驻复用，
@@ -386,6 +570,36 @@ export default function OverlayWindow() {
       <div ref={crossVRef} style={{ position: "fixed", top: 0, bottom: 0, left: 0, width: 1,
         background: "rgba(255,255,255,0.8)", mixBlendMode: "difference",
         pointerEvents: "none", zIndex: 5, transform: "translateX(-100px)" }} />
+      {/* M2 M5 取色浮签：位置/颜色由 pointermove effect 直写（零 React state）；
+          初始 transform 移到屏外，首次移动前不显示。z 9 低于动作浮条（10）。 */}
+      {pickerMode && display && (
+        <div ref={pickerChipRef} style={{ position: "fixed", left: 0, top: 0,
+          transform: "translate(-300px, -300px)", pointerEvents: "none", zIndex: 9,
+          display: "flex", gap: 8, alignItems: "center", background: "#0D1522",
+          border: "1px solid #22405F", borderRadius: 8, padding: "8px 10px" }}>
+          <div ref={pickerSwatchRef} style={{ width: 28, height: 28, borderRadius: 4,
+            border: "1px solid rgba(255,255,255,0.4)", background: "#000000" }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 2,
+            fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, lineHeight: "16px" }}>
+            <span ref={pickerHexRef} style={{ color: "#FFFFFF" }}>#000000</span>
+            <span ref={pickerRgbRef} style={{ color: "#D8E2EE" }}>rgb(0, 0, 0)</span>
+          </div>
+        </div>
+      )}
+      {/* 拾色模式提示条 + 已复制闪样（复制即退出拾色，两者天然互斥；同款样式，
+          闪样用绿色文字区分成败）。 */}
+      {pickerMode && display && (
+        <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
+          zIndex: 10, pointerEvents: "none", background: "#0D1522",
+          border: "1px solid #22405F", borderRadius: 8, padding: "4px 12px",
+          fontSize: 12, color: "#D8E2EE" }}>{t("overlay.picker.hint")}</div>
+      )}
+      {copied && (
+        <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
+          zIndex: 10, pointerEvents: "none", background: "#0D1522",
+          border: "1px solid #22405F", borderRadius: 8, padding: "4px 12px",
+          fontSize: 12, color: "#7ED087" }}>{t("overlay.picker.copied", { color: copied })}</div>
+      )}
       {/* 选区确认浮条：canvas 的兄弟节点（fixed 定位）。pointer/dblclick 处理器都只挂在
           canvas 元素上，浮条内的 mousedown/双击按构造不进入选区状态机——既不清选区也不
           触发拖拽/双击确认。Enter 缺省 confirm() = "copy"（语义裁定：保存须显式点按钮）。 */}

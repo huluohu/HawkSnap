@@ -105,6 +105,34 @@ describe("useSelection", () => {
     expect(result.current.rect).toEqual({ x: 5, y: 6, w: 100, h: 50 });
   });
 
+  // —— M2 Task M5：取色模式下 Esc/Enter 由拾色器消费（keysSuppressed）——
+
+  it("keysSuppressed blocks Esc-cancel and Enter-confirm until lifted", () => {
+    // 回归：拾色中第一次 Esc 只能退出拾色，不得连截图一起取消（cancel→cancel_capture
+    // 会隐藏窗口）；Enter 同理不确认。解除（拾色退出）后两键恢复原语义。
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ suppressed }) => useSelection({
+        width: 1000, height: 600, onConfirm, onCancel, keysSuppressed: suppressed,
+      }),
+      { initialProps: { suppressed: true } },
+    );
+    dragTo(result, 100, 100);
+    expect(result.current.phase).toBe("selected");
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+    expect(result.current.phase).toBe("selected"); // Esc 被拾色器吃掉，选区原样
+    expect(onCancel).not.toHaveBeenCalled();
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })));
+    expect(onConfirm).not.toHaveBeenCalled();
+    rerender({ suppressed: false });
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })));
+    expect(onConfirm).toHaveBeenCalledTimes(1); // 解除后 Enter 确认恢复
+    act(() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+    expect(result.current.phase).toBe("idle"); // 解除后 Esc 取消恢复
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
   it("confirm forwards the requested action", () => {
     const onConfirm = vi.fn();
     const { result } = renderHook(() => useSelection({ width: 1000, height: 600, onConfirm }));

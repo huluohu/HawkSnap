@@ -16,6 +16,10 @@ export function useSelection(opts: {
   candidatesRef?: { current: Rect[] };
   bounds?: Rect;
   onConfirm?: (r: SelRect, action: ConfirmAction) => void; onCancel?: () => void;
+  // M2 Task M5 取色模式（Snipaste 式）：置位时 Esc/Enter 由拾色器消费——Esc 只退出
+  // 拾色（第一次 Esc 不该连截图一起取消），Enter 不触发确认复制。方向键不动（选区
+  // 微调与拾色不冲突）。opts 每渲染新对象 → effect 随 pickerMode 重挂，闭包必新。
+  keysSuppressed?: boolean;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [rect, setRect] = useState<SelRect | null>(null);
@@ -126,8 +130,8 @@ export function useSelection(opts: {
         }
         return;
       }
-      if (e.key === "Escape") cancel();
-      if (e.key === "Enter") confirm();
+      if (e.key === "Escape" && !opts.keysSuppressed) cancel();
+      if (e.key === "Enter" && !opts.keysSuppressed) confirm();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

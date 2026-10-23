@@ -64,6 +64,8 @@
   "overlay.ocr": "OCR",
   "overlay.gif": "GIF",
   "overlay.comingSoon": "Coming soon",
+  "overlay.picker.hint": "Picking color · click to copy HEX, Esc to exit",
+  "overlay.picker.copied": "Copied {color}",
   "editor.toolbar": "Editor toolbar",
   "editor.tool.rect": "Rectangle",
   "editor.tool.ellipse": "Ellipse",

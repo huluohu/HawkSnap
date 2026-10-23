@@ -64,6 +64,8 @@
   "overlay.ocr": "OCR",
   "overlay.gif": "GIF",
   "overlay.comingSoon": "即将推出",
+  "overlay.picker.hint": "拾色中 · 点击复制 HEX，Esc 退出",
+  "overlay.picker.copied": "已复制 {color}",
   "editor.toolbar": "编辑器工具栏",
   "editor.tool.rect": "矩形",
   "editor.tool.ellipse": "椭圆",
