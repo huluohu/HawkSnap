@@ -8,6 +8,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 hawksnap-core = { path = "crates/hawksnap-core" }
+hawksnap-ocr = { path = "crates/hawksnap-ocr" }
 hawksnap-platform-mac = { path = "crates/hawksnap-platform-mac" }
 xcap = "0.4"
 image = "0.25"

@@ -4,6 +4,7 @@ mod editor;
 mod g4;
 mod history;
 mod idle_reaper;
+mod ocr;
 mod overlay;
 mod panel;
 mod perf;
@@ -50,6 +51,7 @@ pub fn run() {
             pins::pin_latest, pins::pin_from_path, pins::pin_set_opacity, pins::pin_zoom,
             pins::pin_close, pins::pin_close_all, pins::pin_set_image,
             panel::panel_trigger, panel::open_path,
+            ocr::ocr_recognize, ocr::ocr_export_txt,
             updater::check_for_updates, updater::install_update, updater::restart_app
         ])
         .setup(|app| {

@@ -26,6 +26,12 @@ const STYLE_KEY = "hawksnap.editor.style";
 // 来源契约（M2 Task M3，Rust editor.rs EditorOrigin 的 TS 镜像，serde tag=kind camelCase）。
 type EditorOrigin = { kind: "pin"; pinId: number } | { kind: "capture" };
 
+// OCR（M4）：Rust OcrLine 的 TS 镜像（box: [{x,y}×4] 原图坐标 TL→TR→BR→BL）。
+type OcrPoint = { x: number; y: number };
+type OcrLine = { box: OcrPoint[]; text: string; score: number };
+// hawk://ocr-model-progress 载荷（Rust ocr.rs OcrModelProgress，camelCase）。
+type OcrProgress = { phase: "download" | "verify"; downloaded: number; total: number };
+
 const DEFAULT_STYLE: EditorStyle = { color: "#E5484D", width: 3, size: 24 };
 
 // 预设色板（红/橙/黄/绿/蓝/紫/黑/白——截图标注的常用八色）
@@ -88,6 +94,13 @@ export default function EditorWindow() {
   const [savedFlash, setSavedFlash] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const flashTimer = useRef<number | undefined>(undefined);
+  // OCR 流状态（M4）：运行中 / 模型下载进度 / 错误 / 结果浮层（null = 收起）。
+  const [ocrRunning, setOcrRunning] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [ocrLines, setOcrLines] = useState<OcrLine[] | null>(null);
+  const [ocrFlash, setOcrFlash] = useState<"copied" | "exported" | null>(null);
+  const ocrFlashTimer = useRef<number | undefined>(undefined);
   // 装载代数守卫（评审修复 2）：useRef 惰性持有（每渲染新建的备用实例被丢弃）
   const loadGuardRef = useRef(createLoadGuard());
 
@@ -116,6 +129,42 @@ export default function EditorWindow() {
 
   // 已保存闪样的定时器清理
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
+
+  // OCR 进度通道（push）：运行期收 hawk://ocr-model-progress；监听常驻（挂载期注册
+  // 一次），进度载荷仅 OCR 运行期间有意义。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listen<OcrProgress>("hawk://ocr-model-progress", (e) => {
+      if (!disposed) setOcrProgress(e.payload);
+    }).then((un) => {
+      if (disposed) un();
+      else unlisten = un;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // OCR 闪样（已复制/已导出）定时器清理
+  useEffect(() => () => window.clearTimeout(ocrFlashTimer.current), []);
+
+  // 剪贴板：navigator.clipboard 优先（用户手势内调用），失败降级 execCommand。
+  const copyText = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+  }, []);
 
   // 图片装载：asset 协议优先，onerror 降级 dataURL（editor_image_dataurl）。
   // 代数守卫（评审修复 2）：×3 补发使旧事件的 Image 探测必然迟到（A 的补发可落
@@ -249,6 +298,58 @@ export default function EditorWindow() {
     }
   }, [image, imagePath, present, saving, origin]);
 
+  // —— OCR（M4）：识别 → 结果浮层（单块复制/全部复制/导出 txt/关闭）。首次调用
+  // 触发模型下载（Rust 侧经 hawk://ocr-model-progress 推进度，此处转内联横幅）。 ——
+
+  const runOcr = useCallback(async () => {
+    if (!image || !imagePath || ocrRunning) return;
+    setOcrRunning(true);
+    setOcrError(null);
+    setOcrProgress(null);
+    setOcrFlash(null);
+    try {
+      const lines = await invoke<OcrLine[]>("ocr_recognize", { path: imagePath });
+      setOcrLines(lines);
+    } catch (e) {
+      setOcrError(String(e));
+      setOcrLines(null);
+    } finally {
+      setOcrRunning(false);
+      setOcrProgress(null);
+    }
+  }, [image, imagePath, ocrRunning]);
+
+  const ocrAllText = ocrLines?.map((l) => l.text).join("\n") ?? "";
+
+  const copyOcrLine = useCallback(
+    (line: OcrLine) => {
+      void copyText(line.text);
+      setOcrFlash("copied");
+      window.clearTimeout(ocrFlashTimer.current);
+      ocrFlashTimer.current = window.setTimeout(() => setOcrFlash(null), 2000);
+    },
+    [copyText],
+  );
+
+  const copyOcrAll = useCallback(() => {
+    void copyText(ocrAllText);
+    setOcrFlash("copied");
+    window.clearTimeout(ocrFlashTimer.current);
+    ocrFlashTimer.current = window.setTimeout(() => setOcrFlash(null), 2000);
+  }, [copyText, ocrAllText]);
+
+  const exportOcrTxt = useCallback(async () => {
+    if (!imagePath) return;
+    try {
+      await invoke("ocr_export_txt", { path: imagePath, text: ocrAllText });
+      setOcrFlash("exported");
+      window.clearTimeout(ocrFlashTimer.current);
+      ocrFlashTimer.current = window.setTimeout(() => setOcrFlash(null), 2000);
+    } catch (e) {
+      setOcrError(String(e));
+    }
+  }, [imagePath, ocrAllText]);
+
   // 快捷键：⌘Z/⌘⇧Z（撤销重做）、Delete/Backspace（删除选中）、Esc（取消选中）、
   // ⌘S（保存）。文本输入聚焦时不接管（内联输入的字符编辑优先；其自身的
   // stopPropagation 亦兜底）。
@@ -366,6 +467,15 @@ export default function EditorWindow() {
         <span style={{ flex: 1 }} />
         <button
           type="button"
+          style={{ ...btn, ...(ocrRunning ? btnActive : {}) }}
+          disabled={!image || !imagePath || ocrRunning}
+          title={t("editor.ocr")}
+          onClick={() => void runOcr()}
+        >
+          {ocrRunning ? t("editor.ocr.running") : t("editor.ocr")}
+        </button>
+        <button
+          type="button"
           style={{ ...btn, ...(savedFlash ? btnSaved : {}) }}
           disabled={!image || !imagePath || saving}
           title={t("editor.saveTip")}
@@ -387,18 +497,87 @@ export default function EditorWindow() {
           {t("editor.saveFailed", { message: saveError })}
         </div>
       )}
-      <EditorCanvas
-        image={image}
-        shapes={present}
-        tool={tool}
-        style={style}
-        selected={selected}
-        previewStyle={restyle && selected != null ? style : null}
-        onSelect={setSelected}
-        onCommit={commitShape}
-        onMoveShape={moveShape}
-        onReplaceText={replaceText}
-      />
+      {ocrError && (
+        <div role="alert" style={errorBanner}>
+          {t("editor.ocr.failed", { message: ocrError })}
+        </div>
+      )}
+      {ocrRunning && ocrProgress && (
+        <div style={progressBanner} role="status">
+          {ocrProgress.phase === "verify"
+            ? t("editor.ocr.verify")
+            : t("editor.ocr.download", {
+                percent:
+                  ocrProgress.total > 0
+                    ? Math.min(100, Math.round((ocrProgress.downloaded * 100) / ocrProgress.total))
+                    : 0,
+              })}
+        </div>
+      )}
+      <div style={canvasArea}>
+        <EditorCanvas
+          image={image}
+          shapes={present}
+          tool={tool}
+          style={style}
+          selected={selected}
+          previewStyle={restyle && selected != null ? style : null}
+          onSelect={setSelected}
+          onCommit={commitShape}
+          onMoveShape={moveShape}
+          onReplaceText={replaceText}
+        />
+        {ocrLines !== null && (
+          <div style={ocrPanel} role="complementary" aria-label={t("editor.ocr.title")}>
+            <div style={ocrPanelHead}>
+              <span style={{ fontWeight: 600 }}>{t("editor.ocr.title")}</span>
+              <button
+                type="button"
+                style={btn}
+                aria-label={t("editor.ocr.close")}
+                title={t("editor.ocr.close")}
+                onClick={() => setOcrLines(null)}
+              >
+                ✕
+              </button>
+            </div>
+            {ocrLines.length === 0 ? (
+              <div style={ocrEmpty}>{t("editor.ocr.empty")}</div>
+            ) : (
+              <>
+                <div style={ocrLineList}>
+                  {ocrLines.map((line, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      style={ocrLineBtn}
+                      title={t("editor.ocr.copyLine")}
+                      onClick={() => copyOcrLine(line)}
+                    >
+                      <span style={ocrScore}>{Math.round(line.score * 100)}%</span>
+                      <span style={ocrTextSpan}>{line.text}</span>
+                    </button>
+                  ))}
+                </div>
+                <div style={ocrPanelFoot}>
+                  {ocrFlash && (
+                    <span style={ocrFlashText}>
+                      {ocrFlash === "copied" ? t("editor.ocr.copied") : t("editor.ocr.exported")}
+                    </span>
+                  )}
+                  <span style={{ flex: 1 }} />
+                  <button type="button" style={btn} title={t("editor.ocr.copyAll")} onClick={copyOcrAll}>
+                    {t("editor.ocr.copyAll")}
+                  </button>
+                  <button type="button" style={btn} title={t("editor.ocr.export")} onClick={() => void exportOcrTxt()}>
+                    {t("editor.ocr.export")}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -456,4 +635,102 @@ const errorBanner: CSSProperties = {
   background: "#fdecea",
   color: "#a94442",
   fontSize: 13,
+};
+
+const progressBanner: CSSProperties = {
+  margin: "8px 8px 0",
+  padding: "8px 12px",
+  border: "1px solid #4aa3ff",
+  borderRadius: 6,
+  background: "#1a2a40",
+  color: "#9ecbff",
+  fontSize: 13,
+};
+
+const canvasArea: CSSProperties = {
+  position: "relative",
+  flex: 1,
+  minHeight: 0,
+  display: "flex",
+};
+
+const ocrPanel: CSSProperties = {
+  position: "absolute",
+  top: 12,
+  right: 12,
+  width: 300,
+  maxHeight: "calc(100% - 24px)",
+  display: "flex",
+  flexDirection: "column",
+  background: "rgba(17, 19, 24, 0.96)",
+  border: "1px solid #3a3f4a",
+  borderRadius: 8,
+  boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+  zIndex: 10,
+};
+
+const ocrPanelHead: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  padding: "8px 12px",
+  borderBottom: "1px solid #333",
+  color: "#ddd",
+  fontSize: 13,
+};
+
+const ocrPanelFoot: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "8px 12px",
+  borderTop: "1px solid #333",
+};
+
+const ocrLineList: CSSProperties = {
+  overflowY: "auto",
+  flex: 1,
+  padding: 6,
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const ocrLineBtn: CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  gap: 6,
+  width: "100%",
+  textAlign: "left",
+  padding: "6px 8px",
+  fontSize: 12,
+  lineHeight: 1.5,
+  borderRadius: 4,
+  border: "1px solid #2a2e36",
+  background: "#1c1f26",
+  color: "#ddd",
+  cursor: "pointer",
+  wordBreak: "break-all",
+};
+
+const ocrScore: CSSProperties = {
+  color: "#7fbf7f",
+  fontSize: 10,
+  flexShrink: 0,
+};
+
+const ocrTextSpan: CSSProperties = {
+  flex: 1,
+};
+
+const ocrEmpty: CSSProperties = {
+  padding: "16px 12px",
+  color: "#888",
+  fontSize: 13,
+  textAlign: "center",
+};
+
+const ocrFlashText: CSSProperties = {
+  color: "#8ff0c0",
+  fontSize: 12,
 };

@@ -22,6 +22,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 hawksnap-core.workspace = true
+hawksnap-ocr.workspace = true
 hawksnap-platform-mac.workspace = true
 # 历史存储（C3）：SQLite + bundled amalgamation
 rusqlite.workspace = true

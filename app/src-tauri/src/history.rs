@@ -25,25 +25,25 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shots(
     h INTEGER NOT NULL,
     app TEXT NOT NULL);";
 
-/// FTS5（M0，Task M0 计划接口）：external-content 虚表（content='shots'，rowid 对齐
-/// shots.id），索引 path + app 两列——unicode61 分词会把绝对路径按非字母数字切开，
-/// 文件名段与 app 名自然成为可检索单元。ocr_text 列本任务先加列不索引（M2-OCR 任务
-/// 填充并扩索引）。触发器是 external-content 的标准同步模式（INSERT/UPDATE/DELETE
-/// 三向，UPDATE 走 delete+insert 复合）；shots 现无 UPDATE 路径，留作标准完整性。
+/// FTS5（M0 建，M2-OCR 扩 ocr_text 列）：external-content 虚表（content='shots'，
+/// rowid 对齐 shots.id），索引 path + app + ocr_text 三列——unicode61 分词会把绝对
+/// 路径按非字母数字切开，文件名段与 app 名自然成为可检索单元；ocr_text（截图上的
+/// 识别文本，M4 填充）让「截过屏的文字」可直接检索。触发器是 external-content 的
+/// 标准同步模式（INSERT/UPDATE/DELETE 三向，UPDATE 走 delete+insert 复合）。
 const FTS_SCHEMA: &str = "
 CREATE VIRTUAL TABLE IF NOT EXISTS shots_fts USING fts5(
-    path, app, content='shots', content_rowid='id');
+    path, app, ocr_text, content='shots', content_rowid='id');
 CREATE TRIGGER IF NOT EXISTS shots_fts_ai AFTER INSERT ON shots BEGIN
-    INSERT INTO shots_fts(rowid, path, app) VALUES (new.id, new.path, new.app);
+    INSERT INTO shots_fts(rowid, path, app, ocr_text) VALUES (new.id, new.path, new.app, new.ocr_text);
 END;
 CREATE TRIGGER IF NOT EXISTS shots_fts_ad AFTER DELETE ON shots BEGIN
-    INSERT INTO shots_fts(shots_fts, rowid, path, app)
-    VALUES ('delete', old.id, old.path, old.app);
+    INSERT INTO shots_fts(shots_fts, rowid, path, app, ocr_text)
+    VALUES ('delete', old.id, old.path, old.app, old.ocr_text);
 END;
 CREATE TRIGGER IF NOT EXISTS shots_fts_au AFTER UPDATE ON shots BEGIN
-    INSERT INTO shots_fts(shots_fts, rowid, path, app)
-    VALUES ('delete', old.id, old.path, old.app);
-    INSERT INTO shots_fts(rowid, path, app) VALUES (new.id, new.path, new.app);
+    INSERT INTO shots_fts(shots_fts, rowid, path, app, ocr_text)
+    VALUES ('delete', old.id, old.path, old.app, old.ocr_text);
+    INSERT INTO shots_fts(rowid, path, app, ocr_text) VALUES (new.id, new.path, new.app, new.ocr_text);
 END;";
 
 /// history.db 落点（app_data_dir()/history.db）。
@@ -84,22 +84,30 @@ fn ensure_ocr_text_column(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// FTS 索引一次性回填（评审 Fix）：external-content 虚表只经触发器收行——升级前
-/// （C3 时代）已入库的行不会自动进 shots_fts，不回填则老用户既有历史永久搜不到。
-/// 以 `PRAGMA user_version` 作一次性闸门：0（C3 老库 / 全新库）→ `'rebuild'` 全量
-/// 重建（从 content 表 shots 读全部行）+ 置 1；≥1 → 短路，此后每次开连接不再走
-/// rebuild 扫描。rebuild 与置位同批次顺序执行：rebuild 失败则置位不发生，下次开连接
-/// 自动重试。新库首开同样置 1（rebuild 对空表是 no-op，置位纯为短路后续开销）。
+/// FTS 索引一次性迁移 + 回填（M0 建，M4 扩列）：`PRAGMA user_version` 闸门。
+///
+/// - ≥ 2：已迁移库，短路（每次开连接零扫描）。
+/// - 0（C3 老库 / 全新库）或 1（M0 库：shots_fts 还是两列旧形状）：旧 FTS 对象
+///   （触发器 + 虚表）整体 DROP → 按 FTS_SCHEMA 重建（含 ocr_text 列）→
+///   `'rebuild'` 全量回填（从 content 表读全部行）→ 置 2。v1 库不能只靠
+///   CREATE IF NOT EXISTS——旧虚表缺 ocr_text 列，触发器也不会被替换，必须重建。
+/// rebuild 与置位同批次顺序执行：任一步失败则置位不发生，下次开连接自动重试。
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    if version >= 1 {
+    if version >= 2 {
         return Ok(());
     }
-    conn.execute_batch(
-        "INSERT INTO shots_fts(shots_fts) VALUES('rebuild');\nPRAGMA user_version = 1;",
-    )
+    conn.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS shots_fts_ai;
+         DROP TRIGGER IF EXISTS shots_fts_ad;
+         DROP TRIGGER IF EXISTS shots_fts_au;
+         DROP TABLE IF EXISTS shots_fts;
+         {FTS_SCHEMA}
+         INSERT INTO shots_fts(shots_fts) VALUES('rebuild');
+         PRAGMA user_version = 2;"
+    ))
     .map_err(|e| e.to_string())
 }
 
@@ -224,6 +232,21 @@ pub(crate) fn search_at(db: &std::path::Path, query: &str, limit: i64) -> Result
 
 pub fn delete(app: &AppHandle, id: i64) -> Result<(), String> {
     delete_at(&db_path(app), id)
+}
+
+/// M4：OCR 结果回填历史行（按 path 匹配；无匹配行 = 不入库不报错——编辑器装载的
+/// 临时文件/未入库图属合法状态）。UPDATE 触发器同步 FTS（delete+insert 复合），
+/// ocr_text 即刻可检索。返回受影响行数（0 = 无匹配）。
+pub fn set_ocr_text(app: &AppHandle, path: &str, text: &str) -> Result<usize, String> {
+    set_ocr_text_at(&db_path(app), path, text)
+}
+
+pub(crate) fn set_ocr_text_at(db: &std::path::Path, path: &str, text: &str) -> Result<usize, String> {
+    let conn = open_at(db)?;
+    let n = conn
+        .execute("UPDATE shots SET ocr_text = ?1 WHERE path = ?2", rusqlite::params![text, path])
+        .map_err(|e| e.to_string())?;
+    Ok(n)
 }
 
 /// 删行 + 删两个文件（文件已不在（NotFound）忽略——行存在而文件丢失是合法状态：
@@ -494,7 +517,7 @@ mod tests {
         // 闸门已置位：老库变已迁移库
         let v: i64 = Connection::open(&db).unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 1, "回填后 user_version 置 1");
+        assert_eq!(v, 2, "回填后 user_version 置 2（M4 扩列后的迁移终点）");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -510,7 +533,7 @@ mod tests {
         {
             let conn = Connection::open(&db).unwrap();
             let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-            assert_eq!(v, 1, "record_at 首开已置闸门");
+            assert_eq!(v, 2, "record_at 首开已置闸门");
             conn.execute("DELETE FROM shots_fts WHERE rowid = ?1", [id]).unwrap();
         }
         open_at(&db).unwrap(); // 若此处错误地 rebuild，索引会被恢复
@@ -573,6 +596,68 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         let fts_n: i64 = conn.query_row("SELECT COUNT(*) FROM shots_fts", [], |r| r.get(0)).unwrap();
         assert_eq!(fts_n, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// M4：M0 形态旧库（两列 FTS + user_version=1）升级——重建三列 FTS 且旧行
+    /// ocr_text 置入后立即可检索。这是 user_version 1→2 迁移的实证。
+    #[test]
+    fn fts_upgrade_from_m0_shape_reindexes_ocr_text() {
+        let dir = temp_dir("fts-m0-shape");
+        let db = dir.join("history.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch("ALTER TABLE shots ADD COLUMN ocr_text TEXT;").unwrap();
+            // M0 时代的两列 FTS + 旧触发器（与 M4 FTS_SCHEMA 的关键差异：无 ocr_text 列）。
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE shots_fts USING fts5(path, app, content='shots', content_rowid='id');
+                 CREATE TRIGGER shots_fts_ai AFTER INSERT ON shots BEGIN
+                     INSERT INTO shots_fts(rowid, path, app) VALUES (new.id, new.path, new.app);
+                 END;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO shots(created_at, path, thumb_path, w, h, app) VALUES ('t', '/pics/a.png', '', 1, 1, 'App')",
+                [],
+            )
+            .unwrap();
+        }
+        // 旧库下：ocr 文本搜不到（两列 FTS 没这列）。
+        assert!(search_at(&db, "发票抬头", 50).unwrap().is_empty());
+        open_at(&db).unwrap();
+        let v: i64 = Connection::open(&db).unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2, "M0 库升级置 2");
+        let n = set_ocr_text_at(&db, "/pics/a.png", "发票抬头 HawkSnap").unwrap();
+        assert_eq!(n, 1, "UPDATE 命中一行");
+        // 新列即时可检索（UPDATE 触发器已喂 FTS）。
+        let hits = search_at(&db, "发票抬头", 50).unwrap();
+        assert_eq!(hits.len(), 1, "ocr 文本可检索");
+        assert_eq!(hits[0].path, "/pics/a.png");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// M4：set_ocr_text 回填 → 检索 → 覆盖更新 → 删除级联，全程 FTS 一致。
+    #[test]
+    fn set_ocr_text_updates_column_and_fts() {
+        let dir = temp_dir("fts-setocr");
+        let db = dir.join("history.db");
+        let id = record_at(&db, "/pics/HawkSnap/sheet.png", "", 10, 10, "App").unwrap();
+        // 未入库路径：0 行受影响但不报错（编辑器临时文件合法态）。
+        assert_eq!(set_ocr_text_at(&db, "/tmp/unknown.png", "x").unwrap(), 0);
+        // 首次回填即可检索。
+        assert_eq!(set_ocr_text_at(&db, "/pics/HawkSnap/sheet.png", "季度报表 合计 1234").unwrap(), 1);
+        assert_eq!(search_at(&db, "季度报表", 50).unwrap().len(), 1);
+        assert_eq!(search_at(&db, "合计", 50).unwrap().len(), 1);
+        // 覆盖更新：旧词失效，新词生效（UPDATE 复合触发器 delete+insert）。
+        assert_eq!(set_ocr_text_at(&db, "/pics/HawkSnap/sheet.png", "年度预算 5678").unwrap(), 1);
+        assert!(search_at(&db, "季度报表", 50).unwrap().is_empty(), "旧文本不再命中");
+        assert_eq!(search_at(&db, "年度预算", 50).unwrap().len(), 1);
+        // 行删除级联 ocr 索引。
+        delete_at(&db, id).unwrap();
+        assert!(search_at(&db, "年度预算", 50).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

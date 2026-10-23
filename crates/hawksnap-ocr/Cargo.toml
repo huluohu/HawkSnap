@@ -1,0 +1,33 @@
+[package]
+name = "hawksnap-ocr"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hawksnap-core.workspace = true
+image.workspace = true
+serde.workspace = true
+# ORT dylib 运行期下载的 SHA256 校验（与模型同款模式）。
+sha2 = "0.10"
+# 模型/ORT dylib 下载器（默认 features = rustls(ring) + gzip；阻塞式小依赖，
+# 仅在首次 OCR 触发的下载线程中使用，不进常驻路径）。
+ureq = "3"
+
+# RapidOCR ONNX 推理。load-dynamic：不链 ORT——dylib（microsoft/onnxruntime
+# 官方 release，SHA256 校验）随模型一起按需下载到 app_data_dir/models，
+# ort::init_from(path) 装载。选型理由见 task-4-report.md（download-binaries 需要
+# 构建期联网拉 pyke CDN，离线/vendored 构建破裂；load-dynamic 把外联收束到与
+# 模型同一「官方 release + SHA256」下载通道）。版本必须与 ORT dylib 1.31.0 对齐。
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "ndarray"] }
+# ort 的 ndarray feature 依赖（Array4 输入构造直接引用，版本对齐 ort 0.16）。
+ndarray = "0.17"
+
+[dev-dependencies]
+tiny_http = "0.12"
+
+[features]
+# 诊断特性：cargo test/test 运行加 --features ocr-debug 输出 det 框明细（stderr）。
+ocr-debug = []
