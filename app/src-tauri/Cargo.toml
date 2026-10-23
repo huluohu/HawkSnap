@@ -38,6 +38,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arboard = "3"
 chrono = "0.4"
+# 编辑器降级装载（editor_image_dataurl）：asset 协议失败时 base64 dataURL 兜底。
+# 0.22 已在依赖树（dev-dependencies 同版本），非新增下载。
+base64 = "0.22"
 
 # G7 伪签名集成测试：tiny_http 起本地静态源充当更新通道；tauri "test" feature 提供无
 # 窗口的 mock app（updater_builder 需要插件状态挂在一个 App 上）。feature 仅测试构建

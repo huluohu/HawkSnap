@@ -64,5 +64,22 @@
   "overlay.annotate": "Annotate",
   "overlay.ocr": "OCR",
   "overlay.gif": "GIF",
-  "overlay.comingSoon": "Coming soon"
+  "overlay.comingSoon": "Coming soon",
+  "editor.toolbar": "Editor toolbar",
+  "editor.tool.rect": "Rectangle",
+  "editor.tool.ellipse": "Ellipse",
+  "editor.tool.arrow": "Arrow",
+  "editor.tool.pen": "Pen",
+  "editor.tool.highlighter": "Highlighter",
+  "editor.tool.text": "Text",
+  "editor.color": "Color",
+  "editor.strokeWidth": "Stroke",
+  "editor.fontSize": "Font size",
+  "editor.undo": "Undo",
+  "editor.redo": "Redo",
+  "editor.save": "Save",
+  "editor.saveTip": "Export coming soon",
+  "editor.close": "Close",
+  "editor.textPlaceholder": "Type text; Enter to apply, Esc to cancel",
+  "editor.loadError": "Failed to load image: {message}"
 }

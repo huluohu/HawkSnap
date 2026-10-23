@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "editor",
+  "description": "Capability for the annotation editor window (label `editor`); covers event listen (hawk://editor-load), command invoke (editor_open / editor_image_dataurl fallback), and window close (editor.close toolbar button) used by the editor page",
+  "windows": ["editor"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close"
+  ]
+}
