@@ -15,9 +15,6 @@ export function useSelection(opts: {
   // 方向键不移动选区；candidatesRef 缺省时只 nudge 不磁吸。
   candidatesRef?: { current: Rect[] };
   bounds?: Rect;
-  // DEBUG-PROBE（诊断后移除）：可选诊断回调（keydown/confirm 打点），缺省完全静默——
-  // 既有测试不传即零影响。返回 void、内部自吞错（dlog fire-and-forget）。
-  onDebug?: (m: string) => void;
   onConfirm?: (r: SelRect, action: ConfirmAction) => void; onCancel?: () => void;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
@@ -54,15 +51,9 @@ export function useSelection(opts: {
   // action 缺省 "copy"：Enter（keydown 监听）与 dblclick（canvas onDoubleClick）都不带
   // 动作参数，走复制；"save" 仅由浮条按钮显式传入。
   const confirm = useCallback((action: ConfirmAction = "copy") => {
-    // DEBUG-PROBE（诊断后移除）：确认链打点——守卫拒绝（in-flight / 选区无效）必须与
-    // 通过可区分，否则无法归因「按钮无响应」到底卡在哪一环。
-    const probe = (verdict: string) => opts.onDebug?.(
-      `confirm action=${action} phase=${phase} rect=${rect ? `${rect.w}x${rect.h}` : "null"} `
-      + `inflight=${confirmingRef.current} → ${verdict}`);
-    if (confirmingRef.current) { probe("rejected (inflight)"); return; }
-    if (phase !== "selected" || !rect || rect.w < 2 || rect.h < 2) { probe("rejected (guard)"); return; }
+    if (confirmingRef.current) return;
+    if (phase !== "selected" || !rect || rect.w < 2 || rect.h < 2) return;
     confirmingRef.current = true;
-    probe("passed");
     // HiDPI 分数坐标修正（0.1 hotfix）：缩放屏上 clientX/Y 可为小数（如 428.75），norm()
     // 原样保留 → Rust 侧 Rect 是 i32/u32，serde 在 IPC 层直接拒绝浮点 → finish_capture
     // 失败。出口统一取整（round(w≥2) ≥ 2，既有 w/h≥2 守卫取整后仍成立，无需复检）。
@@ -112,7 +103,6 @@ export function useSelection(opts: {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      opts.onDebug?.("keydown " + e.key + " phase=" + phase); // DEBUG-PROBE（诊断后移除）
       // Task 4 方向键微调：必须先于 Escape/Enter 判断，且仅在 selected 态生效——
       // 拖拽中/空闲的方向键一律忽略（不 preventDefault，不改状态）。preventDefault
       // 阻止方向键的默认滚动/焦点移动；return 防止同一按键再落进 Escape/Enter 分支。

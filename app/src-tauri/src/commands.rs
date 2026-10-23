@@ -175,24 +175,6 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
     Ok(CaptureOutcome { copied, saved_to })
 }
 
-/// DEBUG-PROBE（诊断后移除）：临时诊断通道。前端/宿主任意环节打点，追加
-/// `epoch_ms,msg` 一行到 $TMPDIR/hawksnap-debug.log（create+append；msg 内换行转义
-/// 保证一行一条）。任何失败一律静默——诊断基建绝不影响产品链路。自定义命令不进
-/// ACL（capabilities 只管插件权限），全部窗口可调。
-#[tauri::command]
-pub fn debug_log(msg: String) {
-    let epoch_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let line = format!("{epoch_ms},{}\n", msg.replace('\n', "\\n"));
-    let path = std::env::temp_dir().join("hawksnap-debug.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        use std::io::Write;
-        let _ = f.write_all(line.as_bytes());
-    }
-}
-
 use std::sync::{LazyLock, Mutex};
 use std::collections::HashMap;
 // raw-RGBA 捕获缓存（Plan B Task 2，取代 FRAME_META）：每 display 存冻结帧的 scale、
