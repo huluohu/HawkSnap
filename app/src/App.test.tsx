@@ -1,6 +1,6 @@
-// App 历史分区（M0）冒烟测试：mock @tauri-apps/api（jsdom 无 Tauri 运行时）——
-// 挂载即 history_list 懒加载、缩略图经 convertFileSrc、重新编辑禁用（Ruling 1）、
-// 空态文案、250ms 防抖后切 history_search。
+// App 历史分区（M0 + M3 重新编辑接线）冒烟测试：mock @tauri-apps/api（jsdom 无 Tauri
+// 运行时）——挂载即 history_list 懒加载、缩略图经 convertFileSrc、重新编辑启用 invoke
+// editor_open（origin=null，M2 Task M3）、空态文案、250ms 防抖后切 history_search。
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -93,16 +93,23 @@ describe("App history section", () => {
     expect(img.getAttribute("alt")).toContain("Safari");
   });
 
-  it("renders per-tile actions with re-edit disabled (Ruling 1)", async () => {
+  it("invokes editor_open (origin null) when Re-edit is clicked (M2 Task M3)", async () => {
     render(<App />);
     await screen.findByRole("img");
-    const reedit = screen.getAllByTitle("Editor coming soon");
+    const reedit = screen.getAllByRole("button", { name: "Re-edit" });
     expect(reedit.length).toBe(2);
     for (const b of reedit) {
       expect(b.tagName).toBe("BUTTON");
-      expect((b as HTMLButtonElement).disabled).toBe(true);
+      expect((b as HTMLButtonElement).disabled).toBe(false);
     }
-    // 其余操作可用：每瓦片 贴图 / 打开目录 / 删除 各一枚
+    fireEvent.click(reedit[0]);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("editor_open", {
+        path: SHOTS[0].path,
+        origin: null,
+      }),
+    );
+    // 其余操作仍可用：每瓦片 贴图 / 打开目录 / 删除 各一枚
     expect(screen.getAllByRole("button", { name: "Pin" }).length).toBe(2);
     expect(screen.getAllByRole("button", { name: "Reveal" }).length).toBe(2);
     expect(screen.getAllByRole("button", { name: "Delete" }).length).toBe(2);

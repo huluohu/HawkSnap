@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use tauri::AppHandle;
 
+use base64::Engine as _;
+
 use crate::commands;
 
 // —— 贴图 Pin 窗口句柄（平台门控） ——
@@ -22,6 +24,14 @@ static PINS: LazyLock<Mutex<HashMap<u64, PinHandle>>> = LazyLock::new(|| Mutex::
 
 /// 贴图 id 分配器（也作级联序号：第 n 个贴图偏移 (n%8)*24）。
 static PIN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 进程级 AppHandle（M2 Task M3，双击进编辑器用）：双击回调是 `fn(u64)` fn 指针
+/// （platform-mac 不反向依赖 app crate），回调体内需要 AppHandle 才能开编辑器窗口
+/// ——首个贴图创建时（spawn_pin_window）存入。OnceLock：首建后不再变；未建贴图时
+/// 双击不可能发生（无窗口），取不到 handle 的分支仅防御。仅 macOS（双击钩子只在
+/// macOS 建窗路径注入）。
+#[cfg(target_os = "macos")]
+static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 
 // —— 纯逻辑（可测；窗口路径经 PinWindow 句柄） ——
 
@@ -106,6 +116,11 @@ fn spawn_pin_window(
 ) -> Result<u64, String> {
     // Esc 钩子（幂等注入）：贴图按键 Esc → remove_pin_on_main（主线程回调内直接执行）
     hawksnap_platform_mac::pin::set_on_escape(remove_pin_on_main);
+    // 双击钩子（M2 Task M3，幂等注入）：贴图双击 → open_pin_editor_on_main（主线程
+    // 回调内取快照，开编辑器在独立线程）
+    hawksnap_platform_mac::pin::set_on_dblclick(open_pin_editor_on_main);
+    // AppHandle 存档（双击回调无参携带，见 APP 注）；首建后 set 失败为良性（同值）。
+    let _ = APP.set(app.clone());
 
     // 位置：主显示器中心 − 半尺寸 + 级联偏移。captured_display_frames 为全局逻辑坐标
     // （左上原点，ScreenFrame 同源）；无捕获几何（如纯剪贴板/历史文件来源）→ 1512×982
@@ -169,6 +184,56 @@ fn remove_pin_on_main(id: u64) {
     if let Some(p) = PINS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
         p.close(); // 幂等：orderOut + close 后 closed 置位，Drop 不再触碰 AppKit
     }
+}
+
+/// 双击钩子（M2 Task M3，仅主线程调用——AppKit mouseUp 回调内）：贴图当前帧落盘
+/// 临时 PNG → editor_open（origin=Pin）。线程纪律：主线程栈内只做「取 Arc 克隆 +
+/// 锁内查表」（image_rgba 访问器是纯数据读取，无 AppKit 消息以外的代价；PNG 编码
+/// 数十 ms 不得占主线程）→ 编码/落盘/建编辑器窗全部丢独立线程（wry 建窗禁主线程，
+/// 与托盘 shot 入口同一纪律）。贴图已不在册（竞态：双击与 Esc 关闭相撞）→ 静默返回。
+#[cfg(target_os = "macos")]
+fn open_pin_editor_on_main(id: u64) {
+    let snap = {
+        let pins = PINS.lock().unwrap_or_else(|e| e.into_inner());
+        pins.get(&id).map(|p| p.image_rgba())
+    };
+    let Some((rgba, w_px, h_px)) = snap else {
+        return; // 贴图已关闭（双击与 Esc 相撞的良性竞态）
+    };
+    let app = APP.get().cloned();
+    // 探针（常驻，廉价，每次双击一行）：E2E 判别双击链路已进入 Rust 侧。
+    eprintln!("[hawksnap] pin dblclick: id={id} {w_px}×{h_px}");
+    std::thread::spawn(move || {
+        if let Err(e) = open_pin_editor(app, rgba, w_px, h_px, id) {
+            eprintln!("[hawksnap] 贴图双击打开编辑器失败: {e}");
+        }
+    });
+}
+
+/// 双击的独立线程半程（M2 Task M3）：RGBA → PNG（hawksnap_core 纯函数）→ 临时文件
+/// `$TMPDIR/hawksnap-pin-{id}-{ts}.png` → editor_open（origin=Pin，保存回写贴图窗口
+/// ——契约见 editor.rs 模块注）。app 缺席（无贴图创建即双击不可能发生，防御）→ Err。
+#[cfg(target_os = "macos")]
+fn open_pin_editor(
+    app: Option<AppHandle>,
+    rgba: std::sync::Arc<Vec<u8>>,
+    w_px: u32,
+    h_px: u32,
+    id: u64,
+) -> Result<(), String> {
+    let app = app.ok_or("AppHandle 未就绪".to_string())?;
+    let png = hawksnap_core::crop::rgba_to_png(&rgba, w_px, h_px)
+        .map_err(|e| format!("贴图帧编码失败: {e}"))?;
+    let path = std::env::temp_dir().join(format!(
+        "hawksnap-pin-{id}-{}.png",
+        chrono::Local::now().timestamp_millis()
+    ));
+    std::fs::write(&path, &png).map_err(|e| format!("临时文件写入失败: {e}"))?;
+    crate::editor::editor_open(
+        app,
+        path.to_string_lossy().into_owned(),
+        Some(crate::editor::EditorOrigin::Pin { pin_id: id }),
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -278,6 +343,60 @@ fn do_pin_close_all(_app: &AppHandle) -> Result<(), String> {
     Err("unsupported platform".into())
 }
 
+// —— 编辑器保存回写贴图（M2 Task M3） —--
+
+/// PNG base64 → (rgba, w, h)（pin_set_image 的载荷解码，纯函数可测）。校验链与
+/// editor_save 同源：base64 解码 → PNG 解码（尺寸合法性由 png_to_rgba 兜底）→
+/// 空图拒绝。
+fn decode_pin_png(png_base64: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| format!("PNG 数据解码失败: {e}"))?;
+    let (rgba, w, h) =
+        hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| format!("截图文件解码失败: {e}"))?;
+    if w == 0 || h == 0 {
+        return Err("截图文件为空图".into());
+    }
+    Ok((rgba, w, h))
+}
+
+/// 编辑器保存回写（M2 Task M3，origin=Pin）：把编辑后的整帧 RGBA 换进贴图窗口。
+/// 主线程交付（set_image 触碰 AppKit）；贴图已关闭（编辑期间用户 Esc 掉贴图的竞态）
+/// → 静默 Ok（任务裁定：ignore silently）。非 macOS：Err（Plan D CI 矩阵口径）。
+pub(crate) fn pin_set_image_rgba(
+    app: &AppHandle,
+    id: u64,
+    rgba: Vec<u8>,
+    w_px: u32,
+    h_px: u32,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        app.run_on_main_thread(move || {
+            if let Some(p) = PINS.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+                if let Err(e) = p.set_image(std::sync::Arc::new(rgba), w_px, h_px) {
+                    eprintln!("[hawksnap] 贴图回写失败: {e}");
+                }
+            }
+        })
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, id, rgba, w_px, h_px);
+        Err("unsupported platform".into())
+    }
+}
+
+/// 贴图回写命令（M2 Task M3 契约面）：editor_save 内部直调
+/// [`pin_set_image_rgba`]（同进程，无 IPC）；本命令提供等价的显式调用面（png base64
+/// 载荷与 editor_save 同款传输），当前无前端调用方，注册以固定契约。
+#[tauri::command(async)]
+pub fn pin_set_image(app: AppHandle, id: u64, png_base64: String) -> Result<(), String> {
+    let (rgba, w, h) = decode_pin_png(&png_base64)?;
+    pin_set_image_rgba(&app, id, rgba, w, h)
+}
+
 #[cfg(test)]
 mod pins_tests {
     use super::*;
@@ -309,5 +428,36 @@ mod pins_tests {
         assert_eq!(clamp_opacity(0.1), 0.2, "下限 0.2");
         assert_eq!(clamp_opacity(1.5), 1.0, "上限 1.0");
         assert_eq!(clamp_opacity(0.5), 0.5, "区间内不变");
+    }
+
+    #[test]
+    fn decode_pin_png_roundtrips_and_rejects_garbage() {
+        // 正路：2×1 PNG → rgba 长度 8 + dims 保真（回写贴图的载荷契约）
+        let png = hawksnap_core::crop::rgba_to_png(&[1, 2, 3, 255, 4, 5, 6, 255], 2, 1).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let (rgba, w, h) = decode_pin_png(&b64).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba.len(), 8);
+        // 脏载荷：非 base64 / 非 PNG / 空图
+        let err = decode_pin_png("!!!not-base64!!!").unwrap_err();
+        assert!(err.contains("PNG 数据解码失败"), "got: {err}");
+        let not_png = base64::engine::general_purpose::STANDARD.encode(b"JPEG data, honestly");
+        let err = decode_pin_png(&not_png).unwrap_err();
+        assert!(err.contains("截图文件解码失败"), "got: {err}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pin_editor_temp_path_uses_id_and_timestamp() {
+        // 双击落盘契约：$TMPDIR/hawksnap-pin-{id}-{ts}.png（两份文件名不因毫秒相撞）
+        let name = |ts: i64| format!("hawksnap-pin-7-{ts}.png");
+        let p1 = std::env::temp_dir().join(name(chrono::Local::now().timestamp_millis()));
+        assert!(p1.to_string_lossy().contains("hawksnap-pin-7-"));
+        assert!(p1.extension().and_then(|e| e.to_str()) == Some("png"));
+        assert_ne!(
+            name(chrono::Local::now().timestamp_millis()),
+            name(chrono::Local::now().timestamp_millis() + 1),
+            "不同时间戳必须生成不同文件名"
+        );
     }
 }

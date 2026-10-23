@@ -38,7 +38,7 @@ pub fn run() {
         // 兜底（检查返回「未配置」语义）。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            commands::capture_screens, commands::finish_capture,
+            commands::capture_screens, commands::finish_capture, commands::annotate_crop,
             overlay::cancel_capture, overlay::emit_capture_done,
             overlay::hotkey_error, overlay::snap_candidates,
             overlay::start_delayed_capture, overlay::cancel_delayed_capture,
@@ -47,7 +47,7 @@ pub fn run() {
             history::history_list, history::history_search, history::history_delete,
             editor::editor_open, editor::editor_image_dataurl, editor::editor_save,
             pins::pin_latest, pins::pin_from_path, pins::pin_set_opacity, pins::pin_zoom,
-            pins::pin_close, pins::pin_close_all,
+            pins::pin_close, pins::pin_close_all, pins::pin_set_image,
             panel::panel_trigger, panel::open_path,
             updater::check_for_updates, updater::install_update, updater::restart_app
         ])

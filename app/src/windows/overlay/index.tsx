@@ -135,6 +135,25 @@ export default function OverlayWindow() {
     },
   });
 
+  // M2 Task M3「标注」：当前选区直落盘临时 PNG → 编辑器（origin=Capture——保存时才
+  // 复制剪贴板 + 存 save_dir 入库，契约在 Rust editor.rs「来源契约」）。命令侧成功即
+  // 已隐藏全部覆盖层（含 release_captures），无需 emit_capture_done；失败同 confirm
+  // 链口径：capture-error 横幅 + 解锁在途守卫（否则重试被 in-flight 标志砖死）。
+  const annotate = async () => {
+    if (!display || !rect) return;
+    const myFlow = flowRef.current;
+    try {
+      await invoke("annotate_crop", {
+        req: { displayId: display.displayId, rect, copy: false, save: false },
+      });
+    } catch (err) {
+      if (flowRef.current !== myFlow) return;
+      console.error("annotate_crop failed", err);
+      void emit("hawk://capture-error", String(err));
+      unlockConfirm();
+    }
+  };
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
@@ -374,9 +393,13 @@ export default function OverlayWindow() {
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.save")}</button>
+          {/* M2 Task M3：标注启用——当前选区直进编辑器（annotate_crop，见上方 annotate 注） */}
+          <button type="button" onClick={() => void annotate()}
+            style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
+              border: "1px solid #22405F", borderRadius: 6,
+              fontSize: 13, cursor: "pointer" }}>{t("overlay.annotate")}</button>
           {[
             { id: "pin", label: t("overlay.pin") },
-            { id: "annotate", label: t("overlay.annotate") },
             { id: "ocr", label: t("overlay.ocr") },
             { id: "gif", label: t("overlay.gif") },
           ].map(({ id, label }) => (

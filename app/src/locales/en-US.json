@@ -10,7 +10,6 @@
   "history.delete": "Delete",
   "history.confirmDelete": "Confirm delete",
   "history.reedit": "Re-edit",
-  "history.reeditTip": "Editor coming soon",
   "history.actionError": "History action failed: {message}",
   "banner.hotkeyError": "{kind} hotkey registration failed: {message}",
   "banner.captureError": "Capture failed: {message}",

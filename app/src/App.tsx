@@ -271,6 +271,13 @@ function App() {
       })
       .catch((e) => setHistoryError(String(e)));
   };
+  // M2 Task M3：重新编辑 → editor_open（origin=null：保存只覆盖原文件，无剪贴板/
+  // 回写/重复入库副作用——契约在 Rust editor.rs「来源契约」）。
+  const reeditShot = (path: string) => {
+    invoke<void>("editor_open", { path, origin: null }).catch((e) =>
+      setHistoryError(String(e)),
+    );
+  };
 
   // 自动更新（D3）：下载进度 push 通道。仅 downloading 相消费；其他相收到的
   // 迟到事件（上一次安装的尾巴）直接忽略，防止进度文本串台。
@@ -480,8 +487,8 @@ function App() {
                         {t("history.delete")}
                       </button>
                     )}
-                    {/* Ruling 1：编辑器 M1/M3 才存在——重新编辑恒禁用占位 */}
-                    <button style={tileBtn} disabled title={t("history.reeditTip")}>
+                    {/* M2 Task M3：重新编辑启用——editor_open（origin=null） */}
+                    <button style={tileBtn} onClick={() => reeditShot(shot.path)}>
                       {t("history.reedit")}
                     </button>
                   </div>

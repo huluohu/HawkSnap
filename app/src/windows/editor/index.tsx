@@ -1,12 +1,14 @@
-// 编辑器窗口（M2 Task M2）：?window=editor 路由。位图底 + 矢量层 + 撤销重做 +
+// 编辑器窗口（M2 Task M2 + M3）：?window=editor 路由。位图底 + 矢量层 + 撤销重做 +
 // 全量工具（选择/矩形/椭圆/箭头/画笔/荧光笔/马赛克/序号/文本）+ 导出保存。
-// 图片来源：Rust editor_open 建窗/复用后 emit hawk://editor-load { path }（3 连发
+// 图片来源：Rust editor_open 建窗/复用后 emit hawk://editor-load { path, origin }（3 连发
 // @150ms，覆盖层同款冷加载竞态——前端以收到的最后一条为准）；图片本体经 asset 协议
 // convertFileSrc(path) 加载为 Image 元素（装载代数守卫），失败降级
 // editor_image_dataurl（base64 dataURL，仅降级路径走 10MB 级 IPC）。
 // 导出（F5 单路径）：exportToPng（位图 + 全形状经 drawShape 栅格化到离屏 canvas
 // 自然尺寸 1:1）→ base64 → Rust editor_save 写回原路径（覆盖原图，⌘S 可触发），
-// 成功闪「已保存」。
+// 成功闪「已保存」。origin（M3 来源契约，定义在 Rust editor.rs）：装载时随 editor-load
+// 下发、保存时原样回传 editor_save 决定副作用——pin：回写贴图窗口图；capture：复制
+// 剪贴板 + 存 save_dir 入库；null（历史重新编辑）：仅覆盖原文件。
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -20,6 +22,9 @@ import { translate, withColor, withSize, withWidth, type Shape } from "./shapes"
 
 // 样式记忆（计划接口）：color/width/size 持久化 localStorage，挂载时恢复。
 const STYLE_KEY = "hawksnap.editor.style";
+
+// 来源契约（M2 Task M3，Rust editor.rs EditorOrigin 的 TS 镜像，serde tag=kind camelCase）。
+type EditorOrigin = { kind: "pin"; pinId: number } | { kind: "capture" };
 
 const DEFAULT_STYLE: EditorStyle = { color: "#E5484D", width: 3, size: 24 };
 
@@ -68,9 +73,11 @@ export default function EditorWindow() {
   const { present, canUndo, canRedo, commit, undo, redo, reset } = useEditorHistory([]);
   const [tool, setTool] = useState<Tool>("rect");
   const [style, setStyle] = useState<EditorStyle>(DEFAULT_STYLE);
-  // 位图元素 + 来源路径（导出写回原路径用）。element 与 path 同生同灭（apply 成对设置）。
+  // 位图元素 + 来源路径 + 来源（导出保存副作用用）。element/path/origin 同生同灭
+  // （apply 成对设置——M3：origin 随 editor-load 下发，保存时回传 editor_save）。
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [imagePath, setImagePath] = useState<string | null>(null);
+  const [origin, setOrigin] = useState<EditorOrigin | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // 选择态：选中形状下标（删除/移动/样式改的目标；形状数组变化越界即取消）
   const [selected, setSelected] = useState<number | null>(null);
@@ -116,21 +123,22 @@ export default function EditorWindow() {
   // reset/loadError，迟到旧探测自弃；未守卫时最终显示的是「最后完成 onload 的图」
   // 而非「最后请求的 path」。装载成功 = 新会话：撤销栈清空 + 取消选中（旧图的
   // 选中下标对新图无意义）。
-  const applyImage = useCallback((img: HTMLImageElement, path: string) => {
+  const applyImage = useCallback((img: HTMLImageElement, path: string, org: EditorOrigin | null) => {
     reset([]); // 换图生效 = 清空撤销栈（新会话）
     setSelected(null);
     setLoadError(null);
     setImage(img);
     setImagePath(path);
+    setOrigin(org);
   }, [reset]);
 
-  const loadFromPath = useCallback((path: string) => {
+  const loadFromPath = useCallback((path: string, org: EditorOrigin | null) => {
     const myGen = loadGuardRef.current.begin();
     const url = convertFileSrc(path);
     const probe = new Image();
     probe.onload = () => {
       if (!loadGuardRef.current.isCurrent(myGen)) return;
-      applyImage(probe, path);
+      applyImage(probe, path, org);
     };
     probe.onerror = () => {
       if (!loadGuardRef.current.isCurrent(myGen)) return;
@@ -140,7 +148,7 @@ export default function EditorWindow() {
           if (!loadGuardRef.current.isCurrent(myGen)) return;
           const img = new Image();
           img.onload = () => {
-            if (loadGuardRef.current.isCurrent(myGen)) applyImage(img, path);
+            if (loadGuardRef.current.isCurrent(myGen)) applyImage(img, path, org);
           };
           img.onerror = () => {
             if (loadGuardRef.current.isCurrent(myGen)) setLoadError("decode failed");
@@ -156,12 +164,13 @@ export default function EditorWindow() {
 
   // push 通道：hawk://editor-load（3 连发 @150ms），后到的 path 覆盖先到的（单编辑器
   // 模型：编辑中再开新图 = 替换当前图 + 清空撤销栈——新图探测完成应用时 reset，
-  // 迟到旧事件经代数守卫自弃，不触发 reset）。
+  // 迟到旧事件经代数守卫自弃，不触发 reset）。origin（M3）随载荷下发，与 path 同生
+  // 同灭（applyImage 成对设置）。
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    listen<{ path: string }>("hawk://editor-load", (e) => {
-      if (!disposed) loadFromPath(e.payload.path);
+    listen<{ path: string; origin: EditorOrigin | null }>("hawk://editor-load", (e) => {
+      if (!disposed) loadFromPath(e.payload.path, e.payload.origin ?? null);
     }).then((un) => {
       if (disposed) un();
       else unlisten = un;
@@ -219,7 +228,8 @@ export default function EditorWindow() {
     }
   }, [commit, present, selected]);
 
-  // —— 导出保存（F5：经 exportToPng 单路径栅格化 → editor_save 写回原路径）——
+  // —— 导出保存（F5：经 exportToPng 单路径栅格化 → editor_save 写回原路径 + origin
+  // 副作用（M3 契约：pin 回写贴图 / capture 剪贴板+入库 / null 无））——
 
   const save = useCallback(async () => {
     if (!image || !imagePath || saving) return;
@@ -228,7 +238,7 @@ export default function EditorWindow() {
     try {
       const blob = await exportToPng(image, present, image.naturalWidth, image.naturalHeight);
       const pngBase64 = await blobToBase64(blob);
-      await invoke("editor_save", { path: imagePath, pngBase64 });
+      await invoke("editor_save", { path: imagePath, pngBase64, origin });
       setSavedFlash(true);
       window.clearTimeout(flashTimer.current);
       flashTimer.current = window.setTimeout(() => setSavedFlash(false), 2000);
@@ -237,7 +247,7 @@ export default function EditorWindow() {
     } finally {
       setSaving(false);
     }
-  }, [image, imagePath, present, saving]);
+  }, [image, imagePath, present, saving, origin]);
 
   // 快捷键：⌘Z/⌘⇧Z（撤销重做）、Delete/Backspace（删除选中）、Esc（取消选中）、
   // ⌘S（保存）。文本输入聚焦时不接管（内联输入的字符编辑优先；其自身的

@@ -7,7 +7,10 @@
 //! - 滚轮缩放 / Ctrl+滚轮透明度 = `HawkPinView` 覆写 `scrollWheel:`（define_class）；
 //! - Esc 关闭聚焦贴图 = `HawkPinView` 覆写 `keyDown:`（仅 `isKeyWindow` 时），经
 //!   [`set_on_escape`] 注入的 fn 指针回调 app 层（platform-mac 不反向依赖 app crate）；
-//! - 双击 = `mouseUp:` 覆写仅 eprintln（编辑器归 M2；plan 的「闪烁反馈」有意省略）。
+//! - 双击进编辑器（M2 Task M3）= `mouseUp:` 覆写检测 `clickCount == 2`，经
+//!   [`set_on_dblclick`] 注入的 fn 指针回调 app 层（同款反依赖模式）。mouseDown 刻意
+//!   不覆写：`isMovableByWindowBackground` 的拖拽语义保留在父类默认路径，而 AppKit 对
+//!   双击的第二击 mouseUp 照发且 clickCount=2，mouseUp 侧检测不干扰拖拽。
 //!
 //! 线程纪律：AppKit 窗口的一切消息只在主线程。创建由 app 层 `run_on_main_thread` 交付；
 //! 滚轮/按键回调本就在主线程事件循环上；关闭（close/Drop）纪律见 [`PinWindow`]。
@@ -59,6 +62,21 @@ pub fn set_on_escape(f: fn(u64)) {
 
 fn escape_hook() -> Option<fn(u64)> {
     *ON_ESCAPE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// —— 双击进编辑器钩子（M2 Task M3，模式同 ON_ESCAPE） ——
+
+/// 双击回调：`fn(u64)`（pin_id）。fn 指针 Copy + Send，语义由 app 层裁定（M3：贴图
+/// 当前帧落盘临时 PNG → editor_open）。仅在主线程被调用（mouseUp 回调内）。
+static ON_DBLCLICK: Mutex<Option<fn(u64)>> = Mutex::new(None);
+
+/// app 层在首个贴图创建前注入（幂等，重复覆盖无害）。
+pub fn set_on_dblclick(f: fn(u64)) {
+    *ON_DBLCLICK.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+fn dblclick_hook() -> Option<fn(u64)> {
+    *ON_DBLCLICK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // —— ObjC 子类 ——
@@ -141,8 +159,11 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             if event.clickCount() == 2 {
-                // plan C5 的「双击闪烁反馈」简化为 eprintln（M1 无编辑器，M2 再议交互）。
-                eprintln!("[hawksnap] 贴图双击：编辑器将在后续版本提供");
+                // M2 Task M3：双击 → app 层钩子（贴图当前帧落盘 → editor_open）。钩子
+                // 未注入/窗口树缺失时静默放行（父类路径继续，行为同单击）。
+                if let (Some(hook), Some(id)) = (dblclick_hook(), self.pin_id()) {
+                    hook(id);
+                }
             }
             // SAFETY: 必须交还父类（保持 movableByWindowBackground 的点击语义完整）。
             unsafe { msg_send![super(self), mouseUp: event] }
@@ -197,6 +218,16 @@ pub struct PinWindow {
     view: Retained<HawkPinView>,
     /// close() 幂等闸：置位后 Drop 不再触碰 AppKit（Esc 路径已先行 close）。
     closed: Cell<bool>,
+    /// 源图像保留（M2 Task M3，双击进编辑器 + 保存回写）：create 传入的整帧 RGBA
+    /// Arc 原样持有（make_cg_image 已把字节**拷贝**进 data provider，此处只延长原
+    /// 缓冲生命周期、不产生第三份拷贝）+ 物理 dims + 建窗时源显示器 scale（set_image
+    /// 重算逻辑尺寸用）。编辑器保存回写经 [`PinWindow::set_image`] 整体替换。
+    /// RefCell/Cell：方法签名保持 `&self`（AppKit 回调与 PINS 句柄 map 的 `get` 路径
+    /// 只给共享引用；ivars 同款 interior mutability 纪律——读写全部约束在主线程）。
+    image_rgba: std::cell::RefCell<std::sync::Arc<Vec<u8>>>,
+    image_w_px: Cell<u32>,
+    image_h_px: Cell<u32>,
+    display_scale: f64,
 }
 
 // SAFETY: 见结构体注释——仅句柄搬运，解引用全部约束在主线程。
@@ -323,7 +354,15 @@ impl PinWindow {
             window.isVisible()
         );
 
-        Ok(PinWindow { window, view, closed: Cell::new(false) })
+        Ok(PinWindow {
+            window,
+            view,
+            closed: Cell::new(false),
+            image_rgba: std::cell::RefCell::new(rgba),
+            image_w_px: Cell::new(w_px),
+            image_h_px: Cell::new(h_px),
+            display_scale: scale,
+        })
     }
 
     /// 调试/冒烟断言用：窗口当前是否可见（AppKit isVisible = 已 order 上屏）。
@@ -350,6 +389,50 @@ impl PinWindow {
     pub fn set_opacity(&self, opacity: f64) {
         self.window.setAlphaValue(opacity);
         self.view.ivars().opacity.set(opacity);
+    }
+
+    /// 源图像快照（M2 Task M3）：`(rgba Arc 克隆, 宽 px, 高 px)`。仅主线程调用（
+    /// PinWindow 句柄纪律：一切解引用在主线程）——app 层双击回调在 mouseUp 主线程栈内
+    /// 取走 Arc 克隆后，编码/落盘/建编辑器窗全部在独立线程完成（rgba_to_png 数十 ms，
+    /// 不得阻塞主线程事件循环）。设计说明：任务简报里的 `snapshot_png()`（句柄内直接
+    /// 编码）与此处等价，但平台 crate 只保留 AppKit 纪律内的数据访问器，PNG 编码放
+    /// app 层线程（hawksnap_core 纯函数）——同一个东西，挪了执行位置以守住线程纪律。
+    pub fn image_rgba(&self) -> (std::sync::Arc<Vec<u8>>, u32, u32) {
+        (
+            self.image_rgba.borrow().clone(),
+            self.image_w_px.get(),
+            self.image_h_px.get(),
+        )
+    }
+
+    /// 替换贴图图像（M2 Task M3，编辑器保存回写）：新 RGBA → CGImage（字节拷贝进
+    /// provider，同 create）→ NSImageView 换图。窗口帧不动（当前缩放/位置保持），
+    /// 图像等比缩放（ScaleProportionallyUpOrDown）铺满视图；逻辑尺寸按建窗时源显示
+    /// 器 scale 重算（编辑器导出与原图同 dims，正常路径无可见变化）。仅主线程调用。
+    pub fn set_image(&self, rgba: std::sync::Arc<Vec<u8>>, w_px: u32, h_px: u32) -> Result<(), String> {
+        if w_px == 0 || h_px == 0 {
+            return Err("贴图尺寸为空".into());
+        }
+        if rgba.len() != w_px as usize * h_px as usize * 4 {
+            return Err(format!(
+                "RGBA 长度不匹配: {} != {w_px}×{h_px}×4",
+                rgba.len()
+            ));
+        }
+        let cg_image = make_cg_image(&rgba, w_px, h_px)?;
+        let logical_w = w_px as f64 / self.display_scale;
+        let logical_h = h_px as f64 / self.display_scale;
+        let image = NSImage::initWithCGImage_size(
+            NSImage::alloc(),
+            &cg_image,
+            NSSize { width: logical_w, height: logical_h },
+        );
+        self.view.setImage(Some(&image));
+        // 源图像快照同步替换：下一次双击进编辑器装载的是新图。
+        *self.image_rgba.borrow_mut() = rgba;
+        self.image_w_px.set(w_px);
+        self.image_h_px.set(h_px);
+        Ok(())
     }
 
     /// 关闭（离屏 + close）。幂等：Esc 已关过则 no-op。仅主线程调用。
@@ -449,6 +532,19 @@ unsafe extern "C-unwind" fn drop_provider_bytes(
 #[cfg(test)]
 mod pin_tests {
     use super::*;
+
+    /// M2 Task M3：双击钩子注入（幂等覆盖无害）。fn 指针静态 + Mutex，与 ON_ESCAPE
+    /// 同款契约；窗口路径（mouseUp → hook(id)）需主线程 AppKit 环境，真实验证走
+    /// examples/pin_smoke + 控制器 E2E，此处只验注入管道本身。
+    #[test]
+    fn dblclick_hook_injects_idempotently() {
+        fn first(_: u64) {}
+        fn second(_: u64) {}
+        set_on_dblclick(first);
+        assert!(dblclick_hook().is_some(), "注入后钩子必须可达");
+        set_on_dblclick(second); // 重复注入不 panic（app 层每轮建窗都注入）
+        assert!(dblclick_hook().is_some(), "重复注入后钩子仍可达");
+    }
 
     /// 真·窗口创建/关闭（需 macOS 窗口环境 + **进程主线程**）。libtest 的测试线程
     /// 永远不是进程主线程（含 --test-threads=1），故本测试在 cargo test 下只会以

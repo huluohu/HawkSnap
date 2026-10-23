@@ -106,6 +106,18 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
     Ok(out)
 }
 
+/// RGBA → 剪贴板（finish_capture 直通路径与编辑器「来源=截图」保存共用——M2 Task
+/// M3 从 finish_capture 抽取为单一 helper）。premultiplied RGBA 直送 arboard，零编码。
+pub fn copy_rgba_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_image(arboard::ImageData {
+        width: w as usize,
+        height: h as usize,
+        bytes: rgba.to_vec().into(),
+    })
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOutcome, String> {
     // Task 11 评审 Finding 1：前端 invoke 即确认时刻，在函数首行打点（stage: confirm）。
@@ -119,17 +131,11 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
     let physical = to_physical_rect(&req.rect, meta.scale);
     let cropped = crop_rgba(&meta.rgba, meta.width_px, meta.height_px, &physical)
         .map_err(|e| e.to_string())?;
-    // 3) 剪贴板：直接送 RGBA，省去裁剪 PNG 重编码 + 再解码两个环节
+    // 3) 剪贴板：直接送 RGBA，省去裁剪 PNG 重编码 + 再解码两个环节（helper 与编辑器
+    // 「来源=截图」保存共用，M2 Task M3 抽取）
     let mut copied = false;
     if req.copy {
-        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        // clone：req.save 同时为 true 时 cropped 还要经 rgba_to_png 落盘
-        cb.set_image(arboard::ImageData {
-            width: physical.w as usize,
-            height: physical.h as usize,
-            bytes: cropped.clone().into(),
-        })
-            .map_err(|e| e.to_string())?;
+        copy_rgba_to_clipboard(&cropped, physical.w, physical.h)?;
         copied = true;
         // Task 11 埋点：clipboard_done 仅在 req.copy=true 路径打点（M1 流程恒为 true）。
         // 若未来支持“仅保存”，confirm 与 clipboard_done 行数将不等，bench 长度校验会
@@ -173,6 +179,43 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
         }
     }
     Ok(CaptureOutcome { copied, saved_to })
+}
+
+/// 覆盖层「标注」入口（M2 Task M3）：当前选区裁剪直接落盘临时 PNG → editor_open
+/// （origin=Capture）→ 隐藏全部覆盖层。**不复制剪贴板、不保存、不入库**（裁定：标注
+/// 中截图先临时存盘再编辑，确认后才复制剪贴板 + 存 save_dir 入库——保存副作用契约见
+/// editor.rs 模块注「来源契约」）。req 复用 FinishReq（copy/save 字段忽略——语义由
+/// 编辑器保存路径接管，保留字段只为前端载荷同构）。编辑器打开失败 → Err 上抛（覆盖
+/// 层保持，用户可重试）；打开成功后 hide_all_overlays 收尾——与 emit_capture_done
+/// 同口径（含 release_captures：裁剪已在此前完成，整帧释放安全）。
+#[tauri::command]
+pub async fn annotate_crop(app: AppHandle, req: FinishReq) -> Result<(), String> {
+    // 与 finish_capture 同款锁纪律：锁内只做查找 + Arc clone，裁剪全程无锁。
+    let meta = { CAPTURES.lock().unwrap_or_else(|e| e.into_inner()).get(&req.display_id).cloned() }
+        .ok_or("display not captured")?;
+    let physical = to_physical_rect(&req.rect, meta.scale);
+    let cropped = crop_rgba(&meta.rgba, meta.width_px, meta.height_px, &physical)
+        .map_err(|e| e.to_string())?;
+    let path = write_annotate_png(&cropped, physical.w, physical.h)?;
+    crate::editor::editor_open(
+        app.clone(),
+        path.to_string_lossy().into_owned(),
+        Some(crate::editor::EditorOrigin::Capture),
+    )?;
+    crate::overlay::hide_all_overlays(&app)
+}
+
+/// 标注临时 PNG 落盘（M2 Task M3，纯函数可测）：`$TMPDIR/hawksnap-annotate-{ts}.png`。
+/// 毫秒时间戳命名（同轮多次标注不互撞）；文件无人主动清理（临时目录系统管理，编辑器
+/// 打开期间必须存活，保存后由用户在编辑器语义内处置）。
+fn write_annotate_png(rgba: &[u8], w: u32, h: u32) -> Result<std::path::PathBuf, String> {
+    let png = rgba_to_png(rgba, w, h).map_err(|e| e.to_string())?;
+    let path = std::env::temp_dir().join(format!(
+        "hawksnap-annotate-{}.png",
+        chrono::Local::now().timestamp_millis()
+    ));
+    std::fs::write(&path, &png).map_err(|e| format!("临时文件写入失败: {e}"))?;
+    Ok(path)
 }
 
 use std::sync::{LazyLock, Mutex};
@@ -286,8 +329,8 @@ pub fn release_captures() {
 /// → prune 保留最新 500 条）。独立成函数便于整体 `?` 短路：任一步失败即 Err，由调用方
 /// eprintln 降级（历史是旁路，不回滚、不重试、不影响 CaptureOutcome）；prune 失败在
 /// 函数内自降级（终审 Fix 1），不占用链的 Err 通道——record 已成功，报「入库失败」
-/// 会误导。
-fn record_history(
+/// 会误导。pub(crate)：编辑器「来源=截图」保存入库复用（M2 Task M3，语义同链）。
+pub(crate) fn record_history(
     app: &AppHandle,
     path: &std::path::Path,
     dir: &std::path::Path,
@@ -332,8 +375,9 @@ fn dirs_picture_dir() -> Option<std::path::PathBuf> {
 }
 
 /// C7：保存目录解析——settings.save_dir 优先（sanitized 已把空白串归一为 None），
-/// None → 默认 ~/Pictures/HawkSnap。AppHandle-free，独立成函数便于单测。
-fn resolve_save_dir(settings: &crate::settings::Settings) -> Option<std::path::PathBuf> {
+/// None → 默认 ~/Pictures/HawkSnap。AppHandle-free，独立成函数便于单测。pub(crate)：
+/// 编辑器「来源=截图」入库复用（M2 Task M3）。
+pub(crate) fn resolve_save_dir(settings: &crate::settings::Settings) -> Option<std::path::PathBuf> {
     match settings.save_dir.as_deref() {
         Some(dir) if !dir.trim().is_empty() => Some(std::path::PathBuf::from(dir)),
         _ => dirs_picture_dir(),
@@ -448,5 +492,21 @@ mod tests {
             assert_eq!(meta.frame_path, std::path::PathBuf::from("/tmp/hs-test.raw"));
         }
         CAPTURES.lock().unwrap().remove(&42);
+    }
+
+    #[test]
+    fn annotate_temp_png_roundtrips_with_dims_and_unique_names() {
+        // M2 Task M3「标注」入口的落盘半程：$TMPDIR/hawksnap-annotate-{ts}.png，
+        // 字节可解回同 dims（编辑器按 asset 协议装载该文件），两次落盘文件名不撞。
+        let p1 = write_annotate_png(&[9, 8, 7, 255, 6, 5, 4, 255], 2, 1).unwrap();
+        assert!(p1.to_string_lossy().contains("hawksnap-annotate-"));
+        assert_eq!(p1.extension().and_then(|e| e.to_str()), Some("png"));
+        let (rgba, w, h) = hawksnap_core::crop::png_to_rgba(&std::fs::read(&p1).unwrap()).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba, vec![9, 8, 7, 255, 6, 5, 4, 255]);
+        let p2 = write_annotate_png(&[1, 1, 1, 255], 1, 1).unwrap();
+        assert_ne!(p1, p2, "毫秒时间戳命名必须保证两次标注不互撞");
+        std::fs::remove_file(p1).ok();
+        std::fs::remove_file(p2).ok();
     }
 }
