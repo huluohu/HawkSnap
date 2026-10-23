@@ -210,9 +210,20 @@ fn open_pin_editor_on_main(id: u64) {
     });
 }
 
+/// 贴图双击临时 PNG 落盘路径（纯函数，生产与测试同源——M3 评审 Finding 2）：
+/// `$TMPDIR/hawksnap-pin-{id}-{ts}.png`，毫秒时间戳段（同贴图重复双击不互撞）。
+/// 仅 macOS（唯一调用方 open_pin_editor 与平台同门控）。
+#[cfg(target_os = "macos")]
+fn pin_temp_path(id: u64) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "hawksnap-pin-{id}-{}.png",
+        chrono::Local::now().timestamp_millis()
+    ))
+}
+
 /// 双击的独立线程半程（M2 Task M3）：RGBA → PNG（hawksnap_core 纯函数）→ 临时文件
-/// `$TMPDIR/hawksnap-pin-{id}-{ts}.png` → editor_open（origin=Pin，保存回写贴图窗口
-/// ——契约见 editor.rs 模块注）。app 缺席（无贴图创建即双击不可能发生，防御）→ Err。
+/// [`pin_temp_path`] → editor_open（origin=Pin，保存回写贴图窗口——契约见 editor.rs
+/// 模块注）。app 缺席（无贴图创建即双击不可能发生，防御）→ Err。
 #[cfg(target_os = "macos")]
 fn open_pin_editor(
     app: Option<AppHandle>,
@@ -224,10 +235,7 @@ fn open_pin_editor(
     let app = app.ok_or("AppHandle 未就绪".to_string())?;
     let png = hawksnap_core::crop::rgba_to_png(&rgba, w_px, h_px)
         .map_err(|e| format!("贴图帧编码失败: {e}"))?;
-    let path = std::env::temp_dir().join(format!(
-        "hawksnap-pin-{id}-{}.png",
-        chrono::Local::now().timestamp_millis()
-    ));
+    let path = pin_temp_path(id);
     std::fs::write(&path, &png).map_err(|e| format!("临时文件写入失败: {e}"))?;
     crate::editor::editor_open(
         app,
@@ -448,16 +456,21 @@ mod pins_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn pin_editor_temp_path_uses_id_and_timestamp() {
-        // 双击落盘契约：$TMPDIR/hawksnap-pin-{id}-{ts}.png（两份文件名不因毫秒相撞）
-        let name = |ts: i64| format!("hawksnap-pin-7-{ts}.png");
-        let p1 = std::env::temp_dir().join(name(chrono::Local::now().timestamp_millis()));
-        assert!(p1.to_string_lossy().contains("hawksnap-pin-7-"));
-        assert!(p1.extension().and_then(|e| e.to_str()) == Some("png"));
-        assert_ne!(
-            name(chrono::Local::now().timestamp_millis()),
-            name(chrono::Local::now().timestamp_millis() + 1),
-            "不同时间戳必须生成不同文件名"
+    fn pin_editor_temp_path_matches_contract() {
+        // M3 评审 Finding 2：直呼生产函数 pin_temp_path（此前测试用本地闭包复刻格式串
+        // ——同义反复，生产格式变更仍恒绿）。契约：$TMPDIR/hawksnap-pin-{id}-{ts}.png，
+        // 时间戳段为可解析毫秒数（同贴图重复双击不互撞）。
+        let p = pin_temp_path(7);
+        assert_eq!(
+            p.parent().map(|d| d.to_path_buf()),
+            Some(std::env::temp_dir()),
+            "落盘 $TMPDIR"
         );
+        let name = p.file_name().and_then(|n| n.to_str()).expect("UTF-8 文件名");
+        let ts = name
+            .strip_prefix("hawksnap-pin-7-")
+            .and_then(|s| s.strip_suffix(".png"))
+            .expect("文件名契约 hawksnap-pin-{id}-{ts}.png");
+        assert!(ts.parse::<i64>().is_ok(), "时间戳段必须可解析（毫秒）: {ts}");
     }
 }

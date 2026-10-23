@@ -182,12 +182,17 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
 }
 
 /// 覆盖层「标注」入口（M2 Task M3）：当前选区裁剪直接落盘临时 PNG → editor_open
-/// （origin=Capture）→ 隐藏全部覆盖层。**不复制剪贴板、不保存、不入库**（裁定：标注
-/// 中截图先临时存盘再编辑，确认后才复制剪贴板 + 存 save_dir 入库——保存副作用契约见
-/// editor.rs 模块注「来源契约」）。req 复用 FinishReq（copy/save 字段忽略——语义由
-/// 编辑器保存路径接管，保留字段只为前端载荷同构）。编辑器打开失败 → Err 上抛（覆盖
-/// 层保持，用户可重试）；打开成功后 hide_all_overlays 收尾——与 emit_capture_done
-/// 同口径（含 release_captures：裁剪已在此前完成，整帧释放安全）。
+/// （origin=Capture）→ 返回。**不复制剪贴板、不保存、不入库**（裁定：标注中截图先
+/// 临时存盘再编辑，确认后才复制剪贴板 + 存 save_dir 入库——保存副作用契约见 editor.rs
+/// 模块注「来源契约」）。req 复用 FinishReq（copy/save 字段忽略——语义由编辑器保存
+/// 路径接管，保留字段只为前端载荷同构）。编辑器打开失败 → Err 上抛（覆盖层保持，
+/// 用户可重试）。
+///
+/// 隐藏覆盖层**不在本命令内**（M3 评审 Finding 1）：命令侧无条件 hide_all_overlays
+/// （含 release_captures）会把旧链在途期（冷编辑器建窗 ~100-600ms）新启动一轮刚 show
+/// 的覆盖层藏掉并释放新一轮 CAPTURES，下一轮 confirm 即「display not captured」。hide
+/// 半程拆为 [`hide_overlays_after_annotate`]，由前端在 flow 代数守卫**之后**调用
+/// （守卫权威在前端，与 emit_capture_done 同款）。
 #[tauri::command]
 pub async fn annotate_crop(app: AppHandle, req: FinishReq) -> Result<(), String> {
     // 与 finish_capture 同款锁纪律：锁内只做查找 + Arc clone，裁剪全程无锁。
@@ -198,10 +203,18 @@ pub async fn annotate_crop(app: AppHandle, req: FinishReq) -> Result<(), String>
         .map_err(|e| e.to_string())?;
     let path = write_annotate_png(&cropped, physical.w, physical.h)?;
     crate::editor::editor_open(
-        app.clone(),
+        app,
         path.to_string_lossy().into_owned(),
         Some(crate::editor::EditorOrigin::Capture),
-    )?;
+    )
+}
+
+/// 标注链的隐藏半程（M3 评审 Finding 1 拆分，见 [`annotate_crop`] 注）：前端在 flow
+/// 代数守卫之后调用——本轮未被新流程作废才执行 hide_all_overlays（含 release_captures，
+/// 与 emit_capture_done 收尾口径一致）。旧链迟到调用已被前端守卫拦截；前端守卫与调用
+/// 之间仍有的极窄窗口与 emit_capture_done 相同（同款可接受竞态，新一轮启动自愈）。
+#[tauri::command]
+pub async fn hide_overlays_after_annotate(app: AppHandle) -> Result<(), String> {
     crate::overlay::hide_all_overlays(&app)
 }
 

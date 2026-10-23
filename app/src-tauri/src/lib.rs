@@ -39,6 +39,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::capture_screens, commands::finish_capture, commands::annotate_crop,
+            commands::hide_overlays_after_annotate,
             overlay::cancel_capture, overlay::emit_capture_done,
             overlay::hotkey_error, overlay::snap_candidates,
             overlay::start_delayed_capture, overlay::cancel_delayed_capture,

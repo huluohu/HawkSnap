@@ -136,21 +136,30 @@ export default function OverlayWindow() {
   });
 
   // M2 Task M3「标注」：当前选区直落盘临时 PNG → 编辑器（origin=Capture——保存时才
-  // 复制剪贴板 + 存 save_dir 入库，契约在 Rust editor.rs「来源契约」）。命令侧成功即
-  // 已隐藏全部覆盖层（含 release_captures），无需 emit_capture_done；失败同 confirm
-  // 链口径：capture-error 横幅 + 解锁在途守卫（否则重试被 in-flight 标志砖死）。
+  // 复制剪贴板 + 存 save_dir 入库，契约在 Rust editor.rs「来源契约」）。
+  // 评审 Finding 1：hide 从命令侧拆出——annotate_crop 只裁剪+落盘+开编辑器，成功返回
+  // 且本轮未被新流程作废（flowRef 守卫，与 emit_capture_done 同款、权威在前端）后才
+  // invoke hide_overlays_after_annotate；否则旧链迟到的 hide 会藏掉新一轮刚 show 的
+  // 覆盖层并 release 新一轮 CAPTURES（冷编辑器建窗 ~100-600ms 的窗口期）。
+  // 评审 Minor 2：在途守卫（confirm 同款 ref 模式）——标注在途时拒绝第二次 invoke。
+  // 失败路径：capture-error 横幅，覆盖层保持可重试（不 hide）。
+  const annotateInFlightRef = useRef(false);
   const annotate = async () => {
-    if (!display || !rect) return;
+    if (!display || !rect || annotateInFlightRef.current) return;
+    annotateInFlightRef.current = true;
     const myFlow = flowRef.current;
     try {
       await invoke("annotate_crop", {
         req: { displayId: display.displayId, rect, copy: false, save: false },
       });
+      if (flowRef.current !== myFlow) return; // 已被新一轮作废：hide 权归新流程
+      await invoke("hide_overlays_after_annotate");
     } catch (err) {
       if (flowRef.current !== myFlow) return;
       console.error("annotate_crop failed", err);
       void emit("hawk://capture-error", String(err));
-      unlockConfirm();
+    } finally {
+      annotateInFlightRef.current = false;
     }
   };
 
