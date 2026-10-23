@@ -4,13 +4,14 @@
 // convertFileSrc(path) 加载，失败时降级 editor_image_dataurl（base64 dataURL，仅
 // 降级路径走 10MB 级 IPC）。保存按钮为 M2 占位（导出接线归 M2）；「标注」入口 /
 // 历史重新编辑按钮的启用归 M3（Ruling 1）。
-import { useCallback, useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t, subscribe, getLanguage } from "../../lib/i18n";
 import EditorCanvas, { type EditorStyle, type Tool } from "./EditorCanvas";
 import { useEditorHistory } from "./history";
+import { createLoadGuard } from "./loadGuard";
 import type { Shape } from "./shapes";
 
 // 样式记忆（计划接口）：color/width/size 持久化 localStorage，挂载时恢复。
@@ -49,6 +50,8 @@ export default function EditorWindow() {
   const [style, setStyle] = useState<EditorStyle>(DEFAULT_STYLE);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 装载代数守卫（评审修复 2）：useRef 惰性持有（每渲染新建的备用实例被丢弃）
+  const loadGuardRef = useRef(createLoadGuard());
 
   // 挂载恢复样式记忆
   useEffect(() => {
@@ -65,23 +68,40 @@ export default function EditorWindow() {
   }, [style]);
 
   // 图片装载：asset 协议优先，onerror 降级 dataURL（editor_image_dataurl）。
+  // 代数守卫（评审修复 2）：×3 补发使旧事件的 Image 探测必然迟到（A 的补发可落
+  // 在 B 的事件后）——每个事件分配新代数，探测完成时仅最新代可应用 imageSrc/reset/
+  // loadError，迟到旧探测自弃；未守卫时最终显示的是「最后完成 onload 的图」而非
+  // 「最后请求的 path」（开 A 后快速开 B 可能显示 A 而撤销栈已按 B 重置）。
   const loadFromPath = useCallback((path: string) => {
-    setLoadError(null);
-    reset([]); // 换图 = 清空撤销栈（新会话）
+    const myGen = loadGuardRef.current.begin();
     const url = convertFileSrc(path);
     const probe = new Image();
-    probe.onload = () => setImageSrc(url);
+    const apply = (src: string) => {
+      reset([]); // 换图生效 = 清空撤销栈（新会话；迟到旧事件不会误清新会话的绘制）
+      setLoadError(null);
+      setImageSrc(src);
+    };
+    probe.onload = () => {
+      if (!loadGuardRef.current.isCurrent(myGen)) return;
+      apply(url);
+    };
     probe.onerror = () => {
+      if (!loadGuardRef.current.isCurrent(myGen)) return;
       // 降级：仅当 asset 加载失败才走 base64 IPC（上下文裁定）
       invoke<string>("editor_image_dataurl", { path })
-        .then((dataUrl) => setImageSrc(dataUrl))
-        .catch((e) => setLoadError(String(e)));
+        .then((dataUrl) => {
+          if (loadGuardRef.current.isCurrent(myGen)) apply(dataUrl);
+        })
+        .catch((e) => {
+          if (loadGuardRef.current.isCurrent(myGen)) setLoadError(String(e));
+        });
     };
     probe.src = url;
   }, [reset]);
 
   // push 通道：hawk://editor-load（3 连发 @150ms），后到的 path 覆盖先到的（单编辑器
-  // 模型：编辑中再开新图 = 替换当前图 + 清空撤销栈——loadFromPath 内 reset）。
+  // 模型：编辑中再开新图 = 替换当前图 + 清空撤销栈——新图探测完成应用时 reset，
+  // 迟到旧事件经代数守卫自弃，不触发 reset）。
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;

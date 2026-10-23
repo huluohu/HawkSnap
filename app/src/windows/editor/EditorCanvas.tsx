@@ -91,7 +91,8 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
 export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }: EditorCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const vecRef = useRef<HTMLCanvasElement>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
+  // 内层 stack div（文本内联输入的包含块；评审修复 1）
+  const stackRef = useRef<HTMLDivElement>(null);
   // 拖拽草稿：state 驱动矢量层实时预览（M1 规模：每 move 重绘全部形状可接受）
   const [draft, setDraft] = useState<Shape | null>(null);
   // 文本工具的内联输入：定位 + 草稿值
@@ -215,22 +216,26 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
     onCommit({ kind: "text", x: td.x, y: td.y, text: td.value, color: style.color, size: style.size });
   };
 
-  // 文本内联输入的定位：画布物理坐标 → 容器 CSS 坐标（按矢量层实际缩放比换算）
+  // 文本内联输入的定位：画布物理坐标 → **stack 内** CSS 坐标（评审修复 1：input 的
+  // position:absolute 以内层 stack div（position:relative）为包含块，而非外层滚动容器
+  // wrap——原实现以 wrap 为原点，非满宽图会右偏 canvas 在 stack 内的居中偏移量。
+  // 矢量层 inset:0 充满 stack，stackRect 即缩放原点；换算按矢量层实际缩放比）。
   const textPos = (() => {
     const vec = vecRef.current;
-    const wrap = wrapRef.current;
-    if (!textDraft || !vec || !wrap) return null;
+    const stack = stackRef.current;
+    if (!textDraft || !vec || !stack) return null;
     const rect = vec.getBoundingClientRect();
-    const wrapRect = wrap.getBoundingClientRect();
+    const stackRect = stack.getBoundingClientRect();
     return {
-      left: rect.left - wrapRect.left + (textDraft.x * rect.width) / (vec.width || 1),
-      top: rect.top - wrapRect.top + (textDraft.y * rect.height) / (vec.height || 1),
+      left: rect.left - stackRect.left + (textDraft.x * rect.width) / (vec.width || 1),
+      top: rect.top - stackRect.top + (textDraft.y * rect.height) / (vec.height || 1),
     };
   })();
 
   return (
-    <div ref={wrapRef} style={{ position: "relative", flex: 1, overflow: "auto", background: "#2b2b2b" }}>
+    <div style={{ position: "relative", flex: 1, overflow: "auto", background: "#2b2b2b" }}>
       <div
+        ref={stackRef}
         style={{ position: "relative", margin: "0 auto", width: "fit-content" }}
         data-testid="editor-canvas-stack"
       >
