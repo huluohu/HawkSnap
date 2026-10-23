@@ -7,10 +7,9 @@ import { t } from "../../lib/i18n";
 // 计时 mm:ss + 暂停/恢复 + 停止。时间语义单源在 Rust（hawk://record-tick 每秒广播
 // {seconds, paused}），本页纯渲染——webview 后台节流不影响计时正确性。mount 时先经
 // record_status 拉取补显（push 早于 listen 必丢，countdown 同一问题形态）。
+// mm:ss（tabular-nums 由 time 样式保证）
 const mmss = (s: number) =>
   `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-
-const stop = () => { void invoke("record_stop").catch(() => {}); };
 
 export default function RecordingBarWindow() {
   const [seconds, setSeconds] = useState<number | null>(null);
@@ -44,6 +43,13 @@ export default function RecordingBarWindow() {
   const togglePause = () => {
     const cmd = paused ? "record_resume" : "record_pause";
     void invoke(cmd).catch((e) => setError(String(e)));
+  };
+
+  // 停止（评审修复：不静默）——record_stop 失败（磁盘满 / MP4 收尾失败 / 收尾超时）
+  // 此前被吞掉而悬浮条已隐藏，主停止入口零反馈。与 togglePause 同款行内 setError：
+  // Rust 侧仍持会话（stop 已从 REC 取出、半成品保留在盘），错误文案即 Err 串。
+  const stop = () => {
+    void invoke<string>("record_stop").catch((e) => setError(String(e)));
   };
 
   const bar: CSSProperties = {

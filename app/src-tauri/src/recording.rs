@@ -242,7 +242,9 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
         rt
     };
 
-    hide_recording_bar(&app);
+    // 悬浮条在**成功收尾后**才隐藏（评审修复）：stop 失败（磁盘满/收尾超时）时
+    // 悬浮条保持可见并展示行内错误——若先隐藏，主停止入口的失败零反馈（不静默）。
+    // 收尾阻塞期（≤25s）条冻结在最后秒数（REC 已 take，tick 线程自然退出）。
 
     let (path, info) = {
         #[cfg(target_os = "macos")]
@@ -255,6 +257,8 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
             (rt.output_path, ())
         }
     };
+
+    hide_recording_bar(&app);
 
     // 历史入库（旁路语义：失败仅记录，不影响录制产物返回——与历史库总裁定一致）。
     #[cfg(target_os = "macos")]

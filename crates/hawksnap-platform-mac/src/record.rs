@@ -353,6 +353,15 @@ impl HawkRecordOutput {
         let (Some(adaptor), Some(writer)) = (s.adaptor.as_ref(), s.writer.as_ref()) else {
             return;
         };
+        // 实时背压（评审修复，与音频路径 :append_audio 同策略）：expectsMediaData
+        // InRealTime 下编码器瞬时积压的 NO 是良性丢帧（≤1 帧 @30fps），不是会话故障。
+        // 恢复瞬间首帧 PTS 也可能以微差落在会话起点之下（音频先赢 startSession 的
+        // ordering race）→ 同样表现为一次良性 NO——一律静默丢弃；只有 writer 进入
+        // Failed（status/error 为 AVAssetWriter 文档明示的线程安全对）才记会话错误，
+        // 杜绝「一次良性 NO → stop 永远 Err」与首错覆盖后错两个问题。
+        if !unsafe { adaptor.assetWriterInput().isReadyForMoreMediaData() } {
+            return;
+        }
         // CMSampleBufferGetImageBuffer 返回的 CVImageBuffer 随样本缓冲存活（此处已
         // retain）；CVPixelBuffer 是 CVImageBuffer 的类型别名（同 CF 类型），直通。
         let Some(img) = (unsafe { sb.image_buffer() }) else { return };
@@ -362,11 +371,10 @@ impl HawkRecordOutput {
                 CMTime::with_seconds(shifted, OUTPUT_TIMESCALE),
             )
         };
-        if !ok {
+        if !ok && unsafe { writer.status() } == AVAssetWriterStatus::Failed {
             if s.error.is_none() {
                 s.error = Some(format!(
-                    "视频帧写入失败: writer status {:?} / {:?}",
-                    unsafe { writer.status() },
+                    "视频帧写入失败（writer Failed）: {:?}",
                     unsafe { writer.error() }.map(|e| e.to_string())
                 ));
             }
