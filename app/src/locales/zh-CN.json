@@ -78,8 +78,13 @@
   "editor.undo": "撤销",
   "editor.redo": "重做",
   "editor.save": "保存",
-  "editor.saveTip": "导出即将提供",
+  "editor.saveTip": "覆盖保存到原图（⌘S）",
   "editor.close": "关闭",
   "editor.textPlaceholder": "输入文字，Enter 确认，Esc 取消",
-  "editor.loadError": "图片加载失败：{message}"
+  "editor.loadError": "图片加载失败：{message}",
+  "editor.tool.select": "选择",
+  "editor.tool.mosaic": "马赛克",
+  "editor.tool.step": "序号",
+  "editor.saved": "已保存",
+  "editor.saveFailed": "保存失败：{message}"
 }

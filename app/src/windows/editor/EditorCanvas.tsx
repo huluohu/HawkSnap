@@ -1,136 +1,166 @@
-// 编辑器画布（M2 Task M1）：位图底（随图片加载绘制一次）+ 矢量层（shapes/draft
-// 变化即全量重绘——M1 规模可接受，M2 优化）。指针流：down 建草稿 → move 更新 →
-// up 校验并提交（过小/过短的形状丢弃）。drawShape 是 M1 的唯一绘制路径，M2 抽取
-// 后作为导出共用（F5 单路径约束的雏形）。
+// 编辑器画布（M2 Task M2）：位图底（随图片装载绘制）+ 矢量层 + 选择态。
+// 指针流（按工具分派）：
+// - 绘制工具：down 建草稿 → move 更新 → up 校验并提交（过小/过短的形状丢弃）；
+//   一次拖拽 = 一次提交（up 时）。
+// - 选择工具：down 命中测试（topmostShapeAt，描边带语义）→ 选中；按住拖动 =
+//   移动预览（本地 dx/dy state，重绘层对选中形状套 translate）→ up 提交一次
+//   onMoveShape（拖拽全程只入一档历史）；点空白 = 取消选中。
+// - 马赛克：同 rect 拖拽（blockSize 固定 10px @自然尺度）；序号气泡：点击落位，
+//   n = nextStepNumber(shapes)（创建时计算并存入形状，删除/撤销自然回落）。
+// - 文本：点击落锚开内联输入（Enter/blur 提交、Esc 取消）；双击已提交文本形状
+//   （选择工具下）重新打开输入，提交 = onReplaceText 替换（一档历史）。
+//   工具切换时**结转**未提交文本（M1 遗留修复：原实现静默丢弃）。
+// 绘制路径（F5）：矢量层重绘只经 drawShape(ctx, shape, bitmap)；选择框是编辑器
+// UI，不进 drawShape、不进导出。bitmap 与导出同源（index.tsx 持有的 Image 元素）。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { bboxOf, type Shape } from "./shapes";
+import { canvasMeasure, drawShape } from "./draw";
+import {
+  bboxOf,
+  hitTest,
+  nextStepNumber,
+  topmostShapeAt,
+  translate,
+  withColor,
+  withSize,
+  withWidth,
+  type MeasureFn,
+  type Shape,
+} from "./shapes";
 import { t } from "../../lib/i18n";
 
-export type Tool = "rect" | "ellipse" | "arrow" | "pen" | "highlighter" | "text";
+export type Tool =
+  | "select" | "rect" | "ellipse" | "arrow" | "pen" | "highlighter"
+  | "mosaic" | "step" | "text";
 
 export interface EditorStyle { color: string; width: number; size: number }
 
+/** 马赛克块尺寸（px @图片自然尺度）——计划口径 ~10px。 */
+export const MOSAIC_BLOCK_SIZE = 10;
+
 interface EditorCanvasProps {
-  imageUrl: string | null;
+  /** 位图（index.tsx 装载的 Image 元素；马赛克采样与导出同源）。 */
+  image: HTMLImageElement | null;
   shapes: Shape[];
   tool: Tool;
   style: EditorStyle;
+  /** 选中形状下标（index.tsx 持有；删除/样式改按此定位）。 */
+  selected: number | null;
+  /** 选中形状的样式实时预览（滑杆拖动期间未提交）：非 null 时按此覆盖选中形状样式。 */
+  previewStyle: EditorStyle | null;
+  onSelect: (index: number | null) => void;
   onCommit: (s: Shape) => void;
+  /** 拖动选中形状（pointerup 一次一档历史）。 */
+  onMoveShape: (index: number, dx: number, dy: number) => void;
+  /** 双击文本编辑提交（替换原形状文本）。 */
+  onReplaceText: (index: number, text: string) => void;
 }
 
 interface Pt { x: number; y: number }
 
-// —— 绘制（预览用；M2 抽取为导出共用 drawShape）——
-// 注：绘制不需要文本量测（fillText 直接画）；量测仅 bboxOf/hitTest 的 text 分支
-// 需要（ctx.measureText 的注入点在矢量层重绘 effect 里）。
-
-function drawShape(ctx: CanvasRenderingContext2D, shape: Shape): void {
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  switch (shape.kind) {
-    case "rect": {
-      const b = bboxOf(shape);
-      ctx.strokeStyle = shape.color;
-      ctx.lineWidth = shape.width;
-      ctx.strokeRect(b.x, b.y, b.w, b.h);
-      break;
-    }
-    case "ellipse": {
-      const b = bboxOf(shape);
-      ctx.strokeStyle = shape.color;
-      ctx.lineWidth = shape.width;
-      ctx.beginPath();
-      ctx.ellipse(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      break;
-    }
-    case "arrow": {
-      ctx.strokeStyle = shape.color;
-      ctx.lineWidth = shape.width;
-      ctx.beginPath();
-      ctx.moveTo(shape.x1, shape.y1);
-      ctx.lineTo(shape.x2, shape.y2);
-      ctx.stroke();
-      // 箭头头部：两翼沿主轴回折 ~30°
-      const ang = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
-      const head = Math.max(10, shape.width * 4);
-      for (const da of [Math.PI - 0.5, Math.PI + 0.5]) {
-        ctx.beginPath();
-        ctx.moveTo(shape.x2, shape.y2);
-        ctx.lineTo(shape.x2 + head * Math.cos(ang + da), shape.y2 + head * Math.sin(ang + da));
-        ctx.stroke();
-      }
-      break;
-    }
-    case "pen":
-    case "highlighter": {
-      ctx.globalAlpha = shape.kind === "highlighter" ? 0.4 : 1;
-      ctx.strokeStyle = shape.color;
-      ctx.lineWidth = shape.width;
-      ctx.beginPath();
-      const pts = shape.points;
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      if (pts.length === 1) ctx.lineTo(pts[0].x + 0.01, pts[0].y); // 单点也出墨
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-      break;
-    }
-    case "text": {
-      ctx.fillStyle = shape.color;
-      ctx.font = `${shape.size}px sans-serif`;
-      ctx.textBaseline = "top";
-      ctx.fillText(shape.text, shape.x, shape.y);
-      break;
-    }
-  }
+/** 选中形状样式实时预览：按工具栏当前样式覆盖（形状缺对应字段时为 no-op）。 */
+function applyPreviewStyle(s: Shape, st: EditorStyle): Shape {
+  return withColor(withWidth(withSize(s, st.size), st.width), st.color);
 }
 
-// —— 组件 ——
+/** 选择框（编辑器 UI chrome）：虚线包围盒 + 8 把手。不进导出。 */
+function drawSelection(ctx: CanvasRenderingContext2D, b: { x: number; y: number; w: number; h: number }): void {
+  const HANDLE = 8;
+  ctx.save();
+  ctx.strokeStyle = "#4aa3ff";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(b.x - 0.5, b.y - 0.5, b.w + 1, b.h + 1);
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#ffffff";
+  const xs = [b.x, b.x + b.w / 2, b.x + b.w];
+  const ys = [b.y, b.y + b.h / 2, b.y + b.h];
+  for (const hx of xs) {
+    for (const hy of ys) {
+      ctx.fillRect(hx - HANDLE / 2, hy - HANDLE / 2, HANDLE, HANDLE);
+      ctx.strokeRect(hx - HANDLE / 2, hy - HANDLE / 2, HANDLE, HANDLE);
+    }
+  }
+  ctx.restore();
+}
 
-export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }: EditorCanvasProps) {
+export default function EditorCanvas({
+  image, shapes, tool, style, selected, previewStyle,
+  onSelect, onCommit, onMoveShape, onReplaceText,
+}: EditorCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const vecRef = useRef<HTMLCanvasElement>(null);
   // 内层 stack div（文本内联输入的包含块；评审修复 1）
   const stackRef = useRef<HTMLDivElement>(null);
-  // 拖拽草稿：state 驱动矢量层实时预览（M1 规模：每 move 重绘全部形状可接受）
+  // 绘制草稿：state 驱动矢量层实时预览（每 move 全量重绘——M2 规模仍可接受：
+  // 重绘成本 ~几十个形状的矢量指令；马赛克的临时画布降采样只在含 mosaic 时发生）
   const [draft, setDraft] = useState<Shape | null>(null);
-  // 文本工具的内联输入：定位 + 草稿值
-  const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string } | null>(null);
+  // 移动草稿：{ 选中下标, 起点, 累计位移 }（up 时一次提交）
+  const [moveDraft, setMoveDraft] = useState<{ index: number; start: Pt; dx: number; dy: number } | null>(null);
+  // 文本内联输入：落锚 + 草稿值 + 编辑目标（editIndex=null = 新建）
+  const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string; editIndex: number | null } | null>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef(false);
+  // 最新文本草稿镜像（effect/事件回调读取用，规避闭包过期）
+  const textDraftRef = useRef(textDraft);
+  textDraftRef.current = textDraft;
 
-  // 位图底：图片加载（每张一次）后按自然尺寸铺满 base canvas，并同步矢量层尺寸。
+  // 位图底：image 变化（每张一次）后按自然尺寸铺满 base canvas，并同步矢量层尺寸。
   useEffect(() => {
-    if (!imageUrl) return;
-    const img = new Image();
-    img.onload = () => {
-      const base = baseRef.current;
-      const vec = vecRef.current;
-      if (!base || !vec) return;
-      base.width = img.naturalWidth;
-      base.height = img.naturalHeight;
-      vec.width = img.naturalWidth;
-      vec.height = img.naturalHeight;
-      const ctx = base.getContext("2d");
-      if (ctx) ctx.drawImage(img, 0, 0);
-    };
-    img.src = imageUrl;
-  }, [imageUrl]);
+    const base = baseRef.current;
+    const vec = vecRef.current;
+    if (!base || !vec) return;
+    if (!image) {
+      // 无图兜底：小占位画布（清掉旧图残影）
+      base.width = 0;
+      base.height = 0;
+      vec.width = 0;
+      vec.height = 0;
+      return;
+    }
+    base.width = image.naturalWidth;
+    base.height = image.naturalHeight;
+    vec.width = image.naturalWidth;
+    vec.height = image.naturalHeight;
+    const ctx = base.getContext("2d");
+    if (ctx) {
+      ctx.clearRect(0, 0, base.width, base.height);
+      ctx.drawImage(image, 0, 0);
+    }
+  }, [image]);
 
-  // 矢量层：shapes/draft 任一变化即全量重绘（含空白兜底：图片未加载时也有干净画布）。
+  // 换图即清草稿/移动/文本编辑（旧图的未提交输入不能提交进新图会话）。
+  useEffect(() => {
+    setDraft(null);
+    setMoveDraft(null);
+    setTextDraft(null);
+  }, [image]);
+
+  // 矢量层重绘：shapes/draft/移动/选中态任一变化即全量重绘。F5：形状只经 drawShape
+  // （与导出同一函数、同一 bitmap）；选择框紧随其后（仅预览层）。
   useEffect(() => {
     const vec = vecRef.current;
     if (!vec) return;
     const ctx = vec.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, vec.width, vec.height);
-    for (const s of shapes) drawShape(ctx, s);
-    if (draft) drawShape(ctx, draft);
-  }, [shapes, draft]);
+    const measure = canvasMeasure(ctx);
+    for (let i = 0; i < shapes.length; i++) {
+      let s = shapes[i];
+      if (moveDraft && i === moveDraft.index) s = translate(s, moveDraft.dx, moveDraft.dy);
+      else if (i === selected && previewStyle) s = applyPreviewStyle(s, previewStyle);
+      drawShape(ctx, s, image);
+    }
+    if (draft) drawShape(ctx, draft, image);
+    if (selected != null && shapes[selected]) {
+      const s = moveDraft && moveDraft.index === selected
+        ? translate(shapes[selected], moveDraft.dx, moveDraft.dy)
+        : shapes[selected];
+      drawSelection(ctx, bboxOf(s, measure));
+    }
+  }, [shapes, draft, moveDraft, selected, previewStyle, image]);
 
   /** 事件坐标 → 画布物理坐标（CSS 缩放比换算）。 */
-  const toCanvas = useCallback((e: React.PointerEvent): Pt => {
+  const toCanvas = useCallback((e: { clientX: number; clientY: number }): Pt => {
     const vec = vecRef.current;
     if (!vec) return { x: 0, y: 0 };
     const rect = vec.getBoundingClientRect();
@@ -139,12 +169,52 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
     return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
   }, []);
 
+  /** 命中测试量测（文本 bbox 需 ctx.measureText；jsdom/无 ctx 时回退估算）。 */
+  const getMeasure = useCallback((): MeasureFn | undefined => {
+    const ctx = vecRef.current?.getContext("2d");
+    return ctx ? canvasMeasure(ctx) : undefined;
+  }, []);
+
+  /** 提交（或丢弃）挂起的内联文本。工具切换/画布点击前调用（M1 遗留修复：切换
+   * 工具结转而非丢弃；编辑态替换、新建态追加，各成一档历史）。 */
+  const flushText = useCallback(() => {
+    const td = textDraftRef.current;
+    if (!td) return;
+    setTextDraft(null);
+    const value = td.value;
+    if (value.trim() === "") return; // 空文本：静默丢弃（新建与编辑同口径）
+    if (td.editIndex != null) onReplaceText(td.editIndex, value);
+    else onCommit({ kind: "text", x: td.x, y: td.y, text: value, color: style.color, size: style.size });
+  }, [onCommit, onReplaceText, style.color, style.size]);
+
+  // 工具切换：结转未提交文本（含双击编辑中的）。
+  useEffect(() => {
+    flushText();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅工具变化时结转
+  }, [tool]);
+
   const onPointerDown = (e: React.PointerEvent) => {
-    if (!imageUrl) return;
+    if (!image) return;
+    flushText(); // 任何画布点击前先结转挂起文本（blur 时序竞态兜底）
     const p = toCanvas(e);
+    const measure = getMeasure();
+    if (tool === "select") {
+      const idx = topmostShapeAt(shapes, p.x, p.y, measure);
+      onSelect(idx);
+      if (idx != null) {
+        dragRef.current = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setMoveDraft({ index: idx, start: p, dx: 0, dy: 0 });
+      }
+      return;
+    }
     if (tool === "text") {
-      // 文本工具：点击即落锚，内联输入 Enter/blur 提交、Esc 取消（index 层约定）
-      setTextDraft({ x: p.x, y: p.y, value: "" });
+      setTextDraft({ x: p.x, y: p.y, value: "", editIndex: null });
+      return;
+    }
+    if (tool === "step") {
+      // 点击落位；n 创建时算好存进形状（删除/撤销后重算自然回落）
+      onCommit({ kind: "step", x: p.x, y: p.y, n: nextStepNumber(shapes), color: style.color });
       return;
     }
     dragRef.current = true;
@@ -153,6 +223,9 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
       case "rect":
       case "ellipse":
         setDraft({ kind: tool, x: p.x, y: p.y, w: 0, h: 0, color: style.color, width: style.width });
+        break;
+      case "mosaic":
+        setDraft({ kind: "mosaic", x: p.x, y: p.y, w: 0, h: 0, blockSize: MOSAIC_BLOCK_SIZE });
         break;
       case "arrow":
         setDraft({ kind: "arrow", x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: style.color, width: style.width });
@@ -167,11 +240,16 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
   const onPointerMove = (e: React.PointerEvent) => {
     if (!dragRef.current) return;
     const p = toCanvas(e);
+    if (moveDraft) {
+      setMoveDraft({ ...moveDraft, dx: p.x - moveDraft.start.x, dy: p.y - moveDraft.start.y });
+      return;
+    }
     setDraft((d) => {
       if (!d) return d;
       switch (d.kind) {
         case "rect":
         case "ellipse":
+        case "mosaic":
           // 归一化：负宽高（反向拖拽）在此折正，bboxOf 兜底
           return { ...d, x: Math.min(d.x, p.x), y: Math.min(d.y, p.y), w: Math.abs(p.x - d.x), h: Math.abs(p.y - d.y) };
         case "arrow":
@@ -185,7 +263,8 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
           }
           return { ...d, points: [...d.points, p] };
         case "text":
-          // 文本无拖拽草稿（点击落锚走内联输入）；防御分支保穷尽
+        case "step":
+          // 无拖拽草稿（点击分派）；防御分支保穷尽
           return d;
       }
     });
@@ -194,13 +273,20 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
   const onPointerUp = () => {
     if (!dragRef.current) return;
     dragRef.current = false;
+    if (moveDraft) {
+      const { index, dx, dy } = moveDraft;
+      setMoveDraft(null);
+      // <1px 视为点击（选中）而非拖动，不入历史——一次拖拽 = 一档历史
+      if (Math.hypot(dx, dy) >= 1) onMoveShape(index, dx, dy);
+      return;
+    }
     const d = draft;
     setDraft(null);
     if (!d) return;
-    // 微形状丢弃（计划接口）：手写 <3 点、矩/椭 w*h<4、箭长 <4
+    // 微形状丢弃（计划接口）：手写 <3 点、矩/椭/马 w*h<4、箭长 <4
     if (d.kind === "pen" || d.kind === "highlighter") {
       if (d.points.length < 3) return;
-    } else if (d.kind === "rect" || d.kind === "ellipse") {
+    } else if (d.kind === "rect" || d.kind === "ellipse" || d.kind === "mosaic") {
       if (d.w * d.h < 4) return;
     } else if (d.kind === "arrow") {
       if (Math.hypot(d.x2 - d.x1, d.y2 - d.y1) < 4) return;
@@ -208,12 +294,29 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
     onCommit(d);
   };
 
-  // 文本提交/取消
+  // 双击（选择工具）：重新打开已提交文本形状的内联输入（预填原文，提交=替换）。
+  const onDoubleClick = (e: React.MouseEvent) => {
+    if (tool !== "select" || !image) return;
+    const p = toCanvas(e);
+    const measure = getMeasure();
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      if (s.kind === "text" && hitTest(s, p.x, p.y, measure)) {
+        onSelect(i);
+        setTextDraft({ x: s.x, y: s.y, value: s.text, editIndex: i });
+        return;
+      }
+    }
+  };
+
+  // 文本提交/取消（内联输入自身的 Enter/blur/Esc）
   const commitText = () => {
     const td = textDraft;
     setTextDraft(null);
-    if (!td || td.value.trim() === "") return;
-    onCommit({ kind: "text", x: td.x, y: td.y, text: td.value, color: style.color, size: style.size });
+    if (!td) return;
+    if (td.value.trim() === "") return;
+    if (td.editIndex != null) onReplaceText(td.editIndex, td.value);
+    else onCommit({ kind: "text", x: td.x, y: td.y, text: td.value, color: style.color, size: style.size });
   };
 
   // 文本内联输入的定位：画布物理坐标 → **stack 内** CSS 坐标（评审修复 1：input 的
@@ -232,6 +335,8 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
     };
   })();
 
+  const cursor = tool === "select" ? "default" : tool === "text" ? "text" : "crosshair";
+
   return (
     <div style={{ position: "relative", flex: 1, overflow: "auto", background: "#2b2b2b" }}>
       <div
@@ -245,12 +350,13 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
           data-testid="editor-vector-canvas"
           style={{
             position: "absolute", inset: 0, width: "100%", height: "100%",
-            cursor: tool === "text" ? "text" : "crosshair",
+            cursor,
             touchAction: "none",
           }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onDoubleClick={onDoubleClick}
         />
         {textDraft && textPos && (
           <input
@@ -265,7 +371,7 @@ export default function EditorCanvas({ imageUrl, shapes, tool, style, onCommit }
             onKeyDown={(e) => {
               if (e.key === "Enter") commitText();
               if (e.key === "Escape") setTextDraft(null);
-              e.stopPropagation(); // 不让 ⌘Z/Esc 冒泡到窗口级快捷键
+              e.stopPropagation(); // 不让 ⌘Z/Esc/Delete 冒泡到窗口级快捷键
             }}
             style={{
               position: "absolute", left: textPos.left, top: textPos.top,

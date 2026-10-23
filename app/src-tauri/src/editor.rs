@@ -84,3 +84,109 @@ pub fn editor_image_dataurl(path: String) -> Result<String, String> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
     Ok(format!("data:image/png;base64,{b64}"))
 }
+
+/// PNG 文件魔数（RFC 2083 8 字节签名）：editor_save 的载荷校验（前端 canvas.toBlob
+/// 产物必带；防误写其他字节流）。
+const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// 保存编辑结果（M2 Task M2）：前端 exportToPng（F5 单路径栅格化）产出的 PNG 字节
+/// 以 base64 过 IPC → 校验（目标为已存在的 .png 文件 + PNG 魔数）→ 覆盖写回原路径。
+///
+/// 路径安全裁定（上下文预授权）：path 只来自编辑器装载过的历史/临时文件路径
+/// （hawk://editor-load 原样传回），属第一方受控输入——不做目录白名单校验，仅校验
+/// 「文件已存在 + 扩展名 .png（大小写不敏感）」，杜绝借编辑器写任意路径/任意格式。
+#[tauri::command(async)]
+pub fn editor_save(path: String, png_base64: String) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("路径为空".into());
+    }
+    let p = std::path::Path::new(&path);
+    let is_png_ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    if !is_png_ext {
+        return Err("编辑器仅支持保存 PNG 文件".into());
+    }
+    if !p.is_file() {
+        return Err(format!("目标文件不存在: {path}"));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| format!("PNG 数据解码失败: {e}"))?;
+    if bytes.len() < PNG_MAGIC.len() || bytes[..PNG_MAGIC.len()] != PNG_MAGIC {
+        return Err("不是有效的 PNG 数据".into());
+    }
+    std::fs::write(p, bytes).map_err(|e| format!("写入截图文件失败: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod editor_save_tests {
+    use super::*;
+
+    /// 每测试独立临时目录（进程 id + 用例 tag 隔离，免共享状态互踩）。
+    fn temp_png(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hawksnap-editor-save-{}-{tag}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("shot.png")
+    }
+
+    #[test]
+    fn writes_valid_png_bytes_over_the_original() {
+        let path = temp_png("roundtrip");
+        // 起始文件必须存在（编辑器只覆盖自家装载过的路径）
+        std::fs::write(&path, b"stale-bytes").unwrap();
+        let png = hawksnap_core::crop::rgba_to_png(&[10, 20, 30, 255, 40, 50, 60, 255], 2, 1).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        editor_save(path.to_string_lossy().into(), b64).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), png); // 原样落盘（不再转码——F5 像素一致）
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn rejects_bad_base64() {
+        let path = temp_png("badb64");
+        std::fs::write(&path, b"stale").unwrap();
+        let err = editor_save(path.to_string_lossy().into(), "!!!not-base64!!!".into()).unwrap_err();
+        assert!(err.contains("PNG 数据解码失败"), "got: {err}");
+        // 失败不落盘（原文件保持原样）
+        assert_eq!(std::fs::read(&path).unwrap(), b"stale");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn rejects_payload_without_png_magic() {
+        let path = temp_png("magic");
+        std::fs::write(&path, b"stale").unwrap();
+        let not_png = base64::engine::general_purpose::STANDARD.encode(b"JPEG data, honestly");
+        let err = editor_save(path.to_string_lossy().into(), not_png).unwrap_err();
+        assert!(err.contains("不是有效的 PNG 数据"), "got: {err}");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn rejects_missing_target_and_non_png_extension() {
+        let dir = std::env::temp_dir().join(format!("hawksnap-editor-save-{}-missing", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("gone.png");
+        let err = editor_save(missing.to_string_lossy().into(), String::new()).unwrap_err();
+        assert!(err.contains("目标文件不存在"), "got: {err}");
+        // 已存在但扩展名非 .png：拒绝（防借编辑器写任意格式路径）
+        let txt = dir.join("shot.txt");
+        std::fs::write(&txt, b"x").unwrap();
+        let png = hawksnap_core::crop::rgba_to_png(&[0, 0, 0, 255], 1, 1).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let err = editor_save(txt.to_string_lossy().into(), b64).unwrap_err();
+        assert!(err.contains("仅支持保存 PNG"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_empty_path() {
+        assert_eq!(editor_save("  ".into(), String::new()).unwrap_err(), "路径为空");
+    }
+}

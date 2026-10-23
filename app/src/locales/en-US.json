@@ -78,8 +78,13 @@
   "editor.undo": "Undo",
   "editor.redo": "Redo",
   "editor.save": "Save",
-  "editor.saveTip": "Export coming soon",
+  "editor.saveTip": "Overwrite the original image (⌘S)",
   "editor.close": "Close",
   "editor.textPlaceholder": "Type text; Enter to apply, Esc to cancel",
-  "editor.loadError": "Failed to load image: {message}"
+  "editor.loadError": "Failed to load image: {message}",
+  "editor.tool.select": "Select",
+  "editor.tool.mosaic": "Mosaic",
+  "editor.tool.step": "Step",
+  "editor.saved": "Saved",
+  "editor.saveFailed": "Save failed: {message}"
 }

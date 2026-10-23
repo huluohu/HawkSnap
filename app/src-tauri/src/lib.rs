@@ -45,7 +45,7 @@ pub fn run() {
             overlay::countdown_remaining,
             settings::get_settings, settings::set_settings,
             history::history_list, history::history_search, history::history_delete,
-            editor::editor_open, editor::editor_image_dataurl,
+            editor::editor_open, editor::editor_image_dataurl, editor::editor_save,
             pins::pin_latest, pins::pin_from_path, pins::pin_set_opacity, pins::pin_zoom,
             pins::pin_close, pins::pin_close_all,
             panel::panel_trigger, panel::open_path,
