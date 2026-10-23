@@ -136,6 +136,14 @@ mod rgba_to_png_tests {
     }
 }
 
+/// PNG → RGBA + 尺寸（纯解码，无缩放/裁剪）。历史「重新贴图」（M0 M2）用：
+/// 从历史文件路径读 PNG 后钉成贴图窗口，与 pin_latest 的 rgba→PinWindow 同管道。
+pub fn png_to_rgba(png: &[u8]) -> Result<(Vec<u8>, u32, u32), CropError> {
+    let img = image::load_from_memory(png).map_err(|_| CropError::Decode)?;
+    let (w, h) = (img.width(), img.height());
+    Ok((img.into_rgba8().into_raw(), w, h))
+}
+
 /// RGBA → 缩略图 RGBA（等比缩到最长边 ≤ max_edge；已小于则原样返回）。
 /// 历史库缩略图用（C3）：max_edge 由调用方定（如 320）。
 pub fn rgba_thumbnail(rgba: &[u8], w: u32, h: u32, max_edge: u32) -> Result<(Vec<u8>, u32, u32), CropError> {
@@ -216,5 +224,19 @@ mod rgba_tests {
         let png = rgba_to_png(&rgba, 4, 3).unwrap();
         let img = image::load_from_memory(&png).unwrap();
         assert_eq!((img.width(), img.height()), (4, 3));
+    }
+
+    #[test]
+    fn png_to_rgba_roundtrips_pixels_and_size() {
+        let rgba = solid_rgba(3, 5, [7, 8, 9, 255]);
+        let png = rgba_to_png(&rgba, 3, 5).unwrap();
+        let (out, w, h) = png_to_rgba(&png).unwrap();
+        assert_eq!((w, h), (3, 5));
+        assert_eq!(out, rgba, "解码后像素逐字节还原");
+    }
+
+    #[test]
+    fn png_to_rgba_rejects_garbage() {
+        assert!(matches!(png_to_rgba(b"not a png"), Err(CropError::Decode)));
     }
 }

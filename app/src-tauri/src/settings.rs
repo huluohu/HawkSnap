@@ -115,12 +115,16 @@ pub fn set_settings(app: AppHandle, s: Settings) -> Result<Settings, String> {
     // 旧值）→ 自启切换（best-effort，仅在与文件旧值不同时执行）→ 落盘 → 返回生效设置。
     // 运行态注：注册失败时旧热键已注销、新组合可能半数已注册（半新半旧），文件保持旧值
     // ——重启或下次成功保存自愈（reregister_from_settings 注，计划裁定不做回滚注册）。
-    apply_pipeline(
+    let effective = apply_pipeline(
         s,
         &path,
         |combo, kind| crate::overlay::register_one(&app, combo, kind),
         |enable| apply_launch_at_login(&app, enable),
-    )
+    )?;
+    // M0：save_dir 可能刚变更——重算 asset 协议放行（新目录的缩略图才能进网格）。
+    // best-effort（内部 eprintln 降级），不影响保存成功返回。
+    crate::commands::allow_asset_scope(&app);
+    Ok(effective)
 }
 
 /// set_settings 的可测内核（AppHandle-free）：sanitize → 按序注册热键（失败中止、不落盘）

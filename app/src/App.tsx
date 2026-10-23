@@ -1,5 +1,5 @@
-import { useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   t,
@@ -8,6 +8,7 @@ import {
   subscribe,
   type LanguageSetting,
 } from "./lib/i18n";
+import { formatShotDate, type ShotRow } from "./lib/history";
 
 // —— 设置模型（C7）：与 Rust Settings（serde camelCase）逐字段对齐 ——
 interface Settings {
@@ -130,6 +131,14 @@ function App() {
   const [saveOk, setSaveOk] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
   const [updateError, setUpdateError] = useState<string | null>(null);
+  // —— 历史分区（M0）—— 懒加载：挂载即 history_list(50)（面板打开时填充）；输入
+  // 经 250ms 防抖切换到 history_search（计划接口）。确认删除是瓦片内两步按钮
+  // （[删除]→[确认删除]，避免原生 dialog 管线）。
+  const [shots, setShots] = useState<ShotRow[]>([]);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -223,6 +232,45 @@ function App() {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [capturing]);
+
+  // —— 历史分区（M0）—— 搜索输入 250ms 防抖（计划接口）；空查询走 history_list，
+  // 非空走 history_search。加载失败入 historyError（分区内横幅，不打扰设置区）。
+  const refreshShots = useCallback((query: string) => {
+    const req =
+      query.trim() === ""
+        ? invoke<ShotRow[]>("history_list", { limit: 50, offset: 0 })
+        : invoke<ShotRow[]>("history_search", { query, limit: 50 });
+    req
+      .then((rows) => {
+        setShots(rows);
+        setHistoryError(null);
+      })
+      .catch((e) => setHistoryError(String(e)));
+  }, []);
+
+  useEffect(() => {
+    const h = window.setTimeout(() => setDebouncedQuery(historyQuery), 250);
+    return () => window.clearTimeout(h);
+  }, [historyQuery]);
+
+  useEffect(() => {
+    refreshShots(debouncedQuery);
+  }, [debouncedQuery, refreshShots]);
+
+  const pinShot = (path: string) => {
+    invoke<number>("pin_from_path", { path }).catch((e) => setHistoryError(String(e)));
+  };
+  const openShot = (path: string) => {
+    invoke<void>("open_path", { path }).catch((e) => setHistoryError(String(e)));
+  };
+  const removeShot = (id: number) => {
+    invoke<void>("history_delete", { id })
+      .then(() => {
+        setConfirmDeleteId(null);
+        refreshShots(debouncedQuery);
+      })
+      .catch((e) => setHistoryError(String(e)));
+  };
 
   // 自动更新（D3）：下载进度 push 通道。仅 downloading 相消费；其他相收到的
   // 迟到事件（上一次安装的尾巴）直接忽略，防止进度文本串台。
@@ -377,9 +425,71 @@ function App() {
         <button style={entryBtn} onClick={() => trigger("pin")}>
           {t("panel.pin", { key: form.hotkeyPin })}
         </button>
-        <button style={entryBtn} disabled title={t("panel.historyTip")}>
-          {t("panel.history")}
-        </button>
+      </section>
+      {/* —— 历史分区（M0）：替代 C6 的禁用「历史」入口行 —— */}
+      <section style={historySection}>
+        <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>{t("history.title")}</h2>
+        <input
+          type="search"
+          style={{ ...entryBtn, cursor: "text", width: "100%", boxSizing: "border-box" }}
+          placeholder={t("history.searchPlaceholder")}
+          aria-label={t("history.searchPlaceholder")}
+          value={historyQuery}
+          onChange={(e) => setHistoryQuery(e.target.value)}
+        />
+        {historyError && (
+          <div role="alert" style={historyBanner}>
+            {t("history.actionError", { message: historyError })}
+          </div>
+        )}
+        {shots.length === 0 ? (
+          <p style={{ color: "#666", textAlign: "center" }}>
+            {debouncedQuery.trim() === "" ? t("history.empty") : t("history.emptySearch")}
+          </p>
+        ) : (
+          <div style={grid}>
+            {shots.map((shot) => {
+              const title = `${formatShotDate(shot.createdAt, getLanguage())} · ${shot.app}`;
+              return (
+                <div key={shot.id} style={tile} title={title}>
+                  {shot.thumbPath ? (
+                    <img
+                      src={convertFileSrc(shot.thumbPath)}
+                      alt={title}
+                      loading="lazy"
+                      style={thumb}
+                    />
+                  ) : (
+                    <div style={{ ...thumb, background: "#e9e9ee" }} aria-hidden="true" />
+                  )}
+                  <div style={tileMeta}>{title}</div>
+                  <div style={tileActions}>
+                    <button style={tileBtn} onClick={() => pinShot(shot.path)}>
+                      {t("history.pin")}
+                    </button>
+                    <button style={tileBtn} onClick={() => openShot(shot.path)}>
+                      {t("history.openFolder")}
+                    </button>
+                    {confirmDeleteId === shot.id ? (
+                      // 长hand 边框（不与 tileBtn 的 border 简写混用，避免 React 样式合并告警）
+                      <button style={tileBtnDanger} onClick={() => removeShot(shot.id)}>
+                        {t("history.confirmDelete")}
+                      </button>
+                    ) : (
+                      <button style={tileBtn} onClick={() => setConfirmDeleteId(shot.id)}>
+                        {t("history.delete")}
+                      </button>
+                    )}
+                    {/* Ruling 1：编辑器 M1/M3 才存在——重新编辑恒禁用占位 */}
+                    <button style={tileBtn} disabled title={t("history.reeditTip")}>
+                      {t("history.reedit")}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
       <section style={settingsSection}>
         <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>{t("settings.title")}</h2>
@@ -622,6 +732,83 @@ const settingsSection: CSSProperties = {
   maxWidth: 560,
   textAlign: "left",
   fontSize: 14,
+};
+
+// —— 历史分区（M0）—— 网格 ~120px 瓦片（auto-fill 适配面板宽度），日期+应用做标题。
+const historySection: CSSProperties = {
+  margin: "0 auto 24px",
+  maxWidth: 720,
+  textAlign: "left",
+  fontSize: 14,
+};
+
+const historyBanner: CSSProperties = {
+  margin: "8px 0",
+  padding: "8px 12px",
+  border: "1px solid #d9534f",
+  borderRadius: 6,
+  background: "#fdecea",
+  color: "#a94442",
+  fontSize: 13,
+};
+
+const grid: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
+  gap: 10,
+  marginTop: 12,
+};
+
+const tile: CSSProperties = {
+  border: "1px solid #ddd",
+  borderRadius: 6,
+  padding: 6,
+  display: "grid",
+  gap: 6,
+  alignContent: "start",
+};
+
+const thumb: CSSProperties = {
+  width: "100%",
+  aspectRatio: "4 / 3",
+  objectFit: "cover",
+  borderRadius: 4,
+  display: "block",
+};
+
+const tileMeta: CSSProperties = {
+  fontSize: 12,
+  color: "#555",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const tileActions: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+};
+
+const tileBtn: CSSProperties = {
+  padding: "3px 6px",
+  fontSize: 12,
+  borderRadius: 4,
+  border: "1px solid #ccc",
+  background: "#fff",
+  cursor: "pointer",
+};
+
+const tileBtnDanger: CSSProperties = {
+  padding: "3px 6px",
+  fontSize: 12,
+  borderRadius: 4,
+  borderStyle: "solid",
+  borderColor: "#d9534f",
+  borderWidth: 1,
+  background: "#fff",
+  cursor: "pointer",
+  color: "#a94442",
 };
 
 const fieldRow: CSSProperties = {

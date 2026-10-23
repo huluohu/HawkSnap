@@ -80,3 +80,52 @@ pub fn panel_trigger(app: AppHandle, action: String) -> Result<(), String> {
     });
     Ok(())
 }
+
+/// 在文件管理器中显示路径（M0 历史操作「打开目录」；计划接口 `open_path(path)`）。
+/// 平台语义：macOS `open -R`（Finder 打开父目录并选中该文件）；Linux `xdg-open`
+/// 父目录；Windows `explorer /select,`（选中该文件）。async 命令：子进程等待在
+/// 运行时线程，不卡事件循环。参数以单参直传（不经 shell），路径无注入面。
+#[tauri::command(async)]
+pub fn open_path(path: String) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("路径为空".into());
+    }
+    let mut cmd = reveal_command(&std::path::PathBuf::from(&path))?;
+    let out = cmd.output().map_err(|e| format!("启动文件管理器失败: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "打开目录失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// 平台 → 显示命令（cfg 门控；其余平台 Err）。分离成纯构造函数便于骨架清晰。
+fn reveal_command(path: &std::path::Path) -> Result<std::process::Command, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        Ok(c)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| path.to_path_buf());
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(dir);
+        Ok(c)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        Ok(c)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = path;
+        Err("unsupported platform".into())
+    }
+}

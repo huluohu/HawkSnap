@@ -88,25 +88,39 @@ pub fn pin_latest(app: AppHandle) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn do_pin_latest(app: &AppHandle) -> Result<(), String> {
     let src = resolve_source()?;
+    spawn_pin_window(app, src.source, src.rgba, src.w_px, src.h_px, src.scale)?;
+    Ok(())
+}
+
+/// 共用建窗管道（M0 重构：pin_latest 与 pin_from_path 同路）：Esc 钩子注入 → 主显示器
+/// 中心 − 半尺寸 + 级联偏移定位 → run_on_main_thread 建 PinWindow 入册。返回贴图 id
+/// （PIN_SEQ 分配；建窗失败仅 eprintln 降级，与既有 pin_latest 口径一致）。
+#[cfg(target_os = "macos")]
+fn spawn_pin_window(
+    app: &AppHandle,
+    source: &str,
+    rgba: std::sync::Arc<Vec<u8>>,
+    w_px: u32,
+    h_px: u32,
+    scale: f64,
+) -> Result<u64, String> {
     // Esc 钩子（幂等注入）：贴图按键 Esc → remove_pin_on_main（主线程回调内直接执行）
     hawksnap_platform_mac::pin::set_on_escape(remove_pin_on_main);
 
     // 位置：主显示器中心 − 半尺寸 + 级联偏移。captured_display_frames 为全局逻辑坐标
-    // （左上原点，ScreenFrame 同源）；无捕获几何（如纯剪贴板来源）→ 1512×982 逻辑
-    // 分辨率中心的回退值。
+    // （左上原点，ScreenFrame 同源）；无捕获几何（如纯剪贴板/历史文件来源）→ 1512×982
+    // 逻辑分辨率中心的回退值。
     let (cw, ch) = primary_display_center();
-    let logical_w = src.w_px as f64 / src.scale;
-    let logical_h = src.h_px as f64 / src.scale;
+    let logical_w = w_px as f64 / scale;
+    let logical_h = h_px as f64 / scale;
     let id = PIN_SEQ.fetch_add(1, Ordering::SeqCst);
     let (ox, oy) = next_pin_offset(id);
     let top_left = (cw - logical_w * 0.5 + ox, ch - logical_h * 0.5 + oy);
 
-    let rgba = src.rgba;
-    let (w_px, h_px, scale) = (src.w_px, src.h_px, src.scale);
     // 探针（常驻，廉价，每次贴图一行）：E2E 判别来源/落点是否合理。
     eprintln!(
-        "[hawksnap] pin_latest: id={id} src={} {w_px}×{h_px} scale={scale} top_left=({:.0},{:.0})",
-        src.source, top_left.0, top_left.1
+        "[hawksnap] pin: id={id} src={source} {w_px}×{h_px} scale={scale} top_left=({:.0},{:.0})",
+        top_left.0, top_left.1
     );
     app.run_on_main_thread(move || {
         match hawksnap_platform_mac::pin::PinWindow::create(rgba, w_px, h_px, top_left, scale, id) {
@@ -116,7 +130,21 @@ fn do_pin_latest(app: &AppHandle) -> Result<(), String> {
             Err(e) => eprintln!("[hawksnap] 贴图窗口创建失败: {e}"),
         }
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// 非 macOS：无原生贴图窗口（Plan D CI 矩阵），统一 Err——与 do_pin_latest 同口径。
+#[cfg(not(target_os = "macos"))]
+fn spawn_pin_window(
+    _app: &AppHandle,
+    _source: &str,
+    _rgba: std::sync::Arc<Vec<u8>>,
+    _w_px: u32,
+    _h_px: u32,
+    _scale: f64,
+) -> Result<u64, String> {
+    Err("unsupported platform".into())
 }
 
 /// 主显示器中心（全局逻辑坐标，左上原点）：captured_display_frames 里含原点 (0,0) 的
@@ -146,6 +174,27 @@ fn remove_pin_on_main(id: u64) {
 #[cfg(not(target_os = "macos"))]
 fn do_pin_latest(_app: &AppHandle) -> Result<(), String> {
     Err("unsupported platform".into())
+}
+
+/// M0 历史操作「贴图」：把历史条目的 PNG 文件钉成贴图窗口。async 命令：读文件 +
+/// 解码（core png_to_rgba，几 MB 级）在运行时线程，建窗经 spawn_pin_window 交付
+/// 主线程（同 pin_latest 纪律）。落盘文件即物理像素 → scale=1.0；返回贴图 id。
+#[tauri::command(async)]
+pub fn pin_from_path(app: AppHandle, path: String) -> Result<u64, String> {
+    do_pin_from_path(&app, &path)
+}
+
+fn do_pin_from_path(app: &AppHandle, path: &str) -> Result<u64, String> {
+    if path.trim().is_empty() {
+        return Err("路径为空".into());
+    }
+    let png = std::fs::read(path).map_err(|e| format!("读取截图文件失败: {e}"))?;
+    let (rgba, w_px, h_px) = hawksnap_core::crop::png_to_rgba(&png)
+        .map_err(|e| format!("截图文件解码失败: {e}"))?;
+    if w_px == 0 || h_px == 0 {
+        return Err("截图文件为空图".into());
+    }
+    spawn_pin_window(app, "history", std::sync::Arc::new(rgba), w_px, h_px, 1.0)
 }
 
 #[tauri::command(async)]

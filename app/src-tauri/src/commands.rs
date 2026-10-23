@@ -340,6 +340,22 @@ fn resolve_save_dir(settings: &crate::settings::Settings) -> Option<std::path::P
     }
 }
 
+/// M0：把保存目录动态放行给 asset 协议（历史网格缩略图经前端 convertFileSrc 加载）。
+/// tauri.conf 的静态 scope 仅 `$CACHE/**`（覆盖层冻结帧所在），而缩略图落在保存目录
+/// （默认 ~/Pictures/HawkSnap，用户可自定义任意路径）——静态 glob 无法覆盖自定义目录，
+/// 启动与 save_dir 变更（set_settings 成功后）时运行期 allow_directory(recursive)。
+/// 重复放行同目录幂等；失败仅 eprintln 降级（网格显示占位块，历史仍是旁路功能，
+/// 不值得让初始化/保存失败）。
+pub fn allow_asset_scope(app: &AppHandle) {
+    let settings = crate::settings::Settings::load(app);
+    if let Some(dir) = resolve_save_dir(&settings) {
+        use tauri::Manager;
+        if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, true) {
+            eprintln!("[hawksnap] asset 协议放行保存目录失败 ({}): {e}", dir.display());
+        }
+    }
+}
+
 /// 前台应用名：恒 None（占位）。原「Plan B 接 window 检测后替换」的说法已过时——
 /// window/AX 检测在 Plan B 落地时只做了悬停高亮与磁吸候选，未包含 frontmost 名称
 /// 查询；保存文件名与历史 app 字段（C4）暂用 "HawkSnap"。接入点：CGWindowListCopyWindowInfo

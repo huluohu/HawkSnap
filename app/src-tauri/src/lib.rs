@@ -43,10 +43,10 @@ pub fn run() {
             overlay::start_delayed_capture, overlay::cancel_delayed_capture,
             overlay::countdown_remaining,
             settings::get_settings, settings::set_settings,
-            history::history_list, history::history_delete,
-            pins::pin_latest, pins::pin_set_opacity, pins::pin_zoom,
+            history::history_list, history::history_search, history::history_delete,
+            pins::pin_latest, pins::pin_from_path, pins::pin_set_opacity, pins::pin_zoom,
             pins::pin_close, pins::pin_close_all,
-            panel::panel_trigger,
+            panel::panel_trigger, panel::open_path,
             updater::check_for_updates, updater::install_update, updater::restart_app
         ])
         .setup(|app| {
@@ -80,6 +80,11 @@ pub fn run() {
             if let Err(e) = history::init(app.handle()) {
                 eprintln!("[hawksnap] 历史库初始化失败: {e}");
             }
+
+            // M0 历史网格：保存目录动态放行 asset 协议（缩略图 convertFileSrc 加载，
+            // 见 commands::allow_asset_scope 注）。启动按当前 settings 放行一次；
+            // save_dir 变更路径在 set_settings 成功后补放行。
+            crate::commands::allow_asset_scope(app.handle());
 
             // 热键注册失败不中止启动（spec §9：允许无热键启动，但必须给用户可见反馈）。
             if let Err(err) = overlay::register_hotkeys(app.handle()) {
