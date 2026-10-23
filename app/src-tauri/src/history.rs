@@ -62,6 +62,7 @@ fn open_at(db: &std::path::Path) -> Result<Connection, String> {
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     ensure_ocr_text_column(&conn)?;
     conn.execute_batch(FTS_SCHEMA).map_err(|e| e.to_string())?;
+    ensure_fts_backfilled(&conn)?;
     Ok(conn)
 }
 
@@ -81,6 +82,25 @@ fn ensure_ocr_text_column(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// FTS 索引一次性回填（评审 Fix）：external-content 虚表只经触发器收行——升级前
+/// （C3 时代）已入库的行不会自动进 shots_fts，不回填则老用户既有历史永久搜不到。
+/// 以 `PRAGMA user_version` 作一次性闸门：0（C3 老库 / 全新库）→ `'rebuild'` 全量
+/// 重建（从 content 表 shots 读全部行）+ 置 1；≥1 → 短路，此后每次开连接不再走
+/// rebuild 扫描。rebuild 与置位同批次顺序执行：rebuild 失败则置位不发生，下次开连接
+/// 自动重试。新库首开同样置 1（rebuild 对空表是 no-op，置位纯为短路后续开销）。
+fn ensure_fts_backfilled(conn: &Connection) -> Result<(), String> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if version >= 1 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "INSERT INTO shots_fts(shots_fts) VALUES('rebuild');\nPRAGMA user_version = 1;",
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// 建目录 + 建表。幂等（CREATE TABLE IF NOT EXISTS），启动时调用；失败仅记录，
@@ -430,6 +450,8 @@ mod tests {
             .query_row("SELECT COUNT(*), MAX(ocr_text) FROM shots", [], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((n, ocr), (1, None), "老行保留且 ocr_text 为 NULL");
+        // 评审 Fix 同源断言：老库升级后老行必须可检索（回填生效）
+        assert_eq!(search_at(&db, "a.png", 50).unwrap().len(), 1, "升级首开回填老行进 FTS");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -444,6 +466,59 @@ mod tests {
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts5_probe USING fts5(x)", [])
             .expect("bundled SQLite 必须启用 FTS5");
         std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
+    }
+
+    /// 评审 Fix：C3 老库（裸 SCHEMA + 手工 INSERT，无 FTS 表、user_version 默认 0）
+    /// 升级首开必须把既有行回填进 shots_fts——否则 0.1.0 用户既有历史永久搜不到。
+    #[test]
+    fn fts_backfills_preexisting_rows_on_upgrade() {
+        let dir = temp_dir("fts-upgrade");
+        let db = dir.join("history.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO shots(created_at, path, thumb_path, w, h, app)
+                 VALUES ('t', '/pics/HawkSnap/legacy.png', '', 1, 1, 'LegacyApp')",
+                [],
+            )
+            .unwrap();
+        }
+        let v: i64 = Connection::open(&db).unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 0, "前置：老库未迁移（user_version 默认 0）");
+        open_at(&db).unwrap();
+        let hits = search_at(&db, "legacy", 50).unwrap();
+        assert_eq!(hits.len(), 1, "升级首开必须回填老行进 FTS");
+        assert_eq!(hits[0].app, "LegacyApp");
+        // 闸门已置位：老库变已迁移库
+        let v: i64 = Connection::open(&db).unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 1, "回填后 user_version 置 1");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 评审 Fix：已迁移库（user_version ≥ 1）不得在每次开连接时重建索引。
+    /// 可观测差异法：正常入库（触发器已喂 FTS）后手动掏空该行的 FTS 索引，再开连接
+    /// ——若 rebuild 仍会执行，索引被恢复、search 命中；短路正确时 search 落空。
+    #[test]
+    fn fts_rebuild_short_circuits_after_first_migration() {
+        let dir = temp_dir("fts-shortcircuit");
+        let db = dir.join("history.db");
+        let id = record_at(&db, "/pics/HawkSnap/once.png", "", 1, 1, "App").unwrap();
+        assert_eq!(search_at(&db, "once", 50).unwrap().len(), 1, "触发器路径正常命中");
+        {
+            let conn = Connection::open(&db).unwrap();
+            let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(v, 1, "record_at 首开已置闸门");
+            conn.execute("DELETE FROM shots_fts WHERE rowid = ?1", [id]).unwrap();
+        }
+        open_at(&db).unwrap(); // 若此处错误地 rebuild，索引会被恢复
+        assert!(
+            search_at(&db, "once", 50).unwrap().is_empty(),
+            "user_version=1 必须短路 rebuild（开连接不恢复被掏空的索引）"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
