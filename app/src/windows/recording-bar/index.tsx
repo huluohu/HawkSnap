@@ -1,11 +1,11 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { t } from "../../lib/i18n";
 
 // M6 录屏悬浮条（280×56 深色实心、常驻复用——与 countdown 同款 show/hide 模式）：
 // 计时 mm:ss + 暂停/恢复 + 停止。时间语义单源在 Rust（hawk://record-tick 每秒广播
-// {seconds, paused}），本页纯渲染——webview 后台节流不影响计时正确性。mount 时先经
+// {session, seconds, paused}），本页纯渲染——webview 后台节流不影响计时正确性。mount 时先经
 // record_status 拉取补显（push 早于 listen 必丢，countdown 同一问题形态）。
 // mm:ss（tabular-nums 由 time 样式保证）
 const mmss = (s: number) =>
@@ -15,6 +15,9 @@ export default function RecordingBarWindow() {
   const [seconds, setSeconds] = useState<number | null>(null);
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 上一 tick 的会话号（ref 而非 state：listen 回调闭包不随渲染更新，state 会取到
+  // 初值 null 导致每 tick 都判「新会话」而误清当会话错误）。
+  const lastSessionRef = useRef<number | null>(null);
 
   // pull 补显 + push 订阅（窗口常驻复用：监听与页面同寿命）
   useEffect(() => {
@@ -27,7 +30,13 @@ export default function RecordingBarWindow() {
         setPaused(r.paused);
       })
       .catch(() => {});
-    listen<{ seconds: number; paused: boolean }>("hawk://record-tick", (e) => {
+    listen<{ session: number; seconds: number; paused: boolean }>("hawk://record-tick", (e) => {
+      // 新会话（session 由 Rust 每次 record_start 单调取号）：清除上一会话的行内
+      // 错误残留（M6 遗留 minor——窗口常驻复用，组件状态跨会话存活）。
+      if (lastSessionRef.current !== e.payload.session) {
+        lastSessionRef.current = e.payload.session;
+        setError(null);
+      }
       setSeconds(e.payload.seconds);
       setPaused(e.payload.paused);
     }).then((un) => {

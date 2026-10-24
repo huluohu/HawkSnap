@@ -83,6 +83,7 @@ pub fn elapsed_secs(active: Duration, paused_total: Duration, current_pause: Opt
 // ---------------------------------------------------------------------------
 
 struct RecRuntime {
+    session: u64,
     phase: Phase,
     started_at: Instant,
     paused_total: Duration,
@@ -94,6 +95,12 @@ struct RecRuntime {
 
 static REC: Mutex<Option<RecRuntime>> = Mutex::new(None);
 
+/// 会话单调计数（M7）：每次**成功启动**（REC 安装时）取号 +1，随 tick 广播。前端以
+/// session 变化识别「新会话」并清除上一会话的行内错误（M6 遗留 minor：失败文案跨
+/// 会话残留）。Relaxed 足够：仅需唯一 + 单调，取号在 REC 锁内（启动天然串行），
+/// 载荷同步由事件通道自身保证。
+static SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn lock_rec() -> std::sync::MutexGuard<'static, Option<RecRuntime>> {
     REC.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -101,6 +108,8 @@ fn lock_rec() -> std::sync::MutexGuard<'static, Option<RecRuntime>> {
 /// hawk://record-tick 载荷（悬浮条渲染输入；单词字段无需 rename）。
 #[derive(Serialize, Clone)]
 struct RecordTick {
+    /// 会话号（record_start 单调取号）：前端据此清上一会话的错误残留。
+    session: u64,
     seconds: u64,
     paused: bool,
 }
@@ -185,7 +194,10 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
             let _ = std::fs::remove_file(&path);
             return Err("已有录屏进行中".into());
         }
+        // 会话取号在安装锁内：只有成功启动才消耗序号（失败路径不跳号不影响单调）。
+        let session = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         guard.replace(RecRuntime {
+            session,
             phase: Phase::Recording,
             started_at: Instant::now(),
             paused_total: Duration::ZERO,
@@ -293,6 +305,7 @@ fn spawn_tick_thread(app: AppHandle) {
             let Some(rt) = guard.as_ref() else { break };
             let current_pause = rt.pause_started.map(|t| t.elapsed());
             RecordTick {
+                session: rt.session,
                 seconds: elapsed_secs(rt.started_at.elapsed(), rt.paused_total, current_pause),
                 paused: rt.phase == Phase::Paused,
             }
@@ -414,5 +427,20 @@ mod tests {
         if let Some(d) = movies_dir() {
             assert!(d.ends_with("Movies/HawkSnap"), "{d:?}");
         }
+    }
+
+    /// tick 载荷契约（M7）：session/seconds/paused 三字段（前端按 session 变化清错）。
+    #[test]
+    fn record_tick_serializes_with_session() {
+        let s = serde_json::to_string(&RecordTick { session: 7, seconds: 65, paused: false }).unwrap();
+        assert_eq!(s, r#"{"session":7,"seconds":65,"paused":false}"#);
+    }
+
+    /// 会话计数单调：连续取号严格递增（Relaxed 下单线程语义即可保证）。
+    #[test]
+    fn session_counter_is_monotonic() {
+        let a = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let b = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(b > a, "会话号必须单调递增：{a} → {b}");
     }
 }

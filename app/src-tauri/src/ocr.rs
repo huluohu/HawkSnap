@@ -5,11 +5,13 @@
 //! 同款「写回源文件旁」口径）。
 //!
 //! 并发契约：模型就绪阶段经进程级互斥（双击/双窗口不会并发下载两份）；引擎会话
-//! 惰性装载并常驻（Mutex 串行推理——编辑器单窗口语义下单路使用，无吞吐诉求）。
+//! 惰性装载，**空闲 10 分钟自动卸载**（M7 idle-unload，见 [`ENGINE_IDLE_TTL`]；
+//! Mutex 串行推理——编辑器单窗口语义下单路使用，无吞吐诉求）。
 //! 下载/推理均为 `#[tauri::command(async)]`（命令线程执行，不卡事件循环）。
 
 use hawksnap_ocr::models::ProgressPhase;
 use serde::Serialize;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 模型目录：`app_data_dir()/models`（与 history.db 同根，用户可整目录清理）。
@@ -41,6 +43,40 @@ fn engine_slot() -> &'static std::sync::Mutex<Option<hawksnap_ocr::OcrEngine>> {
     ENGINE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+/// 引擎空闲卸载阈值（M7）：10 分钟未用即 drop（与 idle_reaper 主面板同档——
+/// OCR 是低频入口）。实测依据（2026-10-24，`scripts/sample-ocr-mem.sh`，归档
+/// task-7-report.md）：装载+首推理常驻 **+349MB**（release 365.9MB）、稳态
+/// ~400-580MB——超 M4 遗留裁定线 150MB，若用后常驻会把 G2 空载预算（spec §5
+/// ≤80MB）吃穿一个数量级。卸载后下次 `ocr_recognize` 重装（模型哈希 + 三会话
+/// 装载，秒级，用户无感）。ORT arena 调优（进一步压单会话峰值）列 M2.1 候选。
+const ENGINE_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// 卸载看护轮询周期：60s（idle_reaper 同款节奏；回收延迟上界 = TTL + 一个周期）。
+const ENGINE_REAP_TICK: Duration = Duration::from_secs(60);
+
+/// 引擎最近使用时刻：None = 从未使用（引擎必未装载）。在 ENGINE 锁**内**登记，
+/// 卸载看护据此做「锁内复核」区分在途/新调用（见 [`reap_engine_if_idle`]）。
+static ENGINE_LAST_USE: std::sync::OnceLock<std::sync::Mutex<Option<Instant>>> =
+    std::sync::OnceLock::new();
+
+fn last_use_slot() -> &'static std::sync::Mutex<Option<Instant>> {
+    ENGINE_LAST_USE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// idle 卸载判定（纯逻辑，可测）：引擎已装载且距上次使用满 TTL。从未使用（None）
+/// 不卸——那意味着引擎也未装载，卸载是空操作，显式 false 保持判定单一职责。
+fn engine_idle(loaded: bool, idle_for: Option<Duration>) -> bool {
+    loaded && idle_for.is_some_and(|d| d >= ENGINE_IDLE_TTL)
+}
+
+/// 引擎已装载前提下距上次使用的时长（锁中毒容忍同 engine_slot）。
+fn last_use_elapsed() -> Option<Duration> {
+    last_use_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t.elapsed())
+}
+
 /// 确保模型就绪（带进度事件 + 并发互斥）。
 fn ensure_models_with_progress(app: &AppHandle) -> Result<hawksnap_ocr::ModelPaths, String> {
     let _guard = MODELS_READY_LOCK.lock().map_err(|e| e.to_string())?;
@@ -59,7 +95,7 @@ fn ensure_models_with_progress(app: &AppHandle) -> Result<hawksnap_ocr::ModelPat
     hawksnap_ocr::ensure_models(&dir, &mut on_progress)
 }
 
-/// 取就绪引擎（缓存命中直接用；未装载则装载后常驻）。
+/// 取就绪引擎（缓存命中直接用；未装载则装载；每次使用刷新 idle 时钟）。
 fn with_engine<T>(
     app: &AppHandle,
     f: impl FnOnce(&mut hawksnap_ocr::OcrEngine) -> Result<T, String>,
@@ -69,7 +105,41 @@ fn with_engine<T>(
     if slot.is_none() {
         *slot = Some(hawksnap_ocr::OcrEngine::load(&paths)?);
     }
+    // 使用时刻在 ENGINE 锁内登记（锁序恒为 ENGINE → LAST_USE，与卸载看护一致，
+    // 无死锁）：卸载看护的锁内复核据此不会误卸刚启动的调用。
+    *last_use_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
     f(slot.as_mut().expect("引擎已装载"))
+}
+
+// ---------------------------------------------------------------------------
+// idle 卸载看护（M7，idle_reaper 同款模式）：每 60s 检查，空闲满 10 分钟 drop。
+// ---------------------------------------------------------------------------
+
+/// 启动卸载看护线程（lib.rs setup 末尾，进程生命周期常驻）。先睡一轮再查（启动期
+/// 引擎必未装载，首轮空转无意义）；轮内失败无路径（try_lock 失败 = 有在途调用，
+/// 下轮再看），绝不影响 OCR 主链路。
+pub fn spawn_engine_idle_unloader() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(ENGINE_REAP_TICK);
+        reap_engine_if_idle();
+    });
+}
+
+/// 单轮回收（纯驱动逻辑，判定在 [`engine_idle`]）：快照过线 → try_lock 引擎
+/// （在途推理持有锁即跳过，绝不阻塞）→ 锁内复核使用时刻（快照与取锁之间可能有
+/// 新调用刚刷新）→ 仍过线才 drop。
+fn reap_engine_if_idle() {
+    let loaded = {
+        // 只判「是否装载」不持锁久留：poisoned 视为已装载（保守，下轮 try_lock 自证）。
+        engine_slot().try_lock().is_ok_and(|s| s.is_some())
+    };
+    if !engine_idle(loaded, last_use_elapsed()) {
+        return;
+    }
+    let Ok(mut slot) = engine_slot().try_lock() else { return };
+    if engine_idle(slot.is_some(), last_use_elapsed()) {
+        *slot = None; // drop 引擎：实测 ~350-580MB RSS 归还（见 ENGINE_IDLE_TTL 注）
+    }
 }
 
 /// OCR 识别行（hawksnap-ocr::OcrLine 的转发别名——serde 形状在 pipeline.rs 定义：
@@ -171,5 +241,23 @@ mod ocr_tests {
         assert!(s.contains(r#""box":[{"x":1.0,"y":2.0}"#), "box 4 点 + 对象形状: {s}");
         assert!(s.contains(r#""text":"你好""#));
         assert!(s.contains(r#""score":0.98"#));
+    }
+
+    /// idle 卸载判定（M7 纯逻辑）：装载 + 满线才卸；未装载/未满/从未使用均不卸。
+    #[test]
+    fn engine_idle_requires_loaded_and_past_ttl() {
+        assert!(!engine_idle(false, Some(ENGINE_IDLE_TTL)), "未装载不卸");
+        assert!(!engine_idle(true, None), "从未使用（必未装载）不卸");
+        assert!(!engine_idle(true, Some(ENGINE_IDLE_TTL - Duration::from_secs(1))), "差一秒未满不卸");
+        assert!(engine_idle(true, Some(ENGINE_IDLE_TTL)), "恰满线即卸（含等边界）");
+        assert!(engine_idle(true, Some(ENGINE_IDLE_TTL * 10)), "远超线卸");
+    }
+
+    /// 阈值契约：10 分钟（与 idle_reaper 主面板同档）+ 60s 轮询（回收延迟上界
+    /// = TTL + 一周期）。
+    #[test]
+    fn engine_idle_ttl_constants() {
+        assert_eq!(ENGINE_IDLE_TTL, Duration::from_secs(600));
+        assert_eq!(ENGINE_REAP_TICK, Duration::from_secs(60));
     }
 }

@@ -54,8 +54,11 @@ if [ "$SECS" -gt 120 ]; then
   fi
 fi
 
-wait "$TEST_PID"
-STATUS=$?
+# wait 分支修复（M6 评审遗留 minor）：`set -e` 下裸 `wait` 对非零退出码直接终止
+# 脚本，下面的 STATUS 判定永远不可达——用 `|| STATUS=$?` 捕获真实退出码（崩溃
+# 信息仍打印，退出码原样透传），wait 成功则 STATUS=0。
+STATUS=0
+wait "$TEST_PID" || STATUS=$?
 if [ "$STATUS" -ne 0 ]; then
   echo "[soak] FAIL：录制测试退出码 $STATUS（崩溃≠0，G5 不通过）" >&2
   exit "$STATUS"

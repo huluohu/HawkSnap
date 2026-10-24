@@ -408,9 +408,15 @@ impl HawkRecordOutput {
         }
         let Some(new_sb) = out else { return };
         let ok = unsafe { input.appendSampleBuffer(&new_sb) };
-        if !ok {
+        // Failed 门（M7，与视频路径 append_video 同款对称）：入口 ready 检查与
+        // append 之间的竞态窗口内 ready 翻 NO 时，append 返回 false 只是良性丢帧；
+        // 裸 !ok 会把一次良性 false 毒化成会话错误（stop 永远 Err）。只有 writer
+        // 真正进入 Failed（status/error 为 AVAssetWriter 文档明示的线程安全对）才记。
+        if !ok
+            && s.writer.as_ref().is_some_and(|w| unsafe { w.status() } == AVAssetWriterStatus::Failed)
+        {
             if s.error.is_none() {
-                s.error = Some("音频样本写入失败".into());
+                s.error = Some("音频样本写入失败（writer Failed）".into());
             }
         }
     }

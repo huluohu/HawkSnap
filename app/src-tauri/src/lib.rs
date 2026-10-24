@@ -245,6 +245,12 @@ pub fn run() {
             // 加载离群值，不计入基准 P90 口径）。看护自身吞错，绝不影响截图主链路。
             idle_reaper::spawn_watchdog(app.handle().clone());
 
+            // M7（G2，idle_reaper 同款模式）：OCR 引擎空闲卸载看护。实测装载+首推理
+            // 常驻 +349MB（release 365.9MB，scripts/sample-ocr-mem.sh 归档）——用后
+            // 常驻会吃穿 G2 空载预算一个数量级；空闲满 10 分钟即 drop，下次
+            // ocr_recognize 秒级重装。看护 try_lock 不阻塞推理，绝不影响 OCR 主链路。
+            crate::ocr::spawn_engine_idle_unloader();
+
             // macOS 专属 API：引用点与 API 同门控，非 macOS 平台无激活策略概念。
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

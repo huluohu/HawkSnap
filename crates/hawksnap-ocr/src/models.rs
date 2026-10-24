@@ -283,7 +283,7 @@ fn download_verified(
 ) -> Result<std::path::PathBuf, String> {
     let target = dir.join(&spec.name);
     let tmp = dir.join(tmp_name(&spec.name));
-    download_to(&tmp, &spec.url, file_idx, on_progress)?;
+    download_to(&tmp, &spec.url, file_idx, DOWNLOAD_STALL_TIMEOUT, on_progress)?;
     {
         let total = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
         on_progress(Progress { file: file_idx, phase: ProgressPhase::Verify, downloaded: total, total });
@@ -301,11 +301,24 @@ fn download_verified(
     Ok(target)
 }
 
+/// 单次读停滞判定窗口：两次 body 读之间超过该时长无任何新字节 → 判定下载停滞
+/// （Err）。**选型依据（M7 评审遗留 Important，读 ureq 3.4.2 源码定案）**：ureq 3
+/// 没有 stall 型（按次读）超时旋钮——`timeout_recv_body` 是整个 body 的**总时长**
+/// 预算（config.rs 文档明示 "The budget is not restarted for each read"），
+/// `timeout_global` / `timeout_per_call` 同为总时长；只设 `timeout_connect` 时
+/// mid-body 停滞的 socket read 永久阻塞（transport 层读超时由预算推导，无预算即
+/// None），下载线程永不返回、`ocr_recognize` 卡死。总时长旋钮对 ~36MB 的 ORT 归档
+/// + 慢链路会误杀，故用 pump 线程 + `recv_timeout` 自实现 stall 语义：只要字节
+/// 持续到达就永不超时。
+const DOWNLOAD_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// HTTP 下载到 `tmp`（断点续传）。流式写盘 + 进度回调；HTTP 错误统一 Err(String)。
+/// `stall` 为读停滞窗口（生产传 [`DOWNLOAD_STALL_TIMEOUT`]，测试可收窄）。
 fn download_to(
     tmp: &std::path::Path,
     url: &str,
     file_idx: usize,
+    stall: std::time::Duration,
     on_progress: &mut dyn FnMut(Progress),
 ) -> Result<(), String> {
     use std::io::{Read as _, Write as _};
@@ -313,6 +326,12 @@ fn download_to(
     let offset: u64 = std::fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
     let agent = ureq::Agent::config_builder()
         .timeout_connect(Some(std::time::Duration::from_secs(20)))
+        // 响应头限时：堵「连接建立后服务端永不回包」的挂死（60s 对模型 CDN 宽裕）。
+        .timeout_recv_response(Some(std::time::Duration::from_secs(60)))
+        // 全链路兜底（DNS→body 收尾）30min：涓流服务端的最终止损，同时保证 stall
+        // 判定后 pump 线程的阻塞 socket read 会在预算尽头被 ureq 拆除（读超时由
+        // 预算推导）——看门狗线程滞留有界。30min 对 36.5MB 归档容纳 ~20KB/s 链路。
+        .timeout_global(Some(std::time::Duration::from_secs(30 * 60)))
         .build()
         .new_agent();
     let mut req = agent.get(url);
@@ -339,23 +358,56 @@ fn download_to(
         .and_then(|v| v.parse().ok())
         .map(|len: u64| if status == 206 { len + offset } else { len })
         .unwrap_or(0);
-    let mut body = resp.into_body();
-    let mut reader = body.as_reader();
+    // stall 看门狗（M7）：owned reader（`into_reader` 给出 'static、可跨线程——
+    // ureq body 文档明示）移入 pump 线程持续读，主循环 `recv_timeout(stall)` 消费。
+    // pump 线程被服务端断流卡在 read 时主循环照常超时返回 Err；线程本体最迟在
+    // timeout_global 预算尽头随 socket 读超时退出（见上注），不会无限堆积。
+    let reader = resp.into_body().into_reader();
+    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<Vec<u8>>>();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    let _ = tx.send(Ok(Vec::new())); // EOF 哨兵（空块）
+                    break;
+                }
+                Ok(n) => {
+                    if tx.send(Ok(buf[..n].to_vec())).is_err() {
+                        break; // 主循环已放弃（stall/写盘失败）：接收端已 drop
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    break;
+                }
+            }
+        }
+    });
     let mut file = if status == 206 {
         std::fs::OpenOptions::new().create(true).append(true).open(tmp)
     } else {
         std::fs::File::create(tmp)
     }
     .map_err(|e| format!("打开临时文件失败: {e}"))?;
-    let mut buf = [0u8; 64 * 1024];
     let mut written: u64 = if status == 206 { offset } else { 0 };
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("下载中断: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| format!("写入临时文件失败: {e}"))?;
-        written += n as u64;
+        use std::sync::mpsc::RecvTimeoutError;
+        let chunk = match rx.recv_timeout(stall) {
+            Ok(Ok(c)) if c.is_empty() => break, // EOF
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => return Err(format!("下载中断: {e}")),
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "下载停滞：超过 {}s 未收到新数据（网络中断或服务端无响应）",
+                    stall.as_secs()
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => return Err("下载线程意外退出".into()),
+        };
+        file.write_all(&chunk).map_err(|e| format!("写入临时文件失败: {e}"))?;
+        written += chunk.len() as u64;
         on_progress(Progress {
             file: file_idx,
             phase: ProgressPhase::Download,
@@ -582,6 +634,81 @@ mod tests {
         assert_eq!(downloads.last().unwrap().downloaded as usize, body.len(), "最终到 total");
         assert!(evs.iter().any(|e| e.phase == ProgressPhase::Verify), "有校验事件");
         stop.send(()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// mid-body 停滞看门狗（M7）：响应头 + 首批字节正常送达，随后服务端「断流不断
+    /// 连」长时间不发数据 → download_to 必须在 stall 窗口内 Err（配置 1s + 断言上界
+    /// 5s），而不是让读线程永久挂死。修复前形态：只设 timeout_connect，socket read
+    /// 无限阻塞，ocr_recognize 永不返回。
+    ///
+    /// fixture 坑（实测）：声明长度必须 < 32KB——tiny_http 对 ≥32KB（chunked_threshold
+    /// 默认值）的响应走 chunked 编码，chunked_transfer::Encoder 内部 8KB 缓冲 + io::copy
+    /// 每次 8KB 读，首块恰好只够填缓冲、永远不触发 send()，字节滞留到 respond 收尾
+    /// 才 flush，客户端看不见「先有数据后断流」，stall 无从观察。identity 编码直写
+    /// BufWriter（≥1KB 即穿透），T+0 就有字节到达。
+    #[test]
+    fn download_stall_times_out() {
+        /// 首块立即送达，之后的 read 长睡——正是「中途断流」的服务端形态。
+        struct StallingReader {
+            first: Vec<u8>,
+            delivered: bool,
+        }
+        impl std::io::Read for StallingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.delivered {
+                    self.delivered = true;
+                    let n = self.first.len().min(buf.len());
+                    buf[..n].copy_from_slice(&self.first[..n]);
+                    return Ok(n);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                Ok(0) // 睡醒后 EOF（客户端早已因 stall 放弃，此分支只为收尾线程）
+            }
+        }
+
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let (stop, rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || loop {
+            if rx.recv_timeout(std::time::Duration::from_millis(100)).is_ok() {
+                break;
+            }
+            let req = match server.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(Some(r)) => r,
+                _ => continue,
+            };
+            let first: Vec<u8> = (0..4096u32).map(|i| i as u8).collect();
+            // 声明长度 16KB：identity 编码（< 32KB 阈值）且比实际多——客户端必须
+            // 继续等更多字节（stall 才可观察）。
+            let resp = tiny_http::Response::new(
+                tiny_http::StatusCode(200),
+                vec![],
+                StallingReader { first, delivered: false },
+                Some(16 * 1024),
+                None,
+            );
+            let _ = req.respond(resp);
+        });
+
+        let dir = temp_dir("stall");
+        let tmp = dir.join("model.bin.tmp");
+        let start = std::time::Instant::now();
+        let err = download_to(
+            &tmp,
+            &format!("http://{addr}/stall"),
+            0,
+            std::time::Duration::from_secs(1),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("停滞"), "必须是停滞错误，got: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "必须有界时间内返回，实测 {:?}",
+            start.elapsed()
+        );
+        let _ = stop.send(());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
