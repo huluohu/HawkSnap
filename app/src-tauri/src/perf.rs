@@ -18,6 +18,26 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 // hotkey 打点时置位，本轮首个 overlay_shown 打点时消费——保证两阶段行数 1:1。
 static AWAIT_SHOWN: AtomicBool = AtomicBool::new(false);
 
+// CSV 落盘总闸（M3 继承项④）：**默认关闭**——生产运行零写入（0.1.0/0.2.0 的
+// 「CSV 恒写」是 M2 终审 ledgered debt，本项收口）。仅 bench（HAWKSNAP_BENCH）/
+// G4（HAWKSNAP_G4）模式置 true（lib.rs run() 首行、先于 mark_process_start——
+// process_start/tray_ready 是 G4 冷启动计时的两端，闸必须先于它们置位）。
+// 进程内原子计数（overlay_shown_count / clipboard_done_count / panel_shown_count）
+// 不受闸影响——它们是 bench_mode/g4 的进程内计时门控，与 CSV 行数本就 1:1 共生，
+// 生产下多计数只是无消费者的空转（零成本）。
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 置 CSV 落盘闸（lib.rs run() 首行按 bench/G4 环境变量置位；测试可显式开启）。
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::SeqCst);
+}
+
+/// CSV 落盘闸当前态（测试断言用）。
+#[cfg(test)]
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::SeqCst)
+}
+
 // 已记录的 overlay_shown 轮数（bench_mode 轮推进门控）：与 CSV 的 overlay_shown 行数
 // 严格 1:1——自增就在同一个 if 分支里，CSV 写几行它就计几轮（锁-free，纯原子）。
 static SHOWN_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -137,6 +157,10 @@ pub fn g4_panel_ms() -> Option<u64> {
 }
 
 pub fn mark(stage: &str) {
+    // 闸关（生产默认）→ 静默 no-op：零文件系统访问（M3 继承项④）。
+    if !ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
     let ts = now_ms();
     let dir = std::env::temp_dir().join("hawksnap-perf");
     let _ = std::fs::create_dir_all(&dir);
@@ -152,9 +176,22 @@ pub fn mark(stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// 闸切换串行锁（测试域）：CSV 契约测试会 set_enabled(true/false) 切进程级
+    /// 闸——两测试并发跑会互相污染断言，用同一把锁串行化。
+    static GATE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn gate_lock() -> MutexGuard<'static, ()> {
+        GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn mark_appends_row_to_pid_csv() {
+        let _g = gate_lock();
+        // 闸默认关（M3 继承项④）：CSV 契约测试显式开闸，结束还原默认（闸态是
+        // 进程级静态——还原避免泄漏到同进程后续测试）。
+        set_enabled(true);
         let path = std::env::temp_dir().join("hawksnap-perf").join(format!("{}.csv", std::process::id()));
         // 只统计本阶段行（g4_panel_metrics_follow_marks 并发写同 PID 文件的其他
         // 阶段行不算；单次 write_all 保证行不撕裂，见 mark 注）。
@@ -169,6 +206,30 @@ mod tests {
             .filter(|l| l.starts_with("test_stage_task11,")).last().unwrap();
         let ts: u128 = last.split(',').nth(1).unwrap().parse().unwrap();
         assert!(ts > 0, "时间戳应为 UNIX 毫秒");
+        set_enabled(false);
+    }
+
+    /// M3 继承项④：闸关（生产默认）→ mark 零写入；闸开 → 恰好一行。闸态函数
+    /// 往返自洽（set_enabled → enabled 镜像）。
+    #[test]
+    fn gate_off_silences_mark_and_toggles() {
+        let _g = gate_lock();
+        let path = std::env::temp_dir().join("hawksnap-perf").join(format!("{}.csv", std::process::id()));
+        let count = |s: &str| {
+            s.lines().filter(|l| l.starts_with("test_stage_gate_n0,")).count()
+        };
+        set_enabled(false);
+        assert!(!enabled(), "闸应处于关闭态");
+        let before = std::fs::read_to_string(&path).map(|s| count(&s)).unwrap_or(0);
+        mark("test_stage_gate_n0");
+        let after = std::fs::read_to_string(&path).map(|s| count(&s)).unwrap_or(0);
+        assert_eq!(after, before, "闸关 → 零写入（生产运行不产生 CSV 行）");
+        set_enabled(true);
+        assert!(enabled());
+        mark("test_stage_gate_n0");
+        let after = std::fs::read_to_string(&path).map(|s| count(&s)).unwrap_or(0);
+        assert_eq!(after, before + 1, "闸开 → 恰好追加一行");
+        set_enabled(false); // 还原默认
     }
 
     #[test]

@@ -96,6 +96,7 @@
   "editor.ocr.export": "Export txt",
   "editor.ocr.exported": "Exported",
   "editor.ocr.close": "Close",
+  "editor.tool.crop": "Crop",
   "editor.tool.select": "Select",
   "editor.tool.mosaic": "Mosaic",
   "editor.tool.step": "Step",

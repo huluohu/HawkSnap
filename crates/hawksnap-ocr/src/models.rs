@@ -13,6 +13,8 @@
 //! `ocr_recognize` 首次触发，全部字节经 SHA256 校验后才参与推理。
 
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// 下载/校验进度（phase 对齐前端文案：download=下载中 verify=校验中）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,12 +437,41 @@ pub fn sha256_file(path: &std::path::Path) -> Option<String> {
     Some(format!("{:x}", h.finalize()))
 }
 
-/// 目标文件存在且 SHA256 匹配。
-pub fn file_sha_matches(path: &std::path::Path, sha256: &str) -> bool {
-    match sha256_file(path) {
-        Some(actual) => actual.eq_ignore_ascii_case(sha256),
-        None => false,
+/// SHA256 结果缓存（M3 继承项⑤）：key = 路径，value = (mtime, hash)。
+///
+/// `ensure_models` 在**每次** `ocr_recognize` 调用时复查全部产物（ORT dylib ~40MB +
+/// 三模型 + 字典共 5 个文件），全量重哈希实测 ~200-400ms/次（逐调用，M2 终审
+/// ledgered debt）；而产物只写一次、此后只读——mtime 未变即直接复用上次哈希，
+/// 热路径 ~0ms。HashMap（而非单条目）覆盖全部 5 个工件；文件被替换/触碰 →
+/// mtime 变化 → 重算并覆盖条目（失效正确性由 sha_cache_invalidates_on_mtime_change
+/// 单测守护：等长改写 + mtime 显式前移，规避 FS 时间粒度）。
+static SHA_CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (std::time::SystemTime, String)>>> =
+    OnceLock::new();
+
+/// 带缓存的文件 SHA256（小写 hex）；不存在/不可读（含无 mtime）→ None。
+/// 缓存键 = (路径, mtime)：mtime 相同 → 命中复用；变化/首见 → 全量计算后入缓存。
+/// `sha256_file` 保持无缓存原样（下载 `.tmp` 等一次性文件不走缓存，无收益且
+/// 避免缓存膨胀）。
+pub fn sha256_file_cached(path: &std::path::Path) -> Option<String> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let mut cache = SHA_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_mtime, hash)) = cache.get(path) {
+        if *cached_mtime == mtime {
+            return Some(hash.clone());
+        }
     }
+    let hash = sha256_file(path)?;
+    cache.insert(path.to_path_buf(), (mtime, hash.clone()));
+    Some(hash)
+}
+
+/// 目标文件存在且 SHA256 匹配（M3 继承项⑤起走 mtime 缓存——models/dylib 复查
+/// 热路径 ~0ms，见 [`SHA_CACHE`] 注）。
+pub fn file_sha_matches(path: &std::path::Path, sha256: &str) -> bool {
+    sha256_file_cached(path).is_some_and(|actual| actual.eq_ignore_ascii_case(sha256))
 }
 
 #[cfg(test)]
@@ -788,5 +819,48 @@ mod tests {
         assert_eq!(DICT_SHA256, "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7");
         let _ = std::io::stdout(); // 静默未用导入（Write 在部分 cfg 下仅测试用）
         let _ = std::io::stderr().write_all(b"");
+    }
+
+    /// M3 继承项⑤：SHA 缓存命中与失效正确性——mtime 未变 → 复用；mtime 变化
+    /// （等长改写 + set_modified 显式前移，规避 FS 时间粒度）→ 必须重算出**新**
+    /// 哈希；文件消失 → None（缓存不投毒）。
+    #[test]
+    fn sha_cache_invalidates_on_mtime_change() {
+        let dir = temp_dir("sha-cache");
+        let f = dir.join("model.bin");
+        std::fs::write(&f, b"cached-content").unwrap();
+        // 首算并入缓存：值与直算一致。
+        let h1 = sha256_file_cached(&f).unwrap();
+        assert_eq!(h1, sha256_hex(b"cached-content"));
+        // 命中路径：未触碰文件再取，仍同值（此时走缓存——无独立可观测面，值等价即契约）。
+        assert_eq!(sha256_file_cached(&f).unwrap(), h1);
+        // 失效路径：等长改写（corrupted-content 与 cached-content 同为 14 字节），
+        // mtime 显式前移 10s（若只依赖 FS 自动 mtime，粗粒度文件系统可能同刻）。
+        std::fs::write(&f, b"corrupted-content").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
+        file.set_modified(
+            std::time::SystemTime::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        drop(file);
+        let h2 = sha256_file_cached(&f).unwrap();
+        assert_ne!(h2, h1, "mtime 变化必须重算（缓存不得吞掉文件损坏）");
+        assert_eq!(h2, sha256_hex(b"corrupted-content"), "重算结果与直算一致");
+        // 文件消失 → None；对不存在路径不缓存、不 panic。
+        std::fs::remove_file(&f).unwrap();
+        assert!(sha256_file_cached(&f).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// file_sha_matches 走缓存后语义不变：匹配 / 不匹配 / 文件缺失三态。
+    #[test]
+    fn file_sha_matches_uses_cache_with_same_semantics() {
+        let dir = temp_dir("sha-matches");
+        let f = dir.join("model.bin");
+        std::fs::write(&f, b"stable-bytes").unwrap();
+        assert!(file_sha_matches(&f, &sha256_hex(b"stable-bytes")));
+        assert!(!file_sha_matches(&f, &sha256_hex(b"other-bytes")));
+        assert!(!file_sha_matches(&dir.join("gone.bin"), &sha256_hex(b"x")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

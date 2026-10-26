@@ -55,7 +55,34 @@ pub(crate) fn clamp_opacity(opacity: f64) -> f64 {
     opacity.clamp(PIN_OPACITY_MIN, PIN_OPACITY_MAX)
 }
 
-// —— 图像来源解析 ——
+// —— 尺寸上限（M3 继承项③） ——
+/// 单贴图长边像素上限（M3 继承项③，M2 终审遗留「per-pin rgba 上限」）：贴图窗口
+/// 常驻整帧 RGBA（w×h×4 字节，与 webview 无关、不参与 idle 回收），>4K 源（6K
+/// 全屏截图、长截图、剪贴板巨图）按原样建窗会击穿预算裁定（~24MB/贴图量级）。
+/// 超限 → [`hawksnap_core::crop::rgba_thumbnail`] 等比降采样到长边 4096（Lanczos3，
+/// 比例保持）再建窗；贴图语义（参考/对照）下 4096 长边的信息量足够，滚轮缩放
+/// （F3，0.1–3.2×）不受影响——缩放是显示比，不重建位图。降采样失败（理论不可达：
+/// RGBA 尺寸合法）→ 原样放行，由建窗路径自有兜底。
+const PIN_MAX_EDGE_PX: u32 = 4096;
+
+/// 尺寸上限裁剪（纯函数可测）：长边 ≤ 上限原样返回；> 上限降采样并返回新尺寸。
+fn cap_pin_rgba(
+    rgba: std::sync::Arc<Vec<u8>>,
+    w: u32,
+    h: u32,
+) -> (std::sync::Arc<Vec<u8>>, u32, u32) {
+    if w.max(h) <= PIN_MAX_EDGE_PX {
+        return (rgba, w, h);
+    }
+    match hawksnap_core::crop::rgba_thumbnail(&rgba, w, h, PIN_MAX_EDGE_PX) {
+        Ok((data, nw, nh)) => {
+            // 探针（常驻，廉价，超限贴图一行）：降采样可观测。
+            eprintln!("[hawksnap] pin: 超限降采样 {w}×{h} → {nw}×{nh}（上限 {PIN_MAX_EDGE_PX}px）");
+            (std::sync::Arc::new(data), nw, nh)
+        }
+        Err(_) => (rgba, w, h),
+    }
+}
 
 /// pin 图像来源（C5）：CAPTURES 最近一轮非空整帧，或剪贴板图像（scale=1.0）。
 struct PinSource {
@@ -114,6 +141,10 @@ fn spawn_pin_window(
     h_px: u32,
     scale: f64,
 ) -> Result<u64, String> {
+    // 尺寸上限（M3 继承项③）：所有建窗来源（captures/剪贴板/历史文件）的单一
+    // 咽喉——>4K 源在此降采样后才进入定位与 PinWindow::create（预算裁定见
+    // PIN_MAX_EDGE_PX 注）。
+    let (rgba, w_px, h_px) = cap_pin_rgba(rgba, w_px, h_px);
     // Esc 钩子（幂等注入）：贴图按键 Esc → remove_pin_on_main（主线程回调内直接执行）
     hawksnap_platform_mac::pin::set_on_escape(remove_pin_on_main);
     // 双击钩子（M2 Task M3，幂等注入）：贴图双击 → open_pin_editor_on_main（主线程
@@ -436,6 +467,25 @@ mod pins_tests {
         assert_eq!(clamp_opacity(0.1), 0.2, "下限 0.2");
         assert_eq!(clamp_opacity(1.5), 1.0, "上限 1.0");
         assert_eq!(clamp_opacity(0.5), 0.5, "区间内不变");
+    }
+
+    /// M3 继承项③：长边 >4096 的源等比降采样到 4096；≤4096 原样（尺寸与字节不动）。
+    #[test]
+    fn pin_rgba_cap_downsamples_over_4096_and_passes_through_below() {
+        // 4097×2（长边超限 1px，体量小便于测试）→ 4096×2：长边钳到上限、比例保持。
+        let rgba = vec![7u8; 4097 * 2 * 4];
+        let (data, nw, nh) = cap_pin_rgba(std::sync::Arc::new(rgba), 4097, 2);
+        assert_eq!((nw, nh), (4096, 2), "长边钳到上限、短边等比");
+        assert_eq!(data.len(), 4096 * 2 * 4);
+        // 恰在上限：原样放行。
+        let edge = vec![1u8; 4096 * 2 * 4];
+        let (data, nw, nh) = cap_pin_rgba(std::sync::Arc::new(edge), 4096, 2);
+        assert_eq!((nw, nh), (4096, 2), "恰在上限不降采样");
+        assert_eq!(data[..8], [1u8; 8], "原样返回（字节不动）");
+        // 远小于上限：原样。
+        let (data, nw, nh) = cap_pin_rgba(std::sync::Arc::new(vec![3u8; 100 * 50 * 4]), 100, 50);
+        assert_eq!((nw, nh), (100, 50));
+        assert_eq!(data.len(), 100 * 50 * 4);
     }
 
     #[test]

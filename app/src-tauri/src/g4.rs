@@ -16,6 +16,13 @@ fn enabled(v: Option<String>) -> bool {
     v.as_deref() == Some("1")
 }
 
+/// G4 模式是否被请求（enabled 的环境变量入口形态）。lib.rs run() **首行**置 perf
+/// CSV 闸（M3 继承项④）时调用——process_start（G4 冷启动 t0）在 setup 之前打点，
+/// 闸必须先于它置位，cold_start 两端行才完整。
+pub fn requested() -> bool {
+    enabled(std::env::var("HAWKSNAP_G4").ok())
+}
+
 /// lib.rs setup 托盘 build 之后调用（tray_ready 已打点）：G4 关闭时零成本返回；
 /// 开启则丢独立线程跑「开面板 → 打点 → 汇总 → 退出」——ensure_main_panel 建
 /// wry webview 窗口禁主线程，独立线程调用（与热键失败反馈/托盘面板入口同纪律），

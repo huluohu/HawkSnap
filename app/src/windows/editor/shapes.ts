@@ -225,6 +225,29 @@ export function topmostShapeAt(
   return null;
 }
 
+/**
+ * 裁剪形状生存规则（M3 第 10 工具）：位图裁到 rect 后，形状按**包围盒与 rect 是否
+ * 相交**二分——相交（含部分越界）→ `translate(-rect.x, -rect.y)` 平移进新坐标系
+ * （越出新边界的部分由画布 overflow 裁剪与导出画布自然裁掉，形状本体保留）；
+ * 完全在外 → 丢弃。全部在外时返回空数组（裁剪照常生效，形状层清空——与
+ * `Option<shapes>` 语义对应的 TS 形态）。纯函数：不改入参、translate 显式新建。
+ */
+export function applyCrop(shapes: Shape[], rect: BBox): Shape[] {
+  const out: Shape[] = [];
+  for (const s of shapes) {
+    const b = bboxOf(s);
+    // 严格不等号：零面积搭接（边缘恰好相触）不算相交——不可见即不保留
+    const intersects =
+      b.x < rect.x + rect.w &&
+      b.x + b.w > rect.x &&
+      b.y < rect.y + rect.h &&
+      b.y + b.h > rect.y;
+    if (!intersects) continue;
+    out.push(translate(s, -rect.x, -rect.y));
+  }
+  return out;
+}
+
 /** 样式替换（选中态改色/改粗细/改字号 = 不可变拷贝替换 + 一次历史提交）：
  * 形状没有对应字段时原样返回（mosaic 无 color/width；step 无 width/size；非 text 无 size）。 */
 export function withColor(shape: Shape, color: string): Shape {

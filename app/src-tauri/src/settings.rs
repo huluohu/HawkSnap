@@ -124,6 +124,23 @@ pub fn set_settings(app: AppHandle, s: Settings) -> Result<Settings, String> {
     // M0：save_dir 可能刚变更——重算 asset 协议放行（新目录的缩略图才能进网格）。
     // best-effort（内部 eprintln 降级），不影响保存成功返回。
     crate::commands::allow_asset_scope(&app);
+    // 托盘菜单动态重建（M3 继承项⑦）：热键组合可能刚变更——用**生效设置**重建
+    // 菜单并整体替换（TrayIcon::set_menu 只换菜单本体，on_menu_event 分派与菜单项
+    // id 恒定不变）。best-effort：重建/替换失败仅 eprintln——菜单停留在旧文案
+    // （旧组合可能已失效，但「主面板/退出」等恒定入口不受影响），不阻断保存成功
+    // 返回；下次成功保存或重启自愈（setup 走同一 build_tray_menu）。
+    if let Some(tray) = app.tray_by_id("main") {
+        match crate::build_tray_menu(&app, &effective) {
+            Ok(menu) => {
+                if let Err(e) = tray.set_menu(Some(menu)) {
+                    eprintln!("[hawksnap] 托盘菜单重建失败（保持旧菜单）: {e}");
+                }
+            }
+            Err(e) => eprintln!("[hawksnap] 托盘菜单构建失败（保持旧菜单）: {e}"),
+        }
+    } else {
+        eprintln!("[hawksnap] 托盘不可用（菜单未重建）");
+    }
     Ok(effective)
 }
 

@@ -96,6 +96,7 @@
   "editor.ocr.export": "导出 txt",
   "editor.ocr.exported": "已导出",
   "editor.ocr.close": "关闭",
+  "editor.tool.crop": "裁剪",
   "editor.tool.select": "选择",
   "editor.tool.mosaic": "马赛克",
   "editor.tool.step": "序号",

@@ -27,6 +27,13 @@ fn parse_rounds(v: Option<String>) -> Option<u64> {
     v.and_then(|s| s.trim().parse::<u64>().ok())
 }
 
+/// bench 模式是否被请求（与 maybe_run 同一解析）。lib.rs run() **首行**置 perf
+/// CSV 闸（M3 继承项④）时调用——process_start（G3/G4 计时起点）在 setup 之前
+/// 打点，闸必须先于它置位，bench 的 CSV 行才完整。
+pub fn requested() -> bool {
+    parse_rounds(std::env::var("HAWKSNAP_BENCH").ok()).is_some()
+}
+
 /// 最近秩 P90：升序排序后取 sorted[ceil(0.9*n)-1]（纯函数便于单测）。
 /// 纯整数式 ceil(0.9*n) = (9n+9)/10，避免浮点；空集返回 0（调用方守卫 n>0）。
 fn p90_nearest_rank(mut xs: Vec<u64>) -> u64 {

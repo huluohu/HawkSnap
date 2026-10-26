@@ -1,5 +1,6 @@
 // 编辑器窗口（M2 Task M2 + M3）：?window=editor 路由。位图底 + 矢量层 + 撤销重做 +
-// 全量工具（选择/矩形/椭圆/箭头/画笔/荧光笔/马赛克/序号/文本）+ 导出保存。
+// 全量工具（选择/裁剪/矩形/椭圆/箭头/画笔/荧光笔/马赛克/序号/文本，M3 N0 起 10/10）+
+// 导出保存。
 // 图片来源：Rust editor_open 建窗/复用后 emit hawk://editor-load { path, origin }（3 连发
 // @150ms，覆盖层同款冷加载竞态——前端以收到的最后一条为准）；图片本体经 asset 协议
 // convertFileSrc(path) 加载为 Image 元素（装载代数守卫），失败降级
@@ -18,7 +19,7 @@ import EditorCanvas, { type EditorStyle, type Tool } from "./EditorCanvas";
 import { exportToPng } from "./export";
 import { useEditorHistory } from "./history";
 import { createLoadGuard } from "./loadGuard";
-import { translate, withColor, withSize, withWidth, type Shape } from "./shapes";
+import { applyCrop, translate, withColor, withSize, withWidth, type BBox, type Shape } from "./shapes";
 
 // 样式记忆（计划接口）：color/width/size 持久化 localStorage，挂载时恢复。
 const STYLE_KEY = "hawksnap.editor.style";
@@ -38,8 +39,9 @@ const DEFAULT_STYLE: EditorStyle = { color: "#E5484D", width: 3, size: 24 };
 const PALETTE = ["#E5484D", "#F76B15", "#FFC53D", "#30A46C", "#0090FF", "#6E56CF", "#111111", "#FFFFFF"];
 
 // 工具清单（G6 字面量 key 约定：文案在组件内以字面量 t() 取，本表只列 id 顺序）
+// M3 N0：+crop（第 10 工具，编辑器 10/10 达成）。
 const TOOLS: Tool[] = [
-  "select", "rect", "ellipse", "arrow", "pen", "highlighter", "mosaic", "step", "text",
+  "select", "crop", "rect", "ellipse", "arrow", "pen", "highlighter", "mosaic", "step", "text",
 ];
 
 function loadStyle(): EditorStyle {
@@ -277,6 +279,41 @@ export default function EditorWindow() {
     }
   }, [commit, present, selected]);
 
+  // —— 裁剪工具（M3 N0 第 10 工具，前端单路径）：把位图裁到选框 → 形状平移/丢弃
+  // （applyCrop 纯函数）→ 撤销栈重置（裁剪 = 新会话基线）+ 工具复位 select（防
+  // 误二次裁）。Rust 侧零改动：imagePath/origin 不变，⌘S 时 editor_save 写回的就是
+  // 裁后尺寸的 PNG（前端发什么写什么）；Pin 回写按新尺寸 set_image，Capture 来源走
+  // record_history 同链。同步换图（setImage）使画布/导出的 internal dims 自然更新
+  // （naturalWidth/Height 读自新 Image）。 ——
+
+  const applyCropImage = useCallback(
+    (rect: BBox) => {
+      if (!image) return;
+      // 选框钳到图内（拖拽可越出画布边缘；toCanvas 是浮点坐标）
+      const cx = Math.max(0, Math.min(rect.x, image.naturalWidth));
+      const cy = Math.max(0, Math.min(rect.y, image.naturalHeight));
+      const cw = Math.min(rect.w, image.naturalWidth - cx);
+      const ch = Math.min(rect.h, image.naturalHeight - cy);
+      if (cw < 1 || ch < 1) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(cw);
+      canvas.height = Math.round(ch);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(image, cx, cy, cw, ch, 0, 0, canvas.width, canvas.height);
+      const url = canvas.toDataURL("image/png");
+      const img = new Image();
+      img.onload = () => {
+        setImage(img);
+        reset(applyCrop(present, { x: cx, y: cy, w: cw, h: ch }));
+        setSelected(null);
+        setTool("select");
+      };
+      img.src = url;
+    },
+    [image, present, reset],
+  );
+
   // —— 导出保存（F5：经 exportToPng 单路径栅格化 → editor_save 写回原路径 + origin
   // 副作用（M3 契约：pin 回写贴图 / capture 剪贴板+入库 / null 无））——
 
@@ -389,6 +426,7 @@ export default function EditorWindow() {
   // 工具文案（G6 字面量 key：全部 t() 调用都是字面量，检查器可扫；随语言态重渲染换新）
   const toolLabels: Record<Tool, string> = {
     select: t("editor.tool.select"),
+    crop: t("editor.tool.crop"),
     rect: t("editor.tool.rect"),
     ellipse: t("editor.tool.ellipse"),
     arrow: t("editor.tool.arrow"),
@@ -526,6 +564,7 @@ export default function EditorWindow() {
           onCommit={commitShape}
           onMoveShape={moveShape}
           onReplaceText={replaceText}
+          onCrop={applyCropImage}
         />
         {ocrLines !== null && (
           <div style={ocrPanel} role="complementary" aria-label={t("editor.ocr.title")}>

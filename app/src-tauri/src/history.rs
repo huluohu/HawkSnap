@@ -13,6 +13,10 @@ pub struct ShotRow {
     pub w: i64,
     pub h: i64,
     pub app: String,
+    /// 录制时长（秒，REAL；M3 继承项①新增）。截图（region/scrollshot）为 NULL →
+    /// None；仅 kind=recording 有值。`default` 兼容旧消费方（缺字段按 null 补齐）。
+    #[serde(default)]
+    pub duration: Option<f64>,
 }
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shots(
@@ -61,6 +65,7 @@ fn open_at(db: &std::path::Path) -> Result<Connection, String> {
     let conn = Connection::open(db).map_err(|e| e.to_string())?;
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     ensure_ocr_text_column(&conn)?;
+    ensure_duration_column(&conn)?;
     conn.execute_batch(FTS_SCHEMA).map_err(|e| e.to_string())?;
     ensure_fts_backfilled(&conn)?;
     Ok(conn)
@@ -84,29 +89,59 @@ fn ensure_ocr_text_column(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// duration 列迁移（M3 继承项①，user_version 2→3）：ocr_text 同款 pragma_table_info
+/// 探测模式——缺则 ALTER TABLE ADD COLUMN duration REAL（截图行为 NULL，录制行为秒数）。
+/// 幂等：已存在则跳过；0.2.0 的 v2 库升级零拷贝。
+fn ensure_duration_column(conn: &Connection) -> Result<(), String> {
+    let has: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('shots') WHERE name = 'duration'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has == 0 {
+        conn.execute_batch("ALTER TABLE shots ADD COLUMN duration REAL;")
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// schema 迁移终点（M3 N0）：2 = M2（三列 FTS + ocr_text），3 = M3（+ duration 列）。
+const SCHEMA_VERSION: i64 = 3;
+
 /// FTS 索引一次性迁移 + 回填（M0 建，M4 扩列）：`PRAGMA user_version` 闸门。
 ///
-/// - ≥ 2：已迁移库，短路（每次开连接零扫描）。
+/// - ≥ 3：已迁移库，短路（每次开连接零扫描）。
 /// - 0（C3 老库 / 全新库）或 1（M0 库：shots_fts 还是两列旧形状）：旧 FTS 对象
 ///   （触发器 + 虚表）整体 DROP → 按 FTS_SCHEMA 重建（含 ocr_text 列）→
-///   `'rebuild'` 全量回填（从 content 表读全部行）→ 置 2。v1 库不能只靠
-///   CREATE IF NOT EXISTS——旧虚表缺 ocr_text 列，触发器也不会被替换，必须重建。
-/// rebuild 与置位同批次顺序执行：任一步失败则置位不发生，下次开连接自动重试。
+///   `'rebuild'` 全量回填（从 content 表读全部行）。
+/// - 2（0.2.0 库）：FTS 已是三列形状，跳过重建（duration 列已由
+///   [`ensure_duration_column`] 按探测补齐），仅升版本号到 3。
+/// 任一批次与置位同批顺序执行：失败则置位不发生，下次开连接自动重试。
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    if version >= 2 {
+    if version >= SCHEMA_VERSION {
         return Ok(());
     }
+    // v0/v1 才需要重建 FTS（旧虚表缺 ocr_text 列，触发器也不会被替换）；v2 直达置位。
+    let rebuild = if version < 2 {
+        format!(
+            "DROP TRIGGER IF EXISTS shots_fts_ai;
+             DROP TRIGGER IF EXISTS shots_fts_ad;
+             DROP TRIGGER IF EXISTS shots_fts_au;
+             DROP TABLE IF EXISTS shots_fts;
+             {FTS_SCHEMA}
+             INSERT INTO shots_fts(shots_fts) VALUES('rebuild');"
+        )
+    } else {
+        String::new()
+    };
     conn.execute_batch(&format!(
-        "DROP TRIGGER IF EXISTS shots_fts_ai;
-         DROP TRIGGER IF EXISTS shots_fts_ad;
-         DROP TRIGGER IF EXISTS shots_fts_au;
-         DROP TABLE IF EXISTS shots_fts;
-         {FTS_SCHEMA}
-         INSERT INTO shots_fts(shots_fts) VALUES('rebuild');
-         PRAGMA user_version = 2;"
+        "{rebuild}
+         PRAGMA user_version = {SCHEMA_VERSION};"
     ))
     .map_err(|e| e.to_string())
 }
@@ -121,6 +156,10 @@ pub fn init(app: &AppHandle) -> Result<(), String> {
     open_at(&path).map(|_| ())
 }
 
+/// C3 保留策略上限（M3 N0 起单源于此）：入库成功后裁剪至最新 500 条，所有 kind
+/// 平权（region / recording / 未来的 scrollshot 同一预算）。
+const KEEP_MAX: i64 = 500;
+
 pub fn record(
     app: &AppHandle,
     path: &str,
@@ -128,8 +167,10 @@ pub fn record(
     w: i64,
     h: i64,
     app_name: &str,
+    kind: &str,
+    duration: Option<f64>,
 ) -> Result<i64, String> {
-    record_at(&db_path(app), path, thumb_path, w, h, app_name)
+    record_at(&db_path(app), path, thumb_path, w, h, app_name, kind, duration)
 }
 
 pub(crate) fn record_at(
@@ -139,15 +180,29 @@ pub(crate) fn record_at(
     w: i64,
     h: i64,
     app_name: &str,
+    kind: &str,
+    duration: Option<f64>,
 ) -> Result<i64, String> {
     let conn = open_at(db)?;
     let created_at = chrono::Local::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO shots(created_at, path, thumb_path, w, h, app) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![created_at, path, thumb_path, w, h, app_name],
+        "INSERT INTO shots(created_at, kind, path, thumb_path, w, h, app, duration)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![created_at, kind, path, thumb_path, w, h, app_name, duration],
     )
     .map_err(|e| e.to_string())?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    drop(conn);
+    // prune 平权 + 单点化（M3 继承项①）：保留裁剪从 commands.rs 的 record_history
+    // 调用点移入 record 本体——此前 recording.rs 的入库绕过 prune（录屏可无限累积），
+    // 现在所有 kind 走 record 都自动裁剪。best-effort 旁路语义与整条入库链一致：
+    // 裁剪失败仅 eprintln 降级，不影响本次已完成的入库（record 已成功，报
+    // 「入库失败」会误导——终审 Fix 1 口径）。裁剪语义由 prune_keeps_newest_max 与
+    // record_prunes_beyond_keep_max 单测覆盖。
+    if let Err(e) = prune_at(db, KEEP_MAX) {
+        eprintln!("[hawksnap] 历史裁剪失败（忽略）: {e}");
+    }
+    Ok(id)
 }
 
 pub fn list(app: &AppHandle, limit: i64, offset: i64) -> Result<Vec<ShotRow>, String> {
@@ -159,7 +214,7 @@ pub(crate) fn list_at(db: &std::path::Path, limit: i64, offset: i64) -> Result<V
     let conn = open_at(db)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, created_at, path, thumb_path, w, h, app FROM shots
+            "SELECT id, created_at, path, thumb_path, w, h, app, duration FROM shots
              ORDER BY id DESC LIMIT ?1 OFFSET ?2",
         )
         .map_err(|e| e.to_string())?;
@@ -173,6 +228,7 @@ pub(crate) fn list_at(db: &std::path::Path, limit: i64, offset: i64) -> Result<V
                 w: r.get(4)?,
                 h: r.get(5)?,
                 app: r.get(6)?,
+                duration: r.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -203,7 +259,7 @@ pub(crate) fn search_at(db: &std::path::Path, query: &str, limit: i64) -> Result
     let conn = open_at(db)?;
     let mut stmt = conn
         .prepare(
-            "SELECT s.id, s.created_at, s.path, s.thumb_path, s.w, s.h, s.app
+            "SELECT s.id, s.created_at, s.path, s.thumb_path, s.w, s.h, s.app, s.duration
              FROM shots_fts
              JOIN shots s ON s.id = shots_fts.rowid
              WHERE shots_fts MATCH ?1
@@ -222,6 +278,7 @@ pub(crate) fn search_at(db: &std::path::Path, query: &str, limit: i64) -> Result
                 w: r.get(4)?,
                 h: r.get(5)?,
                 app: r.get(6)?,
+                duration: r.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -273,11 +330,9 @@ pub(crate) fn delete_at(db: &std::path::Path, id: i64) -> Result<(), String> {
     Ok(())
 }
 
-pub fn prune(app: &AppHandle, max: i64) -> Result<(), String> {
-    prune_at(&db_path(app), max)
-}
-
 /// 保留最新 max 条：id 大于第 max 新的行的条目逐条 delete（连带删文件）。
+/// 生产入口 = [`record_at`] 的内置裁剪（M3 继承项①单点化：KEEP_MAX 对所有 kind
+/// 平权，record 是唯一入库口，录屏/长截图绕不过）；本函数保留 crate 内可测形态。
 pub(crate) fn prune_at(db: &std::path::Path, max: i64) -> Result<(), String> {
     let conn = open_at(db)?;
     let mut stmt = conn
@@ -371,8 +426,8 @@ mod tests {
         let db = dir.join("history.db");
         let png1 = real_png(&dir, "a.png");
         let png2 = real_png(&dir, "b.png");
-        let id1 = record_at(&db, png1.to_str().unwrap(), "", 100, 50, "Safari").unwrap();
-        let id2 = record_at(&db, png2.to_str().unwrap(), "", 200, 80, "Finder").unwrap();
+        let id1 = record_at(&db, png1.to_str().unwrap(), "", 100, 50, "Safari", "region", None).unwrap();
+        let id2 = record_at(&db, png2.to_str().unwrap(), "", 200, 80, "Finder", "region", None).unwrap();
         assert!(id1 < id2, "自增 id 单调");
         let rows = list_at(&db, 10, 0).unwrap();
         assert_eq!(rows.len(), 2);
@@ -397,7 +452,7 @@ mod tests {
             &db,
             png.to_str().unwrap(),
             thumb.to_str().unwrap(),
-            10, 10, "App",
+            10, 10, "App", "region", None,
         )
         .unwrap();
         assert!(png.exists() && thumb.exists());
@@ -406,7 +461,7 @@ mod tests {
         assert!(!png.exists(), "截图文件被删");
         assert!(!thumb.exists(), "缩略图文件被删");
         // NotFound 忽略：对已删除文件路径的条目再删不炸
-        let id2 = record_at(&db, dir.join("gone.png").to_str().unwrap(), "", 1, 1, "App").unwrap();
+        let id2 = record_at(&db, dir.join("gone.png").to_str().unwrap(), "", 1, 1, "App", "region", None).unwrap();
         delete_at(&db, id2).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -418,7 +473,7 @@ mod tests {
         let mut ids = Vec::new();
         for i in 0..6 {
             let png = real_png(&dir, &format!("p{i}.png"));
-            ids.push(record_at(&db, png.to_str().unwrap(), "", i, i, "App").unwrap());
+            ids.push(record_at(&db, png.to_str().unwrap(), "", i, i, "App", "region", None).unwrap());
         }
         prune_at(&db, 5).unwrap();
         let rows = list_at(&db, 100, 0).unwrap();
@@ -437,7 +492,7 @@ mod tests {
         let db = dir.join("history.db");
         let mut ids = Vec::new();
         for i in 0..3 {
-            ids.push(record_at(&db, dir.join(format!("o{i}.png")).to_str().unwrap(), "", 1, 1, "App").unwrap());
+            ids.push(record_at(&db, dir.join(format!("o{i}.png")).to_str().unwrap(), "", 1, 1, "App", "region", None).unwrap());
         }
         let page1 = list_at(&db, 2, 0).unwrap();
         let page2 = list_at(&db, 2, 2).unwrap();
@@ -517,7 +572,7 @@ mod tests {
         // 闸门已置位：老库变已迁移库
         let v: i64 = Connection::open(&db).unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2, "回填后 user_version 置 2（M4 扩列后的迁移终点）");
+        assert_eq!(v, 3, "回填后 user_version 置 3（M3 duration 列后的迁移终点）");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -528,18 +583,18 @@ mod tests {
     fn fts_rebuild_short_circuits_after_first_migration() {
         let dir = temp_dir("fts-shortcircuit");
         let db = dir.join("history.db");
-        let id = record_at(&db, "/pics/HawkSnap/once.png", "", 1, 1, "App").unwrap();
+        let id = record_at(&db, "/pics/HawkSnap/once.png", "", 1, 1, "App", "region", None).unwrap();
         assert_eq!(search_at(&db, "once", 50).unwrap().len(), 1, "触发器路径正常命中");
         {
             let conn = Connection::open(&db).unwrap();
             let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-            assert_eq!(v, 2, "record_at 首开已置闸门");
+            assert_eq!(v, 3, "record_at 首开已置闸门");
             conn.execute("DELETE FROM shots_fts WHERE rowid = ?1", [id]).unwrap();
         }
         open_at(&db).unwrap(); // 若此处错误地 rebuild，索引会被恢复
         assert!(
             search_at(&db, "once", 50).unwrap().is_empty(),
-            "user_version=1 必须短路 rebuild（开连接不恢复被掏空的索引）"
+            "user_version ≥ 3 必须短路 rebuild（开连接不恢复被掏空的索引）"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -548,9 +603,9 @@ mod tests {
     fn search_hits_by_filename_and_app() {
         let dir = temp_dir("fts-hit");
         let db = dir.join("history.db");
-        record_at(&db, "/pics/HawkSnap/Safari 2026-10-23 101010.png", "", 10, 10, "Safari").unwrap();
-        record_at(&db, "/pics/HawkSnap/Finder 2026-10-23 101111.png", "", 10, 10, "Finder").unwrap();
-        record_at(&db, "/pics/HawkSnap/safari-web 2026-10-23 101212.png", "", 10, 10, "Xcode").unwrap();
+        record_at(&db, "/pics/HawkSnap/Safari 2026-10-23 101010.png", "", 10, 10, "Safari", "region", None).unwrap();
+        record_at(&db, "/pics/HawkSnap/Finder 2026-10-23 101111.png", "", 10, 10, "Finder", "region", None).unwrap();
+        record_at(&db, "/pics/HawkSnap/safari-web 2026-10-23 101212.png", "", 10, 10, "Xcode", "region", None).unwrap();
         // 文件名段命中
         let by_name = search_at(&db, "safari", 50).unwrap();
         assert_eq!(by_name.len(), 2, "大小写不敏感，命中两个 safari 文件名");
@@ -573,7 +628,7 @@ mod tests {
         // 不构成 FTS 语法——任何输入都不炸、只可能空/命中。
         let dir = temp_dir("fts-inject");
         let db = dir.join("history.db");
-        record_at(&db, "/pics/HawkSnap/a.png", "", 10, 10, "App").unwrap();
+        record_at(&db, "/pics/HawkSnap/a.png", "", 10, 10, "App", "region", None).unwrap();
         for q in ["\"", "*", "a*", "\"*", "NEAR(", ")*(", "\"\"", "a OR b", "\\'", ""] {
             let r = search_at(&db, q, 50);
             assert!(r.is_ok(), "查询 {q:?} 不得报错: {:?}", r.err());
@@ -588,7 +643,7 @@ mod tests {
     fn delete_cascades_fts_index() {
         let dir = temp_dir("fts-delete");
         let db = dir.join("history.db");
-        let id = record_at(&db, "/pics/HawkSnap/cascade.png", "", 10, 10, "Zed").unwrap();
+        let id = record_at(&db, "/pics/HawkSnap/cascade.png", "", 10, 10, "Zed", "region", None).unwrap();
         assert_eq!(search_at(&db, "cascade", 50).unwrap().len(), 1);
         delete_at(&db, id).unwrap();
         assert!(search_at(&db, "cascade", 50).unwrap().is_empty(), "删除后 FTS 索引同步失效");
@@ -629,7 +684,7 @@ mod tests {
         open_at(&db).unwrap();
         let v: i64 = Connection::open(&db).unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 2, "M0 库升级置 2");
+        assert_eq!(v, 3, "M0 库升级置 3");
         let n = set_ocr_text_at(&db, "/pics/a.png", "发票抬头 HawkSnap").unwrap();
         assert_eq!(n, 1, "UPDATE 命中一行");
         // 新列即时可检索（UPDATE 触发器已喂 FTS）。
@@ -644,7 +699,7 @@ mod tests {
     fn set_ocr_text_updates_column_and_fts() {
         let dir = temp_dir("fts-setocr");
         let db = dir.join("history.db");
-        let id = record_at(&db, "/pics/HawkSnap/sheet.png", "", 10, 10, "App").unwrap();
+        let id = record_at(&db, "/pics/HawkSnap/sheet.png", "", 10, 10, "App", "region", None).unwrap();
         // 未入库路径：0 行受影响但不报错（编辑器临时文件合法态）。
         assert_eq!(set_ocr_text_at(&db, "/tmp/unknown.png", "x").unwrap(), 0);
         // 首次回填即可检索。
@@ -669,7 +724,7 @@ mod tests {
         let db = dir.join("history.db");
         for i in 0..500 {
             let app = if i % 2 == 0 { "Safari" } else { "Finder" };
-            record_at(&db, &format!("/pics/HawkSnap/{app} 2026-10-23 {i:06}.png"), "", 10, 10, app).unwrap();
+            record_at(&db, &format!("/pics/HawkSnap/{app} 2026-10-23 {i:06}.png"), "", 10, 10, app, "region", None).unwrap();
         }
         let t0 = std::time::Instant::now();
         let hits = search_at(&db, "safari", 50).unwrap();
@@ -681,6 +736,109 @@ mod tests {
             elapsed.as_millis() < 200,
             "F12：500 行搜索必须 <200ms，实测 {elapsed:?}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// M3 继承项①：kind + duration 写入契约——record_at 按 kind 落 kind 列；截图
+    /// （region）duration 为 NULL → ShotRow.duration = None，录制路径 Some(秒)。
+    #[test]
+    fn record_writes_kind_and_duration() {
+        let dir = temp_dir("kind-duration");
+        let db = dir.join("history.db");
+        record_at(&db, "/pics/HawkSnap/shot.png", "", 10, 10, "HawkSnap", "region", None).unwrap();
+        record_at(&db, "/movies/HawkSnap/rec.mp4", "", 1920, 1080, "recording", "recording", Some(12.5)).unwrap();
+        let rows = list_at(&db, 10, 0).unwrap();
+        assert_eq!(rows.len(), 2);
+        // 新→旧：rec 在前（duration=12.5），region 在后（duration=None）
+        assert_eq!(rows[0].duration, Some(12.5), "录制行 duration 为秒数");
+        assert_eq!(rows[1].duration, None, "截图行 duration 为 NULL");
+        // kind 列直查（ShotRow 刻意不暴露 kind——语义面在 schema，不进前端契约）
+        let conn = Connection::open(&db).unwrap();
+        let kinds: Vec<String> = conn
+            .prepare("SELECT kind FROM shots ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(kinds, vec!["region", "recording"]);
+        // duration 语义入库即生效：老行（迁移库）读回 NULL 不炸
+        assert!(search_at(&db, "rec.mp4", 10).unwrap()[0].duration == Some(12.5));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// M3 继承项①：0.2.0 的 v2 库升级到 v3——duration 列按探测补齐，老行保留且
+    /// duration 为 NULL，user_version 置 3；二次开连接幂等（ALTER 不重复执行）。
+    #[test]
+    fn duration_column_migrates_v2_to_v3() {
+        let dir = temp_dir("duration-v2");
+        let db = dir.join("history.db");
+        // 造一个 0.2.0 形态的 v2 库（有 ocr_text、三列 FTS，无 duration）
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch("ALTER TABLE shots ADD COLUMN ocr_text TEXT;").unwrap();
+            conn.execute_batch(FTS_SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO shots(created_at, kind, path, thumb_path, w, h, app)
+                 VALUES ('t', 'region', '/pics/HawkSnap/old.png', '', 1, 1, 'App')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        }
+        open_at(&db).unwrap();
+        open_at(&db).unwrap(); // 二次迁移幂等
+        let conn = Connection::open(&db).unwrap();
+        let has: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('shots') WHERE name = 'duration'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has, 1, "duration 列已加");
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 3, "v2 库升级置 3");
+        let (n, kind, duration): (i64, String, Option<f64>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(kind), MAX(duration) FROM shots",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((n, kind.as_str(), duration), (1, "region", None), "老行保留且 duration 为 NULL");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// M3 继承项①（prune 平权）：prune 已移入 record 本体——入库超过 KEEP_MAX 即
+    /// 自动裁剪到最新 500 条（连带删文件），任何 kind 一致。这是「录屏入库绕过
+    /// prune」缺陷的结构性收口：record 是唯一入库口，绕不过。
+    #[test]
+    fn record_prunes_beyond_keep_max() {
+        let dir = temp_dir("record-prune");
+        let db = dir.join("history.db");
+        let mut first = None;
+        let mut last = None;
+        for i in 0..=KEEP_MAX {
+            // 首尾条目配真文件，断言最旧被连带删、最新保留
+            let png = if i == 0 || i == KEEP_MAX as i64 {
+                Some(real_png(&dir, &format!("edge{i}.png")))
+            } else {
+                None
+            };
+            let path = png
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("/pics/HawkSnap/fill{i}.png"));
+            let id = record_at(&db, &path, "", 1, 1, "App", "recording", Some(i as f64)).unwrap();
+            if i == 0 {
+                first = Some((id, path));
+            }
+            last = Some(id);
+        }
+        let rows = list_at(&db, 10_000, 0).unwrap();
+        assert_eq!(rows.len() as i64, KEEP_MAX, "恰好保留最新 500 条");
+        let (first_id, first_path) = first.unwrap();
+        assert!(!rows.iter().any(|r| r.id == first_id), "最旧一条被裁");
+        assert!(!std::path::Path::new(&first_path).exists(), "最旧条目的文件连带删除");
+        assert!(rows.iter().any(|r| r.id == last.unwrap()), "最新一条保留");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

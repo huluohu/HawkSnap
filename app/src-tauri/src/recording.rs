@@ -78,6 +78,15 @@ pub fn elapsed_secs(active: Duration, paused_total: Duration, current_pause: Opt
     active.saturating_sub(paused).as_secs()
 }
 
+/// 录制时长（秒，f64 亚秒精度）：与 [`elapsed_secs`] 同一语义（挂钟活跃时长 −
+/// 暂停累计，暂停中含当段），仅精度不同——入库 duration 列（M3 继承项①）取
+/// REAL 秒，stop 收尾前调用（stop 阻塞 ≤25s 不得计入）。纯 Duration 运算可测。
+pub fn recorded_secs(active: Duration, paused_total: Duration, current_pause: Option<Duration>) -> f64 {
+    active
+        .saturating_sub(paused_total + current_pause.unwrap_or_default())
+        .as_secs_f64()
+}
+
 // ---------------------------------------------------------------------------
 // 运行态（static Mutex<Option<...>>：None = Idle；与 HOTKEY_ERROR/DELAY_ACTIVE 同款）
 // ---------------------------------------------------------------------------
@@ -209,8 +218,12 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
         Ok(r) => r,
         Err(e) => {
             // 启动失败：回收刚拉起的悬浮条（无录制不残留 UI；与成功停止路径的
-            // close_recording_bar 同款 best-effort）。
-            close_recording_bar(&app);
+            // close_recording_bar 同款 best-effort）。并发守卫（M3 继承项⑥）：
+            // 若此刻已有对手装机（REC 非空），条已属于对手——**不碰**（关闭会杀掉
+            // 胜者正在用的条）；无对手时条是本请求自建的，照常回收。
+            if lock_rec().is_none() {
+                close_recording_bar(&app);
+            }
             return Err(e);
         }
     };
@@ -218,10 +231,14 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
     {
         let mut guard = lock_rec();
         if guard.is_some() {
-            // 并发窗口内第二请求胜出检查（理论不可达：锁外无 await 点）。
+            // 并发败者路径（M3 继承项⑥，理论不可达：锁外无 await 点）：第二请求
+            // 落在锁检查与装机之间。**只清自己的半成品**（stop + 删临时文件），
+            // 绝不触碰悬浮条——bar 是进程单例，此刻属于先装机的胜者，此前的
+            // close_recording_bar 会把胜者正在使用的条关掉（0.2.0 缺陷）。败者
+            // 前面的 show_recording_bar 对同一窗口是幂等 show，无残留需要回收；
+            // 胜者停止时自会关条。返回 Err 后败者侧由 record-error 横幅呈现。
             let _ = recorder.stop();
             let _ = std::fs::remove_file(&path);
-            close_recording_bar(&app);
             return Err("已有录屏进行中".into());
         }
         // 会话取号在安装锁内：只有成功启动才消耗序号（失败路径不跳号不影响单调）。
@@ -294,6 +311,14 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
     // close 须非主线程（record_stop 为 async 命令，运行时线程 ✓）；不入 idle_reaper
     //（close 语义更干净，reaper 是「隐藏满 10 分钟」的兜底，此处有明确生命周期点）。
 
+    // 录制时长（M3 继承项①，入库 duration 列）：stop 收尾**前**取时刻——
+    // recorder.stop() 阻塞 ≤25s 不得计入；口径与 tick/record_status 一致。
+    let duration_secs = recorded_secs(
+        rt.started_at.elapsed(),
+        rt.paused_total,
+        rt.pause_started.map(|t| t.elapsed()),
+    );
+
     let (path, info) = {
         #[cfg(target_os = "macos")]
         {
@@ -307,8 +332,20 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
     };
 
     // 历史入库（旁路语义：失败仅记录，不影响录制产物返回——与历史库总裁定一致）。
+    // kind="recording" + duration=录制秒数（M3 继承项①：kind 列语义修正——此前
+    // "recording" 塞在 app 列冒充 kind；prune 平权由 history::record 内置裁剪兑现，
+    // 录屏不再绕过 500 条保留策略）。app 列保持 "recording"（网格展示口径不变）。
     #[cfg(target_os = "macos")]
-    if let Err(e) = crate::history::record(&app, &path.to_string_lossy(), "", info.width as i64, info.height as i64, "recording") {
+    if let Err(e) = crate::history::record(
+        &app,
+        &path.to_string_lossy(),
+        "",
+        info.width as i64,
+        info.height as i64,
+        "recording",
+        "recording",
+        Some(duration_secs),
+    ) {
         eprintln!("[hawksnap] 录屏历史入库失败: {e}");
     }
 
@@ -458,6 +495,27 @@ mod tests {
             elapsed_secs(Duration::from_secs(5), Duration::from_secs(20), None),
             0
         );
+    }
+
+    /// 录制时长（M3 继承项①，duration 列口径）：与 elapsed_secs 同语义的 f64 版
+    /// ——亚秒精度入库；暂停扣除/时钟异常防御同口径。
+    #[test]
+    fn recorded_secs_keeps_subsecond_precision_and_excludes_pauses() {
+        assert_eq!(recorded_secs(Duration::from_millis(1500), Duration::ZERO, None), 1.5);
+        assert_eq!(
+            recorded_secs(Duration::from_secs(100), Duration::from_secs(20), None),
+            80.0
+        );
+        assert_eq!(
+            recorded_secs(
+                Duration::from_secs(100),
+                Duration::from_secs(20),
+                Some(Duration::from_secs(30))
+            ),
+            50.0
+        );
+        // 时钟异常（暂停 > 活跃）不回绕：saturating 到 0。
+        assert_eq!(recorded_secs(Duration::from_secs(5), Duration::from_secs(20), None), 0.0);
     }
 
     #[test]

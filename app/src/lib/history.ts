@@ -8,6 +8,8 @@ export interface ShotRow {
   w: number;
   h: number;
   app: string;
+  /** 录制时长（秒）。M3 继承项①新增：截图为 null，仅录制行有值。 */
+  duration?: number | null;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyCrop,
   arrowHeadLen,
   bboxOf,
   distanceToSegment,
@@ -324,5 +325,69 @@ describe("style replacement", () => {
   it("withSize applies to text only", () => {
     expect(withSize(text, 32)).toEqual({ ...text, size: 32 });
     expect(withSize(rect, 32)).toBe(rect);
+  });
+});
+
+// —— applyCrop（M3 N0 第 10 工具：形状生存规则） ——
+
+describe("applyCrop", () => {
+  // 裁剪框：原图 (40,40) 起 200×100
+  const crop = { x: 40, y: 40, w: 200, h: 100 };
+
+  it("translates fully-inside shapes into the cropped coordinate system", () => {
+    const inside: Shape = { kind: "rect", x: 60, y: 70, w: 30, h: 20, color: "#f00", width: 2 };
+    const out = applyCrop([inside], crop);
+    expect(out).toEqual([{ kind: "rect", x: 20, y: 30, w: 30, h: 20, color: "#f00", width: 2 }]);
+  });
+
+  it("keeps partially-intersecting shapes (translated) and drops fully-outside ones", () => {
+    const partial: Shape = { kind: "rect", x: 30, y: 70, w: 30, h: 20, color: "#f00", width: 2 }; // 左缘越界但相交
+    const outside: Shape = { kind: "rect", x: 0, y: 0, w: 10, h: 10, color: "#0f0", width: 2 };   // 完全在外
+    const out = applyCrop([partial, outside], crop);
+    expect(out, "完全在外的被丢弃").toHaveLength(1);
+    expect(
+      out[0],
+      "相交的平移进新坐标系（可含负坐标，越界部分由画布/导出裁掉）",
+    ).toEqual({ kind: "rect", x: -10, y: 30, w: 30, h: 20, color: "#f00", width: 2 });
+  });
+
+  it("translates every kind by its own geometry (arrow/pen/step/text)", () => {
+    const shapes: Shape[] = [
+      { kind: "arrow", x1: 50, y1: 50, x2: 90, y2: 80, color: "#00f", width: 3 },
+      { kind: "pen", points: [{ x: 50, y: 50 }, { x: 60, y: 55 }], color: "#000", width: 2 },
+      { kind: "step", x: 50, y: 50, n: 7, color: "#E5484D" },
+      { kind: "text", x: 50, y: 50, text: "abc", color: "#123", size: 16 },
+    ];
+    const out = applyCrop(shapes, crop);
+    expect(out).toHaveLength(4);
+    const [a, p, s, t] = out;
+    expect(a).toMatchObject({ x1: 10, y1: 10, x2: 50, y2: 40 });
+    if (p.kind === "pen") {
+      expect(p.points).toEqual([{ x: 10, y: 10 }, { x: 20, y: 15 }]);
+    } else {
+      expect.unreachable("kind 必须保持 pen");
+    }
+    expect(s).toMatchObject({ x: 10, y: 10 });
+    expect(t).toMatchObject({ x: 10, y: 10 });
+  });
+
+  it("returns an empty array when nothing survives (crop still applies)", () => {
+    const outside: Shape = { kind: "mosaic", x: 0, y: 0, w: 10, h: 10, blockSize: 10 };
+    expect(applyCrop([outside], crop)).toEqual([]);
+  });
+
+  it("does not mutate the input array or shapes", () => {
+    const inside: Shape = { kind: "rect", x: 60, y: 70, w: 30, h: 20, color: "#f00", width: 2 };
+    const input = [inside];
+    const out = applyCrop(input, crop);
+    expect(input).toHaveLength(1);
+    expect(inside.x).toBe(60); // 原形状不可变（translate 显式新建）
+    expect(out).not.toBe(input);
+  });
+
+  it("treats edge-touching (zero-area overlap) as outside", () => {
+    // 形状右缘恰好贴在裁剪框左缘：零面积搭接 → 不可见 → 丢弃
+    const touching: Shape = { kind: "rect", x: 30, y: 50, w: 10, h: 10, color: "#f00", width: 2 };
+    expect(applyCrop([touching], crop)).toEqual([]);
   });
 });

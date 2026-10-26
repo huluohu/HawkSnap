@@ -14,8 +14,52 @@ mod settings;
 mod single_instance;
 mod updater;
 
+use tauri::AppHandle;
+
+/// 托盘菜单构建（M3 继承项⑦）：setup 与 set_settings 共用的**单一代码路径**。
+/// 菜单项文案随 settings 动态——热键组合变更后菜单即时反映（如「截图 (F1)」→
+/// 「截图 (F9)」）；恒定项（主面板/关闭全部贴图/延时子菜单/退出）不依赖设置。
+/// 菜单项 **id 恒定**（panel/shot/pin-close-all/delay-*/quit）——on_menu_event 的
+/// 分派挂在 TrayIcon 上、与菜单本体解耦，重建后同一处理器继续命中。
+pub fn build_tray_menu(
+    app: &AppHandle,
+    settings: &settings::Settings,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, Submenu};
+    // C6 主面板：启动零窗口后唯一的常驻面板入口（热键失败路径会自动拉起，
+    // 但用户主动打开面板的常规路径在这里）。
+    let panel = MenuItem::with_id(app, "panel", "主面板", true, None::<&str>)?;
+    let shot_label = format!("截图 ({})", settings.hotkey_capture);
+    let shot = MenuItem::with_id(app, "shot", shot_label, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 HawkSnap", true, None::<&str>)?;
+    // C5 贴图：关闭全部贴图恒可用（无贴图时调用为空操作，不做动态
+    // enable/disable——省去菜单项状态的跨线程同步，与延时子菜单同口径）。
+    let pin_close_all =
+        MenuItem::with_id(app, "pin-close-all", "关闭全部贴图", true, None::<&str>)?;
+    // spec §3.1：延时截图 1/2/3/5 秒可选 + 「取消倒计时」恒可用（非活动期
+    // 调用返回 Err，调用方 eprintln 吞掉——不做动态 enable/disable，省去
+    // 菜单项状态的跨线程同步）。
+    let delay_1 = MenuItem::with_id(app, "delay-1", "1 秒", true, None::<&str>)?;
+    let delay_2 = MenuItem::with_id(app, "delay-2", "2 秒", true, None::<&str>)?;
+    let delay_3 = MenuItem::with_id(app, "delay-3", "3 秒", true, None::<&str>)?;
+    let delay_5 = MenuItem::with_id(app, "delay-5", "5 秒", true, None::<&str>)?;
+    let delay_cancel =
+        MenuItem::with_id(app, "delay-cancel", "取消倒计时", true, None::<&str>)?;
+    let delay_menu = Submenu::with_id_and_items(
+        app, "delay-submenu", "延时截图", true,
+        &[&delay_1, &delay_2, &delay_3, &delay_5, &delay_cancel],
+    )?;
+    Menu::with_items(app, &[&panel, &shot, &pin_close_all, &delay_menu, &quit])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // perf CSV 落盘闸（M3 继承项④）：仅 bench（HAWKSNAP_BENCH）/G4（HAWKSNAP_G4）
+    // 模式写 CSV，生产运行零写入（0.1.0/0.2.0 的「CSV 恒写」是 M2 终审 ledgered
+    // debt，本项收口）。必须先于 mark_process_start——process_start/tray_ready 是
+    // G4 冷启动计时的两端，闸晚置会丢行。bench-latency.sh / bench-g4.sh 两个脚本
+    // 消费的行只在本闸开启（对应模式）下存在，脚本口径不变、不做改动。
+    crate::perf::set_enabled(crate::bench_mode::requested() || crate::g4::requested());
     // G4 冷启动 t0（plan D5）：run() 首行、先于 Builder 打点 process_start——
     // 进程级「冷启动 → 托盘就绪」计时的起点（CSV 落行 + 进程内缓存，perf.rs）。
     crate::perf::mark_process_start();
@@ -130,34 +174,14 @@ pub fn run() {
 
             // 托盘常驻：截图入口 + 延时截图子菜单（Plan B Task 8）+ 退出。
             {
-                use tauri::{
-                    menu::{Menu, MenuItem, Submenu},
-                    tray::TrayIconBuilder,
-                };
-                // C6 主面板：启动零窗口后唯一的常驻面板入口（热键失败路径会自动拉起，
-                // 但用户主动打开面板的常规路径在这里）。
-                let panel =
-                    MenuItem::with_id(app, "panel", "主面板", true, None::<&str>)?;
-                let shot = MenuItem::with_id(app, "shot", "截图 (F1)", true, None::<&str>)?;
-                let quit = MenuItem::with_id(app, "quit", "退出 HawkSnap", true, None::<&str>)?;
-                // C5 贴图：关闭全部贴图恒可用（无贴图时调用为空操作，不做动态
-                // enable/disable——省去菜单项状态的跨线程同步，与延时子菜单同口径）。
-                let pin_close_all =
-                    MenuItem::with_id(app, "pin-close-all", "关闭全部贴图", true, None::<&str>)?;
-                // spec §3.1：延时截图 1/2/3/5 秒可选 + 「取消倒计时」恒可用（非活动期
-                // 调用返回 Err，调用方 eprintln 吞掉——不做动态 enable/disable，省去
-                // 菜单项状态的跨线程同步）。
-                let delay_1 = MenuItem::with_id(app, "delay-1", "1 秒", true, None::<&str>)?;
-                let delay_2 = MenuItem::with_id(app, "delay-2", "2 秒", true, None::<&str>)?;
-                let delay_3 = MenuItem::with_id(app, "delay-3", "3 秒", true, None::<&str>)?;
-                let delay_5 = MenuItem::with_id(app, "delay-5", "5 秒", true, None::<&str>)?;
-                let delay_cancel =
-                    MenuItem::with_id(app, "delay-cancel", "取消倒计时", true, None::<&str>)?;
-                let delay_menu = Submenu::with_id_and_items(
-                    app, "delay-submenu", "延时截图", true,
-                    &[&delay_1, &delay_2, &delay_3, &delay_5, &delay_cancel],
-                )?;
-                let menu = Menu::with_items(app, &[&panel, &shot, &pin_close_all, &delay_menu, &quit])?;
+                use tauri::tray::TrayIconBuilder;
+                // M3 继承项⑦：菜单构建抽 build_tray_menu（settings 驱动文案），
+                // setup 与 set_settings 单一代码路径。热键注册失败路径同样用
+                // settings 文案——settings 在热键注册前后都可加载（load 失败回退
+                // Default），菜单展示的是「配置的组合」；注册成败另有 hotkey-error
+                // 横幅反馈，不在菜单里表达。
+                let settings = settings::Settings::load(app.handle());
+                let menu = build_tray_menu(app.handle(), &settings)?;
                 TrayIconBuilder::with_id("main")
                     .icon(
                         app.default_window_icon()

@@ -7,6 +7,8 @@
 //   onMoveShape（拖拽全程只入一档历史）；点空白 = 取消选中。
 // - 马赛克：同 rect 拖拽（blockSize 固定 10px @自然尺度）；序号气泡：点击落位，
 //   n = nextStepNumber(shapes)（创建时计算并存入形状，删除/撤销自然回落）。
+// - 裁剪（M3 第 10 工具）：同 rect 拖拽建选框（虚线 + 把手 UI），up 提交 onCrop
+//   ——位图裁剪/形状平移丢弃/撤销栈重置在 index.tsx 落（画布层只管选框 UI）。
 // - 文本：点击落锚开内联输入（Enter/blur 提交、Esc 取消）；双击已提交文本形状
 //   （选择工具下）重新打开输入，提交 = onReplaceText 替换（一档历史）。
 //   工具切换时**结转**未提交文本（M1 遗留修复：原实现静默丢弃）。
@@ -23,13 +25,14 @@ import {
   withColor,
   withSize,
   withWidth,
+  type BBox,
   type MeasureFn,
   type Shape,
 } from "./shapes";
 import { t } from "../../lib/i18n";
 
 export type Tool =
-  | "select" | "rect" | "ellipse" | "arrow" | "pen" | "highlighter"
+  | "select" | "crop" | "rect" | "ellipse" | "arrow" | "pen" | "highlighter"
   | "mosaic" | "step" | "text";
 
 export interface EditorStyle { color: string; width: number; size: number }
@@ -53,6 +56,9 @@ interface EditorCanvasProps {
   onMoveShape: (index: number, dx: number, dy: number) => void;
   /** 双击文本编辑提交（替换原形状文本）。 */
   onReplaceText: (index: number, text: string) => void;
+  /** 裁剪工具拖拽完成（up 时一次；<4px² 的框丢弃——与绘制工具的微形状口径一致）。
+   * 位图裁剪与形状重定位在 index.tsx 落（画布层只管选框 UI）。 */
+  onCrop: (rect: BBox) => void;
 }
 
 interface Pt { x: number; y: number }
@@ -85,7 +91,7 @@ function drawSelection(ctx: CanvasRenderingContext2D, b: { x: number; y: number;
 
 export default function EditorCanvas({
   image, shapes, tool, style, selected, previewStyle,
-  onSelect, onCommit, onMoveShape, onReplaceText,
+  onSelect, onCommit, onMoveShape, onReplaceText, onCrop,
 }: EditorCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const vecRef = useRef<HTMLCanvasElement>(null);
@@ -96,6 +102,8 @@ export default function EditorCanvas({
   const [draft, setDraft] = useState<Shape | null>(null);
   // 移动草稿：{ 选中下标, 起点, 累计位移 }（up 时一次提交）
   const [moveDraft, setMoveDraft] = useState<{ index: number; start: Pt; dx: number; dy: number } | null>(null);
+  // 裁剪选框草稿（M3 第 10 工具）：down 建框 → move 归一化 → up 提交 onCrop（<4px² 丢弃）
+  const [cropDraft, setCropDraft] = useState<BBox | null>(null);
   // 文本内联输入：落锚 + 草稿值 + 编辑目标（editIndex=null = 新建）
   const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string; editIndex: number | null } | null>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
@@ -128,11 +136,12 @@ export default function EditorCanvas({
     }
   }, [image]);
 
-  // 换图即清草稿/移动/文本编辑（旧图的未提交输入不能提交进新图会话）。
+  // 换图即清草稿/移动/文本编辑/裁剪框（旧图的未提交输入不能提交进新图会话）。
   useEffect(() => {
     setDraft(null);
     setMoveDraft(null);
     setTextDraft(null);
+    setCropDraft(null);
   }, [image]);
 
   // 矢量层重绘：shapes/draft/移动/选中态任一变化即全量重绘。F5：形状只经 drawShape
@@ -151,13 +160,15 @@ export default function EditorCanvas({
       drawShape(ctx, s, image);
     }
     if (draft) drawShape(ctx, draft, image);
+    // 裁剪选框（编辑器 UI chrome）：与选择框同款虚线 + 把手（不进导出）。
+    if (cropDraft) drawSelection(ctx, cropDraft);
     if (selected != null && shapes[selected]) {
       const s = moveDraft && moveDraft.index === selected
         ? translate(shapes[selected], moveDraft.dx, moveDraft.dy)
         : shapes[selected];
       drawSelection(ctx, bboxOf(s, measure));
     }
-  }, [shapes, draft, moveDraft, selected, previewStyle, image]);
+  }, [shapes, draft, moveDraft, cropDraft, selected, previewStyle, image]);
 
   /** 事件坐标 → 画布物理坐标（CSS 缩放比换算）。 */
   const toCanvas = useCallback((e: { clientX: number; clientY: number }): Pt => {
@@ -217,6 +228,13 @@ export default function EditorCanvas({
       onCommit({ kind: "step", x: p.x, y: p.y, n: nextStepNumber(shapes), color: style.color });
       return;
     }
+    if (tool === "crop") {
+      // 裁剪：拖拽建选框（up 时提交 onCrop，画布层不管位图/形状——index.tsx 落）
+      dragRef.current = true;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setCropDraft({ x: p.x, y: p.y, w: 0, h: 0 });
+      return;
+    }
     dragRef.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
     switch (tool) {
@@ -242,6 +260,16 @@ export default function EditorCanvas({
     const p = toCanvas(e);
     if (moveDraft) {
       setMoveDraft({ ...moveDraft, dx: p.x - moveDraft.start.x, dy: p.y - moveDraft.start.y });
+      return;
+    }
+    if (cropDraft) {
+      // 归一化：负宽高（反向拖拽）在此折正（与 rect 草稿同口径）
+      setCropDraft({
+        x: Math.min(cropDraft.x, p.x),
+        y: Math.min(cropDraft.y, p.y),
+        w: Math.abs(p.x - cropDraft.x),
+        h: Math.abs(p.y - cropDraft.y),
+      });
       return;
     }
     setDraft((d) => {
@@ -278,6 +306,13 @@ export default function EditorCanvas({
       setMoveDraft(null);
       // <1px 视为点击（选中）而非拖动，不入历史——一次拖拽 = 一档历史
       if (Math.hypot(dx, dy) >= 1) onMoveShape(index, dx, dy);
+      return;
+    }
+    if (cropDraft) {
+      const r = cropDraft;
+      setCropDraft(null);
+      // 微选框丢弃（与绘制工具同口径 <4px²）：视为误点，不触发裁剪
+      if (r.w * r.h >= 4) onCrop(r);
       return;
     }
     const d = draft;
