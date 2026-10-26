@@ -86,6 +86,10 @@ export default function OverlayWindow() {
   // 覆盖层保留可重试/Esc 退出，Rust 侧失败路径不 hide）。
   const recordMode = display?.intent === "record";
   const [recordError, setRecordError] = useState<string | null>(null);
+  // N2 输出格式（录制横幅分段开关，默认 MP4）：覆盖层窗口常驻复用 → 该选择**跨
+  // 轮保持**（用户偏好惯性——连录多条 GIF 时不逐轮重选；新一轮 payload 到达不重置，
+  // 与 pickerMode/recordError 的「每轮清态」不同）。
+  const [recordFormat, setRecordFormat] = useState<"mp4" | "gif">("mp4");
 
   // —— M2 Task M5 取色器（Snipaste 式）——
   // C 进入/退出拾色模式；移动 = 浮签跟随光标实时显示光标下像素（冻结帧缓冲直采，
@@ -204,7 +208,7 @@ export default function OverlayWindow() {
       if (display.intent === "record") {
         try {
           await invoke("record_start_region", {
-            req: { displayId: display.displayId, rect: r },
+            req: { displayId: display.displayId, rect: r, format: recordFormat },
           });
           if (flowRef.current !== myFlow) return;
         } catch (err) {
@@ -633,7 +637,9 @@ export default function OverlayWindow() {
           fontSize: 12, color: "#7ED087" }}>{t("overlay.picker.copied", { color: copied })}</div>
       )}
       {/* N1 录制模式提示横幅：与截图模式唯一的常驻视觉差异（选区视觉刻意一致）。
-          录制启动失败时替换为红色行内错误（覆盖层保留可重试）。 */}
+          N2：横幅右侧追加 MP4/GIF 分段开关（输出格式在录制开始前选择，确认时随
+          record_start_region 下发；格式选中态为高亮胶囊）。录制启动失败时整组替换
+          为红色行内错误（覆盖层保留可重试）。 */}
       {recordMode && (
         recordError ? (
           <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
@@ -642,9 +648,28 @@ export default function OverlayWindow() {
             fontSize: 12, color: "#E5484D", maxWidth: "80vw" }}>{recordError}</div>
         ) : (
           <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
-            zIndex: 10, pointerEvents: "none", background: "#0D1522",
-            border: "1px solid #22405F", borderRadius: 8, padding: "4px 12px",
-            fontSize: 12, color: "#D8E2EE" }}>{t("overlay.record.hint")}</div>
+            zIndex: 10, display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ background: "#0D1522", border: "1px solid #22405F", borderRadius: 8,
+              padding: "4px 12px", fontSize: 12, color: "#D8E2EE", pointerEvents: "none" }}>
+              {t("overlay.record.hint")}
+            </div>
+            <div role="group" style={{ display: "flex", background: "#0D1522",
+              border: "1px solid #22405F", borderRadius: 8, overflow: "hidden" }}>
+              {([
+                { id: "mp4" as const, label: t("record.format.mp4") },
+                { id: "gif" as const, label: t("record.format.gif") },
+              ]).map(({ id, label }) => (
+                <button key={id} type="button" aria-pressed={recordFormat === id}
+                  onClick={() => setRecordFormat(id)}
+                  style={{ padding: "4px 10px", fontSize: 12, lineHeight: "16px",
+                    cursor: "pointer", border: "none",
+                    background: recordFormat === id ? "#22405F" : "transparent",
+                    color: recordFormat === id ? "#FFFFFF" : "#8A8F98" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         )
       )}
       {/* 选区确认浮条：canvas 的兄弟节点（fixed 定位）。pointer/dblclick 处理器都只挂在

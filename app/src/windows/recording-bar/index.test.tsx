@@ -51,3 +51,20 @@ describe("recording bar region title (N1)", () => {
     expect(screen.queryByText("Region 1600×1200")).toBeNull();
   });
 });
+
+describe("recording bar format chip (N2)", () => {
+  it("shows the GIF chip for gif sessions and drops it for mp4 sessions", async () => {
+    render(<RecordingBarWindow />);
+    await act(async () => {});
+    // gif 会话：format=gif → 模式标签在盘（MP4 默认态不出标签）
+    await act(async () => {
+      getTickHandler.current?.({ payload: { session: 1, seconds: 2, paused: false, format: "gif" } });
+    });
+    expect(screen.getByText("GIF")).toBeTruthy();
+    // mp4 会话（新 session）：标签消失（跨会话残留清理）
+    await act(async () => {
+      getTickHandler.current?.({ payload: { session: 2, seconds: 4, paused: false, format: "mp4" } });
+    });
+    expect(screen.queryByText("GIF")).toBeNull();
+  });
+});

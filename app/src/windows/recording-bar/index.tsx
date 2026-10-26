@@ -18,6 +18,9 @@ export default function RecordingBarWindow() {
   // N1：区域录制的选区逻辑尺寸（「区域 W×H」标题）；null = 全屏录制（不显示标题）。
   // 数据源与时间同通道（tick push + mount pull），每会话刷新——全屏会话自动清残留。
   const [region, setRegion] = useState<{ w: number; h: number } | null>(null);
+  // N2 输出格式（会话定死，随 tick/status 下发）：gif 时条上亮出模式标签——MP4 是
+  // 默认格式不出标签（默认态零噪音，非默认格式才需要「提醒用户这是什么」）。
+  const [format, setFormat] = useState<"mp4" | "gif">("mp4");
   // 上一 tick 的会话号（ref 而非 state：listen 回调闭包不随渲染更新，state 会取到
   // 初值 null 导致每 tick 都判「新会话」而误清当会话错误）。
   const lastSessionRef = useRef<number | null>(null);
@@ -31,15 +34,18 @@ export default function RecordingBarWindow() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    void invoke<{ seconds: number; paused: boolean; regionW?: number; regionH?: number } | null>("record_status")
+    const applyFormat = (f: unknown) =>
+      setFormat(f === "gif" ? "gif" : "mp4");
+    void invoke<{ seconds: number; paused: boolean; regionW?: number; regionH?: number; format?: string } | null>("record_status")
       .then((r) => {
         if (disposed || !r) return;
         setSeconds(r.seconds);
         setPaused(r.paused);
         setRegion(regionOf(r));
+        applyFormat(r.format);
       })
       .catch(() => {});
-    listen<{ session: number; seconds: number; paused: boolean; regionW?: number; regionH?: number }>("hawk://record-tick", (e) => {
+    listen<{ session: number; seconds: number; paused: boolean; regionW?: number; regionH?: number; format?: string }>("hawk://record-tick", (e) => {
       // 新会话（session 由 Rust 每次 record_start 单调取号）：清除上一会话的行内
       // 错误残留（M6 遗留 minor——窗口常驻复用，组件状态跨会话存活）。
       if (lastSessionRef.current !== e.payload.session) {
@@ -49,6 +55,7 @@ export default function RecordingBarWindow() {
       setSeconds(e.payload.seconds);
       setPaused(e.payload.paused);
       setRegion(regionOf(e.payload));
+      applyFormat(e.payload.format);
     }).then((un) => {
       if (disposed) un();
       else unlisten = un;
@@ -98,11 +105,19 @@ export default function RecordingBarWindow() {
     fontSize: 10, lineHeight: 1, color: "#8A8F98", flexShrink: 1, minWidth: 0,
     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
   };
+  // N2：GIF 模式标签（小号主题色胶囊——与暂停「已暂停」同级的模式提示）。
+  const formatChip: CSSProperties = {
+    fontSize: 10, lineHeight: 1, color: "#7ED087", border: "1px solid #2E4A38",
+    borderRadius: 4, padding: "3px 6px", flexShrink: 0,
+  };
 
   return (
     <div style={bar} role="status" aria-label={t("record.barLabel")}>
       <style>{`@keyframes hawksnap-rec-pulse { 50% { opacity: 0.35; } }`}</style>
       <span style={dot} aria-hidden="true" />
+      {format === "gif" && (
+        <span style={formatChip} title={t("record.format.gif")}>{t("record.format.gif")}</span>
+      )}
       {region && (
         <span style={regionLabel} title={t("record.regionTitle", region)}>
           {t("record.regionTitle", region)}

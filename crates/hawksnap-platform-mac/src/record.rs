@@ -302,6 +302,199 @@ pub fn region_stream_params(
 }
 
 // ---------------------------------------------------------------------------
+// N2 GIF 旁路抽帧：节拍 + 降采样 + 有界帧队列（纯逻辑可测）
+// ---------------------------------------------------------------------------
+
+/// GIF 抽帧节拍：15fps（plan F8 口径：800×600@15fps）。
+pub const GIF_TAP_FPS: f64 = 15.0;
+
+/// 抽帧最长边（像素）：抽出的 RGBA 帧最长边 ≤800，短边等比（plan：region 尺寸
+/// 多变 → 最长边 800 下采样、保持纵横比）。
+pub const GIF_MAX_EDGE_PX: u32 = 800;
+
+/// 帧队列字节预算（plan 裁定 32MB，超出丢最旧）：按 800×450×4 ≈ 1.4MB/帧约容纳
+/// 22 帧。注意语义：预算是「录制期间积累帧」的内存上限——超预算截断为**最近**
+/// 帧（drop-oldest 保最新），长录制的 GIF 覆盖收尾窗口而非全程（诚实边界，任务
+/// 报告记录）。编码侧 gifski 自身的管线缓冲另有界（crossbeam bounded）。
+pub const GIF_LANE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+/// 抽帧节拍判定（纯函数可测）：距上次抽帧的 PTS 差 ≥1/15s 即抽。`last = None`
+/// 表示本会话尚无抽帧（首帧必抽）。输入是**平移后** PTS（PauseClock 出口，与
+/// MP4 append 同值）——暂停期回调整体早退、无帧投喂，故 GIF 时间线与 MP4 同构
+/// （暂停 = 两侧共同的空洞）。阈值带 1µs 容差：30fps 源的「隔帧」PTS 差恰为
+/// 1/15s，浮点累计抖动不应造成偶发跳帧（StreamGate 同款容差哲学）。
+pub fn gif_tap_due(last: Option<f64>, pts: f64) -> bool {
+    match last {
+        None => true,
+        Some(l) => pts - l >= 1.0 / GIF_TAP_FPS - 1e-9,
+    }
+}
+
+/// 降采样目标尺寸（纯函数可测）：最长边 ≤max_edge 时不缩放；超限等比缩放，
+/// 双边四舍五入且下限 1（与 hawksnap_core::crop::rgba_thumbnail 同口径）。
+pub fn gif_target_dims(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
+    let longest = w.max(h);
+    if longest <= max_edge || longest == 0 {
+        return (w, h);
+    }
+    let scale = max_edge as f64 / longest as f64;
+    (
+        (((w as f64) * scale).round() as u32).max(1),
+        (((h as f64) * scale).round() as u32).max(1),
+    )
+}
+
+/// BGRA 帧 → RGBA 字节 + 面积平均降采样（纯函数可测，热路径 ~O(src 像素)）。
+///
+/// SCStream 交付 BGRA（kCVPixelFormatType_32BGRA），gifski 吃 RGBA8——swizzle 与
+/// 降采样一趟完成。缩放为盒式滤波（每个目标像素取源块均值）：缩小时等效 CGBitmap
+/// Context 的区域平均插值，1:1 时退化为逐像素 swizzle（同一代码路径，无双实现）。
+/// `stride`（bytesPerRow）可与 `w*4` 不同（IOSurface 行对齐），按行取源。
+///
+/// 返回 (rgba, nw, nh)；输入异常（零尺寸 / stride 不足以容纳一行 / max_edge 0）
+/// → None（调用方禁用 GIF 通道，不影响 MP4）。
+pub fn downsample_bgra_to_rgba_max_edge(
+    bgra: &[u8],
+    w: u32,
+    h: u32,
+    stride: usize,
+    max_edge: u32,
+) -> Option<(Vec<u8>, u32, u32)> {
+    if w == 0 || h == 0 || max_edge == 0 {
+        return None;
+    }
+    let (w, h) = (w as usize, h as usize);
+    if stride < w * 4 {
+        return None;
+    }
+    let (nw, nh) = gif_target_dims(w as u32, h as u32, max_edge);
+    let (nw, nh) = (nw as usize, nh as usize);
+    let mut out = vec![0u8; nw * nh * 4];
+    for dy in 0..nh {
+        // 目标行 dy ← 源块行 [y0, y1)（整数 floor/ceil，块边界不重不漏）。
+        let y0 = dy * h / nh;
+        let y1 = (((dy + 1) * h) + nh - 1) / nh;
+        for dx in 0..nw {
+            let x0 = dx * w / nw;
+            let x1 = (((dx + 1) * w) + nw - 1) / nw;
+            // u64 累加：极端块（8K 源整行聚一列）下 u32 会溢出（w*h*255 > 2^32）。
+            let (mut b, mut g, mut r, mut a) = (0u64, 0u64, 0u64, 0u64);
+            for sy in y0..y1 {
+                let row = &bgra[sy * stride..];
+                for sx in x0..x1 {
+                    let px = &row[sx * 4..sx * 4 + 4];
+                    b += u64::from(px[0]);
+                    g += u64::from(px[1]);
+                    r += u64::from(px[2]);
+                    a += u64::from(px[3]);
+                }
+            }
+            let area = ((x1 - x0) * (y1 - y0)) as u64;
+            let avg = |s: u64| ((s + area / 2) / area) as u8; // 四舍五入
+            let dst = &mut out[(dy * nw + dx) * 4..(dy * nw + dx) * 4 + 4];
+            dst[0] = avg(r);
+            dst[1] = avg(g);
+            dst[2] = avg(b);
+            dst[3] = avg(a);
+        }
+    }
+    Some((out, nw as u32, nh as u32))
+}
+
+/// 抽出的单帧（RGBA8，gifski 输入形态）。`pts` = 平移后 PTS（与 MP4 append 同值）。
+#[derive(Debug)]
+pub struct GifFrame {
+    pub pts: f64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// GIF 旁路通道（单生产者：SCStream 视频 dispatch 队列；消费者：stop 后 app 层）。
+///
+/// 内存账本（plan 裁定）：`Mutex<VecDeque>` + 显式字节记账（rgba.len() 求和），
+/// 超预算丢最旧——`std::sync::mpsc` 无「挤掉最旧」语义，`try_send` 满了只能丢新帧
+/// （丢最新的 GIF 会缺收尾画面），故裁定 VecDeque。热路径成本：MP4 会话对
+/// `gif_lane` 的一次 `Option` 判据（None）；GIF 会话多一次 `enabled()` 原子读。
+pub struct GifLane {
+    enabled: std::sync::atomic::AtomicBool,
+    /// 队列 + 节拍状态同一把锁（视频队列串行写、stop 后单读者；无锁竞争路径）。
+    inner: std::sync::Mutex<LaneInner>,
+}
+
+#[derive(Default)]
+struct LaneInner {
+    frames: std::collections::VecDeque<GifFrame>,
+    bytes: usize,
+    last_tap: Option<f64>,
+    budget: usize,
+}
+
+impl GifLane {
+    pub fn new() -> Self {
+        Self::new_with_budget(GIF_LANE_BUDGET_BYTES)
+    }
+
+    /// 测试注入小预算（生产恒 [`GifLane::new`]）。
+    pub fn new_with_budget(budget: usize) -> Self {
+        Self {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            inner: std::sync::Mutex::new(LaneInner { budget, ..Default::default() }),
+        }
+    }
+
+    /// 通道开关（热路径一次原子读；禁用后回调侧零成本跳过）。
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 禁用本通道（抽帧失败时回调侧调用：MP4 不受影响，GIF 静默缺席）。
+    pub fn disable(&self) {
+        self.enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 节拍判定 + 记时刻（视频队列串行调用，检查与记账同锁无 TOCTOU）。
+    /// 抽帧采样失败时通道整体禁用，「记了节拍却没帧」不会发生。
+    pub fn tap_due(&self, pts: f64) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !gif_tap_due(inner.last_tap, pts) {
+            return false;
+        }
+        inner.last_tap = Some(pts);
+        true
+    }
+
+    /// 入队 + 预算收缩（丢最旧；至少保留最新一帧——单帧超预算也照收，挤空旧帧）。
+    pub fn offer(&self, frame: GifFrame) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.bytes += frame.rgba.len();
+        inner.frames.push_back(frame);
+        while inner.bytes > inner.budget && inner.frames.len() > 1 {
+            if let Some(old) = inner.frames.pop_front() {
+                inner.bytes = inner.bytes.saturating_sub(old.rgba.len());
+            }
+        }
+    }
+
+    /// 排空（stop 后消费者一次性取走；记账同步清零）。
+    pub fn drain(&self) -> Vec<GifFrame> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.bytes = 0;
+        inner.frames.drain(..).collect()
+    }
+
+    /// 当前帧数（诊断/测试）。
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).frames.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // macOS 管线（SCStream → AVAssetWriter）
 // ---------------------------------------------------------------------------
 
@@ -344,6 +537,10 @@ struct RecSession {
     stream: Option<Retained<SCStream>>,
     video_queue: Option<dispatch2::DispatchRetained<dispatch2::DispatchQueue>>,
     audio_queue: Option<dispatch2::DispatchRetained<dispatch2::DispatchQueue>>,
+    /// N2：GIF 旁路通道（None = 纯 MP4 会话，回调侧一次 Option 判据即跳过）。
+    /// 通道自身有界（32MB）且失败自禁用，绝不写 [`RecSession::error`]——
+    /// MP4 的 Failed-gate 语义不被 GIF 侧毒化（plan 硬要求）。
+    gif_lane: Option<std::sync::Arc<GifLane>>,
     /// 管线错误（writer append 失败 / stream didStopWithError）：stop 时上抛。
     error: Option<String>,
     info: RecordingInfo,
@@ -365,6 +562,12 @@ mod cg_display_ffi {
         /// size；N1 区域录制用它推缩放 = 物理像素宽 / 逻辑宽）。
         pub fn CGDisplayBounds(display: CGDirectDisplayID) -> objc2_core_foundation::CGRect;
     }
+}
+
+/// 主显示器 id（N2：app 层 GIF 端到端测试与 start_region 同源的显示器入参；
+/// 生产启动路径的区域 id 来自覆盖层 payload，不经本函数）。
+pub fn main_display_id() -> u32 {
+    unsafe { cg_display_ffi::CGMainDisplayID() }
 }
 
 // —— 帧回调对象（SCStreamOutput + SCStreamDelegate）——
@@ -460,6 +663,16 @@ impl HawkRecordOutput {
 
         if r#type == SCStreamOutputType::Screen {
             self.append_video(s, sb, shifted);
+            // N2 GIF 旁路抽帧（writer append 之后；plan：旁路不毒化 Failed-gate）。
+            // 先 clone Arc 并释放会话锁再抽帧：降采样（~毫秒级 CPU）不阻塞音频
+            // append 与 pause/stop 控制面（它们都要拿这把会话锁）。
+            let lane = s.gif_lane.clone();
+            if let Some(lane) = lane {
+                if lane.enabled() {
+                    drop(session);
+                    tap_gif_lane(&lane, sb, shifted);
+                }
+            }
         } else {
             self.append_audio(s, sb, shifted);
         }
@@ -539,6 +752,81 @@ impl HawkRecordOutput {
     }
 }
 
+/// N2 GIF 抽帧（视频回调线程调用）：节拍判定 → 锁定像素缓冲 → 降采样 → 入队。
+/// 「无图样本」= SCStream 的良性样本形态（实测首个 Screen 样本可无 image buffer
+/// ——append_video 对它同样静默跳过），跳过本次抽帧（不 disable，下次节拍继续）；
+/// lock/基址/降采样类真故障才禁用通道（绝不触碰会话 error——MP4 Failed-gate 不被
+/// GIF 侧毒化的 plan 硬要求落点）。
+fn tap_gif_lane(lane: &GifLane, sb: &CMSampleBuffer, shifted: f64) {
+    if !lane.tap_due(shifted) {
+        return;
+    }
+    match unsafe { sample_gif_frame(sb, shifted) } {
+        GifTap::Frame(f) => lane.offer(f),
+        GifTap::NoImage => {} // 良性无图样本：等下一节拍
+        GifTap::Failed(stage) => {
+            lane.disable();
+            eprintln!(
+                "[record] GIF 抽帧失败（{stage}）：本会话 GIF 通道已禁用（MP4 录制不受影响）"
+            );
+        }
+    }
+}
+
+/// 单帧抽取结果（tap_gif_lane 的处置依据，见函数注）。
+enum GifTap {
+    Frame(GifFrame),
+    /// 样本无 image buffer（SCStream 良性形态，非通道故障）。
+    NoImage,
+    /// 真故障（通道应禁用）。
+    Failed(&'static str),
+}
+
+/// 锁定 CVPixelBuffer 读 BGRA → 降采样+swizzle 成 ≤[`GIF_MAX_EDGE_PX`] 最长边的
+/// RGBA 帧。只读锁定（SCStream 交付的 IOSurface-backed 缓冲，不修改）；解锁在
+/// 返回前无条件执行（闭包内早退也解锁）。
+///
+/// SAFETY: 基址指针只在锁定窗口内解引用，长度 = bytesPerRow × height（CoreVideo
+/// 契约保证 chunky BGRA 缓冲的可达范围）；非 planar 32BGRA 由本管线的
+/// SCStreamConfiguration.pixelFormat 固定。
+unsafe fn sample_gif_frame(sb: &CMSampleBuffer, pts: f64) -> GifTap {
+    use objc2_core_video::{
+        CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+        CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    };
+    // CVPixelBuffer = CVImageBuffer = CVBuffer（类型别名链，record.rs 模块注同款）。
+    let Some(img) = (unsafe { sb.image_buffer() }) else {
+        return GifTap::NoImage;
+    };
+    let buf: &CVPixelBuffer = &img;
+    // SAFETY: Lock/Unlock 是 objc2 生成的**裸 extern**（非安全封装，Get* 系列才是
+    // 安全 wrapper）——调用面为系统契约的合法缓冲引用；返回码非 0 时直接失败
+    //（未成功锁定则不调用 unlock——对称性由 Apple 文档约束）。
+    let locked = unsafe { CVPixelBufferLockBaseAddress(buf, CVPixelBufferLockFlags::ReadOnly) };
+    if locked != 0 {
+        return GifTap::Failed("CVPixelBuffer 锁定失败");
+    }
+    let out = (|| {
+        let w = CVPixelBufferGetWidth(buf) as u32;
+        let h = CVPixelBufferGetHeight(buf) as u32;
+        let stride = CVPixelBufferGetBytesPerRow(buf);
+        let base = CVPixelBufferGetBaseAddress(buf) as *const u8;
+        if base.is_null() {
+            return GifTap::Failed("CVPixelBuffer 基址为空");
+        }
+        // SAFETY: 锁定窗口内的只读切片；长度按行对齐契约覆盖整幅缓冲。
+        let data = unsafe { std::slice::from_raw_parts(base, stride * h as usize) };
+        match downsample_bgra_to_rgba_max_edge(data, w, h, stride, GIF_MAX_EDGE_PX) {
+            Some((rgba, nw, nh)) => GifTap::Frame(GifFrame { pts, width: nw, height: nh, rgba }),
+            None => GifTap::Failed("降采样输入异常"),
+        }
+    })();
+    // SAFETY: 与上方成功 lock 成对解锁。
+    unsafe { CVPixelBufferUnlockBaseAddress(buf, CVPixelBufferLockFlags::ReadOnly) };
+    out
+}
+
 /// 运行中的录屏器：`start` → `pause`/`resume`（幂等）→ `stop`（阻塞收尾）。
 /// app 层持 `Mutex<Option<ScreenRecorder>>`。
 pub struct ScreenRecorder {
@@ -572,7 +860,16 @@ impl ScreenRecorder {
     /// SCStream（视频 BGRA@30fps + 系统声 48k/2ch）→ AVAssetWriter（h264+AAC → MP4）。
     /// 阻塞至 startCapture 完成（~百 ms 级，调用方为 async 命令线程，不卡主线程）。
     pub fn start(output_path: PathBuf) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::Main, None)
+        Self::begin(output_path, DisplayPick::Main, None, None)
+    }
+
+    /// N2 全屏 + GIF 旁路：[`Self::start`] 的抽帧形态（回调按 15fps 降采样攒帧，
+    /// stop 前 lane 由调用方消费）。
+    pub fn start_gif(
+        output_path: PathBuf,
+        gif_lane: std::sync::Arc<GifLane>,
+    ) -> Result<ScreenRecorder, String> {
+        Self::begin(output_path, DisplayPick::Main, None, Some(gif_lane))
     }
 
     /// N1 区域录制启动：指定显示器 + 选区逻辑矩形（display 本地 points，左上原点，
@@ -584,14 +881,27 @@ impl ScreenRecorder {
         display_id: u32,
         region: LogicalRect,
     ) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::ById(display_id), Some(region))
+        Self::begin(output_path, DisplayPick::ById(display_id), Some(region), None)
     }
 
-    /// start / start_region 的公共实现（N1 参数化：显示器挑选 + 可选区域裁剪）。
+    /// N2 区域 + GIF 旁路：[`Self::start_region`] 的抽帧形态（MP4 管线原样不动，
+    /// 仅多一条旁路；抽出的帧最长边 ≤[`GIF_MAX_EDGE_PX`]）。
+    pub fn start_region_gif(
+        output_path: PathBuf,
+        display_id: u32,
+        region: LogicalRect,
+        gif_lane: std::sync::Arc<GifLane>,
+    ) -> Result<ScreenRecorder, String> {
+        Self::begin(output_path, DisplayPick::ById(display_id), Some(region), Some(gif_lane))
+    }
+
+    /// start / start_region 的公共实现（N1 参数化：显示器挑选 + 可选区域裁剪；
+    /// N2 参数化：可选 GIF 旁路通道——None = 纯 MP4 会话）。
     fn begin(
         output_path: PathBuf,
         pick: DisplayPick,
         region: Option<LogicalRect>,
+        gif_lane: Option<std::sync::Arc<GifLane>>,
     ) -> Result<ScreenRecorder, String> {
         if output_path.exists() {
             return Err(format!("输出文件已存在: {}", output_path.display()));
@@ -869,6 +1179,7 @@ impl ScreenRecorder {
             stream: Some(stream),
             video_queue: Some(video_queue),
             audio_queue: Some(audio_queue),
+            gif_lane,
             error: None,
             info: RecordingInfo {
                 width: w as u32,
@@ -1144,6 +1455,137 @@ mod tests {
         assert_eq!(g.accept(1.0), Some(1.0));
         assert_eq!(g.accept(1.0 + 5e-7), None); // 0.5µs 内视为同帧
         assert_eq!(g.accept(1.0 + 1e-5), Some(1.0 + 1e-5));
+    }
+
+    // —— N2 GIF 抽帧：节拍 + 队列 + 降采样（纯逻辑） ——
+
+    #[test]
+    fn gif_tap_due_first_frame_and_15fps_cadence() {
+        // 首帧必抽。
+        assert!(gif_tap_due(None, 100.0));
+        // 1/30s 间隔（30fps 相邻帧）→ 不抽。
+        let t0 = 100.0;
+        assert!(!gif_tap_due(Some(t0), t0 + 1.0 / 30.0));
+        // 恰好 1/15s → 抽。
+        assert!(gif_tap_due(Some(t0), t0 + 1.0 / 15.0));
+        // 更长间隔（恢复瞬间跨暂停）→ 抽。
+        assert!(gif_tap_due(Some(t0), t0 + 5.0));
+        // 回退/重复 PTS（gate 已挡，防御）→ 不抽（负差值不满足阈值）。
+        assert!(!gif_tap_due(Some(t0), t0 - 0.1));
+    }
+
+    fn test_frame(pts: f64, w: u32, h: u32, fill: u8) -> GifFrame {
+        GifFrame { pts, width: w, height: h, rgba: vec![fill; (w * h * 4) as usize] }
+    }
+
+    #[test]
+    fn gif_lane_queue_holds_within_budget_and_keeps_order() {
+        let lane = GifLane::new_with_budget(1000);
+        // 100 字节/帧 × 8 = 800 < 1000：全保留、顺序保持。
+        for i in 0..8 {
+            lane.offer(test_frame(i as f64, 5, 5, 1)); // 5*5*4 = 100 字节
+        }
+        assert_eq!(lane.len(), 8);
+        let frames = lane.drain();
+        assert_eq!(frames.iter().map(|f| f.pts as usize).collect::<Vec<_>>(), (0..8).collect::<Vec<_>>());
+        assert!(lane.is_empty(), "drain 后队列空");
+    }
+
+    #[test]
+    fn gif_lane_drops_oldest_over_budget_and_accounts_bytes() {
+        let lane = GifLane::new_with_budget(1000);
+        for i in 0..15 {
+            lane.offer(test_frame(i as f64, 5, 5, 1)); // 每帧 100 字节
+        }
+        // 预算 1000 → 保留最后 10 帧（1000/100 = 10），最旧的 5 帧被挤掉。
+        let frames = lane.drain();
+        assert_eq!(frames.len(), 10);
+        assert_eq!(frames.first().unwrap().pts as usize, 5, "最旧被丢，从第 5 帧起");
+        assert_eq!(frames.last().unwrap().pts as usize, 14, "最新保留");
+        assert_eq!(frames.iter().map(|f| f.rgba.len()).sum::<usize>(), 1000, "字节记账恰贴预算");
+        // drain 后重新记账：再入队不受旧账污染。
+        lane.offer(test_frame(99.0, 5, 5, 1));
+        assert_eq!(lane.len(), 1);
+    }
+
+    #[test]
+    fn gif_lane_oversized_single_frame_is_kept_alone() {
+        // 单帧 > 预算：仍入队（挤空全部旧帧，至少保最新——丢新帧会让 GIF 缺收尾）。
+        let lane = GifLane::new_with_budget(100);
+        lane.offer(test_frame(1.0, 5, 5, 1));
+        lane.offer(test_frame(2.0, 10, 10, 1)); // 400 字节 > 100
+        let frames = lane.drain();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].pts as usize, 2);
+    }
+
+    #[test]
+    fn gif_lane_disable_stops_offers_visibility() {
+        let lane = GifLane::new();
+        assert!(lane.enabled());
+        lane.disable();
+        assert!(!lane.enabled());
+    }
+
+    #[test]
+    fn gif_target_dims_scales_longest_edge_and_keeps_small() {
+        // 800×600 恰在上限：不缩放。
+        assert_eq!(gif_target_dims(800, 600, 800), (800, 600));
+        // 1600×1200 → 800×600。
+        assert_eq!(gif_target_dims(1600, 1200, 800), (800, 600));
+        // 竖屏：1200×1600 → 600×800（最长边钳制、比例保持）。
+        assert_eq!(gif_target_dims(1200, 1600, 800), (600, 800));
+        // 小图原样。
+        assert_eq!(gif_target_dims(320, 240, 800), (320, 240));
+        // 奇数比例：3×1 → 最长边 2 → 2×1（round 后下限 1）。
+        assert_eq!(gif_target_dims(3, 1, 2), (2, 1));
+    }
+
+    #[test]
+    fn downsample_swizzles_bgra_to_rgba_identity_when_within_edge() {
+        // 2×1：左 BGRA(1,2,3,255) 右 (10,20,30,255) → RGBA swizzle。
+        let bgra = [3u8, 2, 1, 255, 30, 20, 10, 255];
+        let (rgba, nw, nh) = downsample_bgra_to_rgba_max_edge(&bgra, 2, 1, 8, 800).unwrap();
+        assert_eq!((nw, nh), (2, 1));
+        assert_eq!(rgba, [1, 2, 3, 255, 10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn downsample_area_averages_and_honors_stride() {
+        // 4×2 → 2×1：两列各 2×2 块取均值（4 列偶分 2 块）；stride=20（行尾 4 字节
+        // padding 不参与）。源每行 = 红×2 + 绿×2 + pad，行0 行1 相同：
+        // 左块 2×2 红 → (255,0,0,255)，右块 2×2 绿 → (0,255,0,255)。
+        let mut bgra = Vec::new();
+        for _ in 0..2 {
+            for (b, g, r, a) in [(0u8, 0, 255, 255), (0, 0, 255, 255), (0, 255, 0, 255), (0, 255, 0, 255)] {
+                bgra.extend_from_slice(&[b, g, r, a]);
+            }
+            bgra.extend_from_slice(&[9, 9, 9, 9]); // 行尾 padding
+        }
+        let (rgba, nw, nh) = downsample_bgra_to_rgba_max_edge(&bgra, 4, 2, 20, 2).unwrap();
+        assert_eq!((nw, nh), (2, 1), "4 长边缩到 2、高度取整到 1");
+        assert_eq!(rgba, [255, 0, 0, 255, 0, 255, 0, 255], "块均值 + BGRA→RGBA");
+    }
+
+    #[test]
+    fn downsample_rejects_degenerate_inputs() {
+        let ok = [0u8; 8];
+        assert!(downsample_bgra_to_rgba_max_edge(&ok, 0, 1, 8, 800).is_none());
+        assert!(downsample_bgra_to_rgba_max_edge(&ok, 2, 0, 8, 800).is_none());
+        assert!(downsample_bgra_to_rgba_max_edge(&ok, 2, 1, 8, 0).is_none());
+        // stride 不足以容纳一行（4 px 需 16 字节）→ None。
+        assert!(downsample_bgra_to_rgba_max_edge(&ok, 4, 1, 8, 800).is_none());
+    }
+
+    #[test]
+    fn downsample_large_roundtrip_preserves_dims_and_alpha() {
+        // 1600×1200 → 800×600：尺寸契约 + 纯色源下字节恒定（均值不变量）。
+        let (w, h) = (1600u32, 1200u32);
+        let bgra = vec![7u8; (w * h * 4) as usize];
+        let (rgba, nw, nh) = downsample_bgra_to_rgba_max_edge(&bgra, w, h, (w * 4) as usize, 800).unwrap();
+        assert_eq!((nw, nh), (800, 600));
+        assert_eq!(rgba.len(), 800 * 600 * 4);
+        assert!(rgba.iter().all(|&b| b == 7), "纯色均值不变");
     }
 
     // —— 输出路径格式 ——

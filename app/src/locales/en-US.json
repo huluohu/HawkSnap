@@ -105,6 +105,8 @@
   "editor.saveFailed": "Save failed: {message}",
   "record.barLabel": "HawkSnap Recording",
   "record.regionTitle": "Region {w}×{h}",
+  "record.format.mp4": "MP4",
+  "record.format.gif": "GIF",
   "record.pause": "Pause",
   "record.resume": "Resume",
   "record.stop": "Stop",

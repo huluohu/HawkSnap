@@ -7,7 +7,10 @@
 //! 确认、Esc=取消，旧「直接全屏」语义废除），确认路径走 [`record_start_region`]；
 //! 全屏路径 [`record_start`] 命令**保留给 API 兼容**（plan Interfaces 裁定）。
 //! 悬浮条 280×56 常驻复用（与 countdown 同款 show/hide），区域录制在条上追加
-//! 「区域 W×H」标题（选区逻辑尺寸，与覆盖层选区标签同口径）。
+//! 「区域 W×H」标题（选区逻辑尺寸，与覆盖层选区标签同口径）。**N2 输出格式**：
+//! 覆盖层录制横幅的 MP4/GIF 分段开关 → 会话 `format`（中途不可切）；GIF 会话 =
+//! MP4 管线原样 + 旁路抽帧（平台侧 GifLane 32MB 有界队列），stop 时编码 .gif
+//! 入库（kind 同 recording），编码失败降级保留 MP4（见 [`record_stop`] 注）。
 //!
 //! ## 状态机（纯逻辑可测）
 //!
@@ -38,6 +41,35 @@ use hawksnap_platform_mac::record::recording_output_path;
 // ---------------------------------------------------------------------------
 // 纯逻辑（可测）：状态机 + 计时
 // ---------------------------------------------------------------------------
+
+/// 录制输出格式（N2）：overlay 录制模式横幅的分段开关（MP4 | GIF，默认 MP4）→
+/// record_start / record_start_region 的 `format` 参数 → 会话。MP4 = 既有管线
+/// 零变化（无抽帧热路径成本）；GIF = MP4 管线原样 + 旁路抽帧通道（gif.rs 编码）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordFormat {
+    Mp4,
+    Gif,
+}
+
+impl RecordFormat {
+    /// tick/status 载荷值（camelCase 契约为单个小写词；悬浮条据此显示模式标签）。
+    pub fn as_payload_str(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Gif => "gif",
+        }
+    }
+}
+
+/// 解析命令入参（纯函数可测）：大小写不敏感；非法值显式拒绝（不静默降级——
+/// 用户选了 GIF 却录出 MP4 是错误行为）。
+pub fn parse_record_format(s: &str) -> Result<RecordFormat, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "mp4" => Ok(RecordFormat::Mp4),
+        "gif" => Ok(RecordFormat::Gif),
+        _ => Err(format!("输出格式非法: {s}（仅支持 mp4 / gif）")),
+    }
+}
 
 /// 录屏阶段。与平台 record.rs 的 phase 数字（0/1/2）解耦——这里是用户可见语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +143,12 @@ struct RecRuntime {
     /// N1：区域录制的选区逻辑尺寸（悬浮条「区域 W×H」标题的数据源，与覆盖层选区
     /// 标签同口径——逻辑 px，非物理）；None = 全屏录制（record_start 兼容路径）。
     region: Option<(u32, u32)>,
+    /// N2：输出格式（会话维度定死——录制中途不可切换；悬浮条标签的数据源）。
+    format: RecordFormat,
+    /// N2：GIF 旁路通道（format=GIF 时与平台 ScreenRecorder 共享同一 Arc）。
+    /// stop 时由 record_stop drain（编码在 gif.rs）；MP4 会话恒 None。
+    #[cfg(target_os = "macos")]
+    gif_lane: Option<std::sync::Arc<hawksnap_platform_mac::record::GifLane>>,
 }
 
 static REC: Mutex<Option<RecRuntime>> = Mutex::new(None);
@@ -155,6 +193,8 @@ struct RecordTick {
     region_w: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     region_h: Option<u32>,
+    /// N2：输出格式（"mp4"|"gif"；悬浮条模式标签数据源，每会话定死）。
+    format: &'static str,
 }
 
 /// pull 通道载荷（悬浮条 mount 拉取补显——push 早于 listen 必丢，同 countdown）。
@@ -169,6 +209,8 @@ pub struct RecordStatus {
     pub region_w: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region_h: Option<u32>,
+    /// N2：输出格式（"mp4"|"gif"，同 RecordTick）。
+    pub format: &'static str,
 }
 
 #[tauri::command]
@@ -184,6 +226,7 @@ pub fn record_status() -> Option<RecordStatus> {
         active: true,
         region_w: rt.region.map(|r| r.0),
         region_h: rt.region.map(|r| r.1),
+        format: rt.format.as_payload_str(),
     })
 }
 
@@ -202,14 +245,19 @@ fn movies_dir() -> Option<std::path::PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// F6 / 悬浮条入口：启动全屏（主显示器）录制 + 拉起悬浮条 + 启动 tick 广播。
+/// N2：`format` = "mp4"|"gif"（None/缺省 = mp4——API 兼容路径的既有调用方零变化）。
 #[tauri::command(async)]
-pub fn record_start(app: AppHandle) -> Result<(), String> {
+pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String> {
     // 平台门槛（范围裁定）：录屏管线仅 macOS；其余平台显式拒绝（不静默）。
     #[cfg(not(target_os = "macos"))]
     return Err("仅 macOS 支持录屏（跨平台适配归后续计划）".into());
 
     #[cfg(target_os = "macos")]
     {
+    let fmt = match format.as_deref() {
+        None => RecordFormat::Mp4,
+        Some(s) => parse_record_format(s)?,
+    };
     // 独占检查：构造（ScreenRecorder::start 阻塞百 ms 级）在锁外完成后装入；
     // 并发第二请求在锁上排队后走 is_some 拒绝 + 半成品清理。
     {
@@ -238,8 +286,21 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
     // 此后 ScreenRecorder::start 内的枚举必然能按 PID 匹配到本进程。
     show_recording_bar(&app)?;
 
+    // N2：gif 会话先建旁路通道，与 ScreenRecorder 共享同一 Arc（回调生产 / stop 消费）。
+    let gif_lane = match fmt {
+        RecordFormat::Gif => Some(std::sync::Arc::new(
+            hawksnap_platform_mac::record::GifLane::new(),
+        )),
+        RecordFormat::Mp4 => None,
+    };
     // 构造录屏器（阻塞至 startCapture 完成，~百 ms 级；async 命令线程，不卡主线程）。
-    let recorder = match hawksnap_platform_mac::record::ScreenRecorder::start(path.clone()) {
+    let recorder = match match fmt {
+        RecordFormat::Gif => hawksnap_platform_mac::record::ScreenRecorder::start_gif(
+            path.clone(),
+            gif_lane.clone().expect("gif 分支已建通道"),
+        ),
+        RecordFormat::Mp4 => hawksnap_platform_mac::record::ScreenRecorder::start(path.clone()),
+    } {
         Ok(r) => r,
         Err(e) => {
             // 启动失败：回收刚拉起的悬浮条（无录制不残留 UI；与成功停止路径的
@@ -278,6 +339,9 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
             recorder,
             output_path: path,
             region: None, // 全屏录制（兼容路径）：无区域标题
+            format: fmt,
+            #[cfg(target_os = "macos")]
+            gif_lane,
         });
     }
 
@@ -305,6 +369,14 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
 pub struct RegionReq {
     pub display_id: u64,
     pub rect: Rect,
+    /// N2：输出格式（"mp4"|"gif"）。serde default = "mp4"——旧载荷（N1 契约）
+    /// 缺字段时按 MP4 走，前端可渐进接入。
+    #[serde(default = "default_region_format")]
+    pub format: String,
+}
+
+fn default_region_format() -> String {
+    "mp4".into()
 }
 
 #[tauri::command(async)]
@@ -323,6 +395,7 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
     }
     let display_id = u32::try_from(req.display_id)
         .map_err(|_| format!("显示器 id 非法: {}", req.display_id))?;
+    let fmt = parse_record_format(&req.format)?;
 
     // 屏幕录制权限预检（同 record_start：拒绝 → 深链系统设置 + Err 文案）。
     if !hawksnap_platform_mac::permissions::screen_recording_prechecked() {
@@ -347,11 +420,26 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
         w: req.rect.w as f64,
         h: req.rect.h as f64,
     };
-    let recorder = match hawksnap_platform_mac::record::ScreenRecorder::start_region(
-        path.clone(),
-        display_id,
-        region,
-    ) {
+    // N2：gif 会话先建旁路通道（与 record_start 同款共享 Arc）。
+    let gif_lane = match fmt {
+        RecordFormat::Gif => Some(std::sync::Arc::new(
+            hawksnap_platform_mac::record::GifLane::new(),
+        )),
+        RecordFormat::Mp4 => None,
+    };
+    let recorder = match match fmt {
+        RecordFormat::Gif => hawksnap_platform_mac::record::ScreenRecorder::start_region_gif(
+            path.clone(),
+            display_id,
+            region,
+            gif_lane.clone().expect("gif 分支已建通道"),
+        ),
+        RecordFormat::Mp4 => hawksnap_platform_mac::record::ScreenRecorder::start_region(
+            path.clone(),
+            display_id,
+            region,
+        ),
+    } {
         Ok(r) => r,
         Err(e) => {
             // 启动失败：回收刚拉起的悬浮条（并发守卫同 record_start——条只属于
@@ -383,6 +471,9 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
             output_path: path,
             // 悬浮条标题用选区**逻辑**尺寸（与覆盖层选区标签同口径，用户所见一致）。
             region: Some((req.rect.w, req.rect.h)),
+            format: fmt,
+            #[cfg(target_os = "macos")]
+            gif_lane,
         });
     }
 
@@ -427,9 +518,15 @@ pub fn record_resume() -> Result<(), String> {
     Ok(())
 }
 
-/// 停止：writer 收尾（阻塞 ≤25s）→ 历史入库（kind=recording，
-/// thumb 留空——M0 网格对空 thumbPath 已有占位渲染）→ 关闭悬浮条窗口（终审修复，
-/// 见函数体注；失败路径条保持可见展示行内错误）。返回 MP4 路径。
+/// 停止：writer 收尾（阻塞 ≤25s）→（gif 会话）drain 旁路队列 gifski 编码（硬超时
+/// 60s，正常 ≤10s——F8 预算）→ 历史入库（kind=recording，thumb 留空——M0 网格对
+/// 空 thumbPath 已有占位渲染）→ 关闭悬浮条窗口（终审修复，见函数体注；失败路径
+/// 条保持可见展示行内错误）。返回产物路径（gif 会话 = .gif；编码失败降级 = MP4）。
+///
+/// N2 gif 分支语义：MP4 管线始终收尾（抽帧依赖它的时间线）；GIF 编码成功后删除
+/// MP4 中间产物（用户选定格式 = GIF，目录不残留隐形文件），历史行指向 .gif
+/// （duration = 末帧归零 PTS——GIF 时间线）；编码失败/无帧 → 保留 MP4 原样入库
+/// （「录制必有可用产物」不变量，GIF 静默缺席）。
 #[tauri::command(async)]
 pub fn record_stop(app: AppHandle) -> Result<String, String> {
     let rt = {
@@ -451,11 +548,15 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
 
     // 录制时长（M3 继承项①，入库 duration 列）：stop 收尾**前**取时刻——
     // recorder.stop() 阻塞 ≤25s 不得计入；口径与 tick/record_status 一致。
+    // 注意：gif 会话的实际入库时长换成 GIF 时间线（末帧 PTS），此处值只作降级兜底。
     let duration_secs = recorded_secs(
         rt.started_at.elapsed(),
         rt.paused_total,
         rt.pause_started.map(|t| t.elapsed()),
     );
+    let format = rt.format;
+    #[cfg(target_os = "macos")]
+    let gif_lane = rt.gif_lane.clone(); // Arc 克隆：lane 本体仍随 rt 存活到 stop 完成
 
     let (path, info) = {
         #[cfg(target_os = "macos")]
@@ -469,27 +570,52 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
         }
     };
 
+    // N2：gif 会话 → drain 旁路队列编码 .gif（成功 = 删 MP4 中间产物、产物换
+    // .gif、时长换 GIF 时间线；失败 = eprintln + MP4 降级，产物与入库均不动）。
+    #[cfg(target_os = "macos")]
+    let (artifact, w, h, dur) = if format == RecordFormat::Gif {
+        match crate::gif::finish_gif_recording(gif_lane.as_ref(), &path) {
+            Ok(g) => {
+                // GIF 已成型 → MP4 中间产物删除（best-effort：删除失败仅留痕，
+                // 不失败整个 stop——产物已入库，多余文件不是错误）。
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("[hawksnap] 删除 GIF 会话的 MP4 中间产物失败: {e}");
+                }
+                (g.path, g.width as i64, g.height as i64, g.duration)
+            }
+            Err(e) => {
+                eprintln!("[hawksnap] GIF 编码失败，保留 MP4 产物: {e}");
+                (path.clone(), info.width as i64, info.height as i64, duration_secs)
+            }
+        }
+    } else {
+        (path.clone(), info.width as i64, info.height as i64, duration_secs)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (artifact, w, h, dur) = (path.clone(), 0i64, 0i64, duration_secs);
+
     // 历史入库（旁路语义：失败仅记录，不影响录制产物返回——与历史库总裁定一致）。
     // kind="recording" + duration=录制秒数（M3 继承项①：kind 列语义修正——此前
     // "recording" 塞在 app 列冒充 kind；prune 平权由 history::record 内置裁剪兑现，
     // 录屏不再绕过 500 条保留策略）。app 列保持 "recording"（网格展示口径不变）。
+    // N2：gif 产物同 kind（spec 分组语义）、w/h/duration 取 GIF 实际值。
     #[cfg(target_os = "macos")]
     if let Err(e) = crate::history::record(
         &app,
-        &path.to_string_lossy(),
+        &artifact.to_string_lossy(),
         "",
-        info.width as i64,
-        info.height as i64,
+        w,
+        h,
         "recording",
         "recording",
-        Some(duration_secs),
+        Some(dur),
     ) {
         eprintln!("[hawksnap] 录屏历史入库失败: {e}");
     }
 
     close_recording_bar(&app);
 
-    Ok(path.to_string_lossy().into_owned())
+    Ok(artifact.to_string_lossy().into_owned())
 }
 
 /// F6 toggle 旧入口已随 N1 移除：F6 完整语义改由 overlay::intent::f6_route 分派
@@ -512,6 +638,7 @@ fn emit_initial_tick(app: &AppHandle) {
             paused: false,
             region_w: rt.region.map(|r| r.0),
             region_h: rt.region.map(|r| r.1),
+            format: rt.format.as_payload_str(),
         }
     };
     let _ = app.emit("hawk://record-tick", tick);
@@ -530,6 +657,7 @@ fn spawn_tick_thread(app: AppHandle) {
                 paused: rt.phase == Phase::Paused,
                 region_w: rt.region.map(|r| r.0),
                 region_h: rt.region.map(|r| r.1),
+                format: rt.format.as_payload_str(),
             }
         };
         let _ = app.emit("hawk://record-tick", tick);
@@ -680,9 +808,10 @@ mod tests {
     fn record_tick_serializes_with_session() {
         let s = serde_json::to_string(&RecordTick {
             session: 7, seconds: 65, paused: false, region_w: None, region_h: None,
+            format: "mp4",
         })
         .unwrap();
-        assert_eq!(s, r#"{"session":7,"seconds":65,"paused":false}"#);
+        assert_eq!(s, r#"{"session":7,"seconds":65,"paused":false,"format":"mp4"}"#);
     }
 
     /// N1：区域录制 tick 载荷契约——regionW/regionH 以 camelCase 在场（悬浮条
@@ -691,12 +820,26 @@ mod tests {
     fn record_tick_serializes_region_dims_camel_case() {
         let s = serde_json::to_string(&RecordTick {
             session: 7, seconds: 0, paused: false, region_w: Some(1600), region_h: Some(1200),
+            format: "gif",
         })
         .unwrap();
         assert_eq!(
             s,
-            r#"{"session":7,"seconds":0,"paused":false,"regionW":1600,"regionH":1200}"#
+            r#"{"session":7,"seconds":0,"paused":false,"regionW":1600,"regionH":1200,"format":"gif"}"#
         );
+    }
+
+    /// N2：RecordFormat 载荷与解析契约——小写单词、大小写不敏感解析、非法值拒绝。
+    #[test]
+    fn record_format_parse_and_payload() {
+        assert_eq!(RecordFormat::Mp4.as_payload_str(), "mp4");
+        assert_eq!(RecordFormat::Gif.as_payload_str(), "gif");
+        assert_eq!(parse_record_format("mp4"), Ok(RecordFormat::Mp4));
+        assert_eq!(parse_record_format("GIF"), Ok(RecordFormat::Gif));
+        assert_eq!(parse_record_format(" gif "), Ok(RecordFormat::Gif));
+        // 非法值显式拒绝（不静默降级为 MP4——用户选择必须被尊重或报错）。
+        assert!(parse_record_format("webm").is_err());
+        assert!(parse_record_format("").is_err());
     }
 
     /// N1：RegionReq 反序列化契约（覆盖层 invoke 载荷：camelCase 外壳 + rect 的
@@ -709,6 +852,14 @@ mod tests {
         .unwrap();
         assert_eq!(req.display_id, 2);
         assert_eq!((req.rect.x, req.rect.y, req.rect.w, req.rect.h), (10, 20, 800, 600));
+        // N2：format 缺省 = mp4（N1 旧载荷契约向后兼容）。
+        assert_eq!(req.format, "mp4");
+        // 显式 gif 直传。
+        let req: RegionReq = serde_json::from_str(
+            r#"{"displayId":2,"rect":{"x":0,"y":0,"w":1,"h":1},"format":"gif"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.format, "gif");
     }
 
     /// 会话计数单调：连续取号严格递增（Relaxed 下单线程语义即可保证）。

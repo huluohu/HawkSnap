@@ -74,12 +74,34 @@ describe("overlay record mode (N1)", () => {
   it("record payload routes confirm to record_start_region (full-display shortcut on Enter with no rect)", async () => {
     render(<OverlayWindow />);
     await pushPayload("record", 1);
-    // 无选区 Enter：emptyConfirmRect = 整屏 → record_start_region（req camelCase 契约）
+    // 无选区 Enter：emptyConfirmRect = 整屏 → record_start_region（req camelCase 契约；
+    // format 默认 mp4——N2 分段开关的初始态）
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     });
     expect(invokeMock).toHaveBeenCalledWith("record_start_region", {
-      req: { displayId: 2, rect: { x: 0, y: 0, w: 1440, h: 900 } },
+      req: { displayId: 2, rect: { x: 0, y: 0, w: 1440, h: 900 }, format: "mp4" },
+    });
+  });
+
+  it("record format toggle (N2): segmented control defaults to MP4 and passes gif through invoke", async () => {
+    render(<OverlayWindow />);
+    await pushPayload("record", 1);
+    // 分段开关在盘（提示横幅右侧），默认 MP4 高亮（aria-pressed）
+    const mp4Btn = screen.getByRole("button", { name: "MP4" });
+    const gifBtn = screen.getByRole("button", { name: "GIF" });
+    expect(mp4Btn.getAttribute("aria-pressed")).toBe("true");
+    expect(gifBtn.getAttribute("aria-pressed")).toBe("false");
+    // 切到 GIF → 确认载荷 format=gif（state 流经 invoke 的契约面）
+    await act(async () => {
+      fireEvent.click(gifBtn);
+    });
+    expect(gifBtn.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("record_start_region", {
+      req: { displayId: 2, rect: { x: 0, y: 0, w: 1440, h: 900 }, format: "gif" },
     });
   });
 

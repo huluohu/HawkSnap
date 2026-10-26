@@ -61,7 +61,10 @@ objc2-av-foundation = { version = "0.3", features = [
 objc2-core-media = { version = "0.3", features = [
     "CMBase", "CMTime", "CMSampleBuffer", "objc2-core-video",
 ] }
-objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer"] }
+# N2 GIF 抽帧：CVPixelBufferLock/UnlockBaseAddress 需要 CVBase+CVBuffer+CVReturn
+# features（GetWidth/GetHeight/GetBytesPerRow/GetBaseAddress 需要 CVBuffer）——
+# features 只增，不改版本解析。
+objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVBase", "CVReturn"] }
 block2 = "0.6"
 dispatch2 = "0.3"
 # M6：输出文件名时间戳（%Y-%m-%d-%H%M%S）+ soak 采样 CSV 行时间；与 app 层同版。

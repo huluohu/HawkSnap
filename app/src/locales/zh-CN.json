@@ -105,6 +105,8 @@
   "editor.saveFailed": "保存失败：{message}",
   "record.barLabel": "HawkSnap 录屏",
   "record.regionTitle": "区域 {w}×{h}",
+  "record.format.mp4": "MP4",
+  "record.format.gif": "GIF",
   "record.pause": "暂停",
   "record.resume": "恢复",
   "record.stop": "停止",

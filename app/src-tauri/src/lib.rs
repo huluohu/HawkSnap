@@ -2,6 +2,7 @@ mod bench_mode;
 mod commands;
 mod editor;
 mod g4;
+mod gif;
 mod history;
 mod idle_reaper;
 mod ocr;
