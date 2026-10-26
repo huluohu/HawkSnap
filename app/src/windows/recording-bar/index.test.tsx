@@ -68,3 +68,34 @@ describe("recording bar format chip (N2)", () => {
     expect(screen.queryByText("GIF")).toBeNull();
   });
 });
+
+describe("recording bar pip toggle (N3)", () => {
+  it("invokes pip_update with optimistic on/off and reverts on camera failure", async () => {
+    const calls: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "pip_update") {
+        calls.push({ cmd, args: args ?? {} });
+        // 第三次调用（第二次开启）模拟相机权限拒绝（Rust Err 中文回流）。
+        if (calls.length === 3) return Promise.reject("相机权限未授予：画中画保持关闭（录制不受影响）");
+      }
+      return Promise.resolve(null);
+    });
+    render(<RecordingBarWindow />);
+    await act(async () => {});
+    const btn = () => screen.getByRole("button", { name: "PiP" });
+    // 默认关（aria-pressed=false）→ 点击 = 开启，乐观置位 + invoke 载荷 visible:true。
+    expect(btn().getAttribute("aria-pressed")).toBe("false");
+    await act(async () => { btn().click(); });
+    expect(calls[0]).toEqual({ cmd: "pip_update", args: { visible: true } });
+    expect(btn().getAttribute("aria-pressed")).toBe("true");
+    // 再点击 = 关闭（visible:false）；此前开启失败场景见下。
+    await act(async () => { btn().click(); });
+    expect(calls[1]).toEqual({ cmd: "pip_update", args: { visible: false } });
+    // 失败路径：开启被拒 → 回落 aria-pressed=false + 行内错误（Rust 文案）。
+    await act(async () => { btn().click(); });
+    expect(calls[2].args).toEqual({ visible: true });
+    await act(async () => {}); // flush rejection
+    expect(btn().getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText(/相机权限未授予/)).toBeTruthy();
+  });
+});

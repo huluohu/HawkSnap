@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  HawkSnap 桌面 Info.plist 合并文件（M3 N3）。
+
+  机制（Tauri v2 实证）：tauri.conf.json 的 bundle.macOS.infoPlist 是**路径**（不是
+  map）——指向本文件，打包器（tauri-cli）将其与默认 Info.plist **逐键合并**（本文件
+  键优先）。tauri-build 代码生成器对同目录的 Info.plist 有同款自动探测（
+  tauri-build-2.7.2 src/codegen/context.rs：config_parent.join("Info.plist")），
+  显式写进 tauri.conf.json 使机制自文档化。
+
+  NSCameraUsageDescription：N3 画中画（录制中圆形相机贴片）的 TCC 用途声明——
+  缺失时 macOS 直接 SIGABRT 相机进程（AVCaptureSession startRunning），非可恢复
+  错误，故必须在包内静态声明。未打包（cargo dev/test）的 CLI 进程不读本文件，
+  TCC 按宿主进程归因——权限拒绝路径由平台侧 CameraSession::start 的预检优雅降级
+  （PiP 保持关闭、录制不受影响）。
+-->
+<plist version="1.0">
+  <dict>
+    <key>NSCameraUsageDescription</key>
+    <string>HawkSnap 需要使用相机在录屏时叠加画中画（圆形摄像头贴片）。拒绝授权不影响录屏，仅画中画不可用。</string>
+  </dict>
+</plist>

@@ -220,6 +220,7 @@ mod tests {
             hawksnap_platform_mac::record::main_display_id(),
             region,
             lane.clone(),
+            None, // GIF 证据基线不含 PiP（N3 的 F9 端到端在 pip-f9-probe）
         )
         .expect("start_region_gif");
         std::thread::sleep(Duration::from_secs(10));

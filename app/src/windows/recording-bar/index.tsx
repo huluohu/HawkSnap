@@ -21,6 +21,9 @@ export default function RecordingBarWindow() {
   // N2 输出格式（会话定死，随 tick/status 下发）：gif 时条上亮出模式标签——MP4 是
   // 默认格式不出标签（默认态零噪音，非默认格式才需要「提醒用户这是什么」）。
   const [format, setFormat] = useState<"mp4" | "gif">("mp4");
+  // N3 画中画开关（bar 单侧驱动：pip_update(visible) → 共享 PiPState → 下一帧生效）。
+  // 本地乐观置位 + 失败回落（Err 回流 = 相机不可用/权限拒绝 → 瞬态错误提示，PiP 保持关）。
+  const [pipOn, setPipOn] = useState(false);
   // 上一 tick 的会话号（ref 而非 state：listen 回调闭包不随渲染更新，state 会取到
   // 初值 null 导致每 tick 都判「新会话」而误清当会话错误）。
   const lastSessionRef = useRef<number | null>(null);
@@ -78,6 +81,20 @@ export default function RecordingBarWindow() {
     void invoke<string>("record_stop").catch((e) => setError(String(e)));
   };
 
+  // N3 画中画开关：乐观置位 → pip_update 失败（相机权限未授予/无相机）回落 +
+  // 瞬态错误（Rust Err 文案中文，2s 自动清除避免占满 280px 条）。
+  const pipTimerRef = useRef<number | null>(null);
+  const togglePip = () => {
+    const next = !pipOn;
+    setPipOn(next);
+    void invoke("pip_update", { visible: next }).catch((e) => {
+      setPipOn(false);
+      setError(String(e));
+      if (pipTimerRef.current !== null) window.clearTimeout(pipTimerRef.current);
+      pipTimerRef.current = window.setTimeout(() => setError(null), 2000);
+    });
+  };
+
   const bar: CSSProperties = {
     position: "fixed", inset: 0, display: "flex", alignItems: "center",
     gap: 8, padding: "0 12px", boxSizing: "border-box", background: "#0D1522",
@@ -110,6 +127,12 @@ export default function RecordingBarWindow() {
     fontSize: 10, lineHeight: 1, color: "#7ED087", border: "1px solid #2E4A38",
     borderRadius: 4, padding: "3px 6px", flexShrink: 0,
   };
+  // N3：画中画开关（aria-pressed 高亮——开启态主题色边框区分关态）。
+  const pipBtn: CSSProperties = {
+    ...btn,
+    ...(pipOn ? { border: "1px solid #3E6B4C", color: "#7ED087" } : {}),
+    padding: "5px 8px",
+  };
 
   return (
     <div style={bar} role="status" aria-label={t("record.barLabel")}>
@@ -128,6 +151,9 @@ export default function RecordingBarWindow() {
         {seconds === null ? "00:00" : mmss(seconds)}
       </span>
       {error && <span style={{ fontSize: 10, color: "#E5484D", maxWidth: 80, overflow: "hidden" }}>{error}</span>}
+      <button style={pipBtn} onClick={togglePip} aria-pressed={pipOn} title={t("record.pip")}>
+        {t("record.pip")}
+      </button>
       <button style={btn} onClick={togglePause}>
         {paused ? t("record.resume") : t("record.pause")}
       </button>

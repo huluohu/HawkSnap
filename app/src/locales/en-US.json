@@ -107,6 +107,7 @@
   "record.regionTitle": "Region {w}×{h}",
   "record.format.mp4": "MP4",
   "record.format.gif": "GIF",
+  "record.pip": "PiP",
   "record.pause": "Pause",
   "record.resume": "Resume",
   "record.stop": "Stop",

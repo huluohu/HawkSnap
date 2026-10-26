@@ -48,7 +48,7 @@ fn main() {
         .unwrap_or(3);
     let dir = std::env::temp_dir().join(format!("hawksnap-selfexcl-probe-{}", std::process::id()));
     let path = recording_output_path(&dir, chrono::Local::now()).expect("输出路径");
-    let rec = ScreenRecorder::start(path.clone()).expect("ScreenRecorder::start");
+    let rec = ScreenRecorder::start(path.clone(), None).expect("ScreenRecorder::start");
     std::thread::sleep(std::time::Duration::from_secs(secs));
     let info = rec.stop().expect("ScreenRecorder::stop");
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);

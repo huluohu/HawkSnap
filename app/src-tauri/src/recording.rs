@@ -38,6 +38,9 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use hawksnap_core::geometry::Rect;
 use hawksnap_platform_mac::record::recording_output_path;
 
+#[cfg(target_os = "macos")]
+use hawksnap_platform_mac::record::{PipLane, PipUpdate};
+
 // ---------------------------------------------------------------------------
 // 纯逻辑（可测）：状态机 + 计时
 // ---------------------------------------------------------------------------
@@ -149,6 +152,10 @@ struct RecRuntime {
     /// stop 时由 record_stop drain（编码在 gif.rs）；MP4 会话恒 None。
     #[cfg(target_os = "macos")]
     gif_lane: Option<std::sync::Arc<hawksnap_platform_mac::record::GifLane>>,
+    /// N3：画中画共享道（每会话恒 Some——悬浮条 pip_update 经它实时改状态；PiP
+    /// 默认 visible=false，未开启时热路径零变化）。平台 ScreenRecorder 持同一 Arc。
+    #[cfg(target_os = "macos")]
+    pip_lane: Option<std::sync::Arc<PipLane>>,
 }
 
 static REC: Mutex<Option<RecRuntime>> = Mutex::new(None);
@@ -287,19 +294,25 @@ pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String
     show_recording_bar(&app)?;
 
     // N2：gif 会话先建旁路通道，与 ScreenRecorder 共享同一 Arc（回调生产 / stop 消费）。
+    // N3：画中画道每会话必建（PiP 默认关；悬浮条 pip_update 经共享 Arc 实时改）。
     let gif_lane = match fmt {
         RecordFormat::Gif => Some(std::sync::Arc::new(
             hawksnap_platform_mac::record::GifLane::new(),
         )),
         RecordFormat::Mp4 => None,
     };
+    #[cfg(target_os = "macos")]
+    let pip_lane = Some(std::sync::Arc::new(PipLane::new()));
     // 构造录屏器（阻塞至 startCapture 完成，~百 ms 级；async 命令线程，不卡主线程）。
     let recorder = match match fmt {
         RecordFormat::Gif => hawksnap_platform_mac::record::ScreenRecorder::start_gif(
             path.clone(),
             gif_lane.clone().expect("gif 分支已建通道"),
+            pip_lane.clone(),
         ),
-        RecordFormat::Mp4 => hawksnap_platform_mac::record::ScreenRecorder::start(path.clone()),
+        RecordFormat::Mp4 => {
+            hawksnap_platform_mac::record::ScreenRecorder::start(path.clone(), pip_lane.clone())
+        }
     } {
         Ok(r) => r,
         Err(e) => {
@@ -342,6 +355,8 @@ pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String
             format: fmt,
             #[cfg(target_os = "macos")]
             gif_lane,
+            #[cfg(target_os = "macos")]
+            pip_lane,
         });
     }
 
@@ -420,24 +435,28 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
         w: req.rect.w as f64,
         h: req.rect.h as f64,
     };
-    // N2：gif 会话先建旁路通道（与 record_start 同款共享 Arc）。
+    // N2：gif 会话先建旁路通道（与 record_start 同款共享 Arc）；N3：pip 道每会话必建。
     let gif_lane = match fmt {
         RecordFormat::Gif => Some(std::sync::Arc::new(
             hawksnap_platform_mac::record::GifLane::new(),
         )),
         RecordFormat::Mp4 => None,
     };
+    #[cfg(target_os = "macos")]
+    let pip_lane = Some(std::sync::Arc::new(PipLane::new()));
     let recorder = match match fmt {
         RecordFormat::Gif => hawksnap_platform_mac::record::ScreenRecorder::start_region_gif(
             path.clone(),
             display_id,
             region,
             gif_lane.clone().expect("gif 分支已建通道"),
+            pip_lane.clone(),
         ),
         RecordFormat::Mp4 => hawksnap_platform_mac::record::ScreenRecorder::start_region(
             path.clone(),
             display_id,
             region,
+            pip_lane.clone(),
         ),
     } {
         Ok(r) => r,
@@ -474,6 +493,8 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
             format: fmt,
             #[cfg(target_os = "macos")]
             gif_lane,
+            #[cfg(target_os = "macos")]
+            pip_lane,
         });
     }
 
@@ -516,6 +537,36 @@ pub fn record_resume() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     rt.recorder.resume();
     Ok(())
+}
+
+/// N3 画中画实时调整（悬浮条开关；未来拖拽同通道）：部分更新语义——缺席字段保持
+/// 现值。visible=true 时平台侧完成 TCC 预检 + AVCaptureSession 启动；相机不可用/
+/// 权限拒绝 → Err 回流（悬浮条瞬态错误提示），**visible 回落 false、录制继续**
+/// （LADDER：相机缺席 = PiP 静默缺席，绝不阻塞录制）。x/y/size 只改共享状态——
+/// SCStream 视频回调逐帧读取，下一帧生效（≤33ms @30fps）。暂停期间同样可调
+/// （回调丢帧中，恢复后下一帧生效）。
+#[tauri::command(async)]
+pub fn pip_update(
+    x: Option<Option<f64>>,
+    y: Option<Option<f64>>,
+    size: Option<f64>,
+    visible: Option<bool>,
+) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (x, y, size, visible);
+        return Err("仅 macOS 支持画中画".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let guard = lock_rec();
+        let rt = guard.as_ref().ok_or_else(|| "没有进行中的录屏".to_string())?;
+        let lane = rt
+            .pip_lane
+            .clone()
+            .ok_or_else(|| "本会话不支持画中画".to_string())?;
+        lane.update(PipUpdate { x, y, size, visible })
+    }
 }
 
 /// 停止：writer 收尾（阻塞 ≤25s）→（gif 会话）drain 旁路队列 gifski 编码（硬超时

@@ -62,10 +62,14 @@ use objc2_av_foundation::{
     AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor,
     AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeAudio, AVMediaTypeVideo,
     AVVideoCodecTypeH264,
+    // N3 相机画中画：采集会话族（features 见 Cargo.toml 注）。
+    AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
+    AVCaptureOutput, AVCaptureSession, AVCaptureVideoDataOutput,
+    AVCaptureVideoDataOutputSampleBufferDelegate,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::{kCMTimeInvalid, CMSampleBuffer, CMSampleTimingInfo, CMTime};
-use objc2_core_video::kCVPixelFormatType_32BGRA;
+use objc2_core_video::{kCVPixelFormatType_32BGRA, CVPixelBuffer, CVPixelBufferLockFlags};
 use objc2::runtime::NSObject;
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL, NSError, NSObjectProtocol};
 use objc2_screen_capture_kit::{
@@ -495,6 +499,294 @@ impl GifLane {
 }
 
 // ---------------------------------------------------------------------------
+// N3 画中画（PiP）：状态 + 几何 + 合成（纯逻辑可测）
+// ---------------------------------------------------------------------------
+
+/// PiP 用户可调尺寸的边界（**逻辑 px**——用户旋钮口径；像素尺寸 = 逻辑 × 显示缩放，
+/// 另受「不超过主画面短边」防御钳制。plan 约束的 min 64 / max 480 落在旋钮上）。
+pub const PIP_MIN_SIZE_LOGICAL: f64 = 64.0;
+pub const PIP_MAX_SIZE_LOGICAL: f64 = 480.0;
+/// 默认尺寸（plan：右下角 240px）与默认边距（逻辑 px）。
+pub const PIP_DEFAULT_SIZE_LOGICAL: f64 = 240.0;
+pub const PIP_DEFAULT_MARGIN_LOGICAL: f64 = 24.0;
+/// 描边宽度（逻辑 px；像素 = round(2 × scale)，钳制 [2, 8]）。
+pub const PIP_BORDER_LOGICAL: f64 = 2.0;
+
+/// PiP 状态（共享于悬浮条命令与视频回调；逻辑坐标、**帧内容坐标系**——区域录制
+/// 时 x/y 相对选区左上，全屏时相对显示器左上，与覆盖层 webview 的 clientX/Y 同系）。
+///
+/// `x/y = None` = **默认右下角**（帧尺寸在合成时才可知，故默认位以哨兵表达，
+/// 合成时按帧尺寸 + [`PIP_DEFAULT_MARGIN_LOGICAL`] 计算——plan「默认右下角 240px」
+/// 的语义化形态，状态本身不假设帧尺寸）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PipState {
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub size: f64,
+    pub visible: bool,
+}
+
+impl Default for PipState {
+    fn default() -> Self {
+        Self { x: None, y: None, size: PIP_DEFAULT_SIZE_LOGICAL, visible: false }
+    }
+}
+
+/// pip_update 的部分更新载荷（缺席字段保持现值——悬浮条开关只发 visible，
+/// 未来拖拽只发 x/y，全量语义由调用方按需组合）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PipUpdate {
+    pub x: Option<Option<f64>>,
+    pub y: Option<Option<f64>>,
+    pub size: Option<f64>,
+    pub visible: Option<bool>,
+}
+
+/// 合成后的 PiP 矩形（主画面**像素**空间，左上原点、方形、内接圆）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PipRect {
+    pub x: u32,
+    pub y: u32,
+    pub size: u32,
+    /// 描边宽度（像素，圆环内侧）。
+    pub border: u32,
+}
+
+/// PiP 几何（纯函数可测）：PiPState（逻辑）→ 主画面像素空间的方形 rect。
+///
+/// - 不可见 / 主画面退化（<2px）/ 缩放异常 → None（该帧不合成，直接直通）。
+/// - size：逻辑钳制 [64, 480] → ×scale 取整 → 再钳「不超过主画面短边」
+///   （极小区域录制的防御——PiP 永不大于主画面）。
+/// - 位置：None → 右下角默认（margin ×scale）；Some → round(逻辑×scale) 后
+///   夹取进 [0, 主画面 - size]（PiP 完整在界内，plan「clamp in-bounds」）。
+/// - 描边像素：round(2×scale) 钳 [2, 8]（1x 下 2px、3x 下 6px，视觉恒定）。
+pub fn pip_rect_px(main_w: u32, main_h: u32, scale: f64, st: &PipState) -> Option<PipRect> {
+    if !st.visible || main_w < 2 || main_h < 2 {
+        return None;
+    }
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let size_l = st.size.clamp(PIP_MIN_SIZE_LOGICAL, PIP_MAX_SIZE_LOGICAL);
+    // 像素尺寸：取整 + 不超主画面短边（下限防御 4px：再小圆不可辨）。
+    let size_px = ((size_l * scale).round() as u32)
+        .min(main_w.min(main_h))
+        .max(4);
+    let margin_px = ((PIP_DEFAULT_MARGIN_LOGICAL * scale).round() as u32).max(4);
+    let border_px = ((PIP_BORDER_LOGICAL * scale).round() as u32).clamp(2, 8);
+    let (max_x, max_y) = (main_w - size_px, main_h - size_px);
+    let (x, y) = match (st.x, st.y) {
+        (None, _) | (_, None) => {
+            // 默认右下角（x/y 必须成对给值——单边缺失同样落默认，语义简单）。
+            (max_x.saturating_sub(margin_px), max_y.saturating_sub(margin_px))
+        }
+        (Some(lx), Some(ly)) => {
+            if !lx.is_finite() || !ly.is_finite() {
+                (max_x.saturating_sub(margin_px), max_y.saturating_sub(margin_px))
+            } else {
+                let px = ((lx * scale).round() as i64).clamp(0, max_x as i64) as u32;
+                let py = ((ly * scale).round() as i64).clamp(0, max_y as i64) as u32;
+                (px, py)
+            }
+        }
+    };
+    Some(PipRect { x, y, size: size_px, border: border_px })
+}
+
+/// PiP 内的相机采样（纯函数可测）：目标圆内像素 (tx, ty)（相对 rect 原点）←
+/// 相机帧盒式均值（同 [`downsample_bgra_to_rgba_max_edge`] 的整数块划分——缩小时
+/// 区域平均，1:1 时退化为直采，无双实现）。u64 累加防大块溢出（N2 同款纪律）。
+fn pip_box_sample_bgra(
+    cam: &[u8],
+    cam_w: u32,
+    cam_h: u32,
+    cam_stride: usize,
+    tx: u32,
+    ty: u32,
+    size: u32,
+) -> [u8; 4] {
+    if size == 0 || cam_w == 0 || cam_h == 0 {
+        return [0, 0, 0, 255];
+    }
+    let (cw, ch) = (cam_w as usize, cam_h as usize);
+    let (tx, ty, size) = (tx as usize, ty as usize, size as usize);
+    let (x0, x1) = (tx * cw / size, ((tx + 1) * cw + size - 1) / size);
+    let (y0, y1) = (ty * ch / size, ((ty + 1) * ch + size - 1) / size);
+    let (x1, y1) = (x1.max(x0 + 1).min(cw), y1.max(y0 + 1).min(ch));
+    let (mut b, mut g, mut r, mut a) = (0u64, 0u64, 0u64, 0u64);
+    for sy in y0..y1 {
+        let row = &cam[sy * cam_stride..];
+        for sx in x0..x1 {
+            let px = &row[sx * 4..sx * 4 + 4];
+            b += u64::from(px[0]);
+            g += u64::from(px[1]);
+            r += u64::from(px[2]);
+            a += u64::from(px[3]);
+        }
+    }
+    let area = ((x1 - x0) * (y1 - y0)) as u64;
+    let avg = |s: u64| ((s + area / 2) / area) as u8;
+    [avg(b), avg(g), avg(r), avg(a)]
+}
+
+/// 把 PiP 圆形贴片合成进主画面缓冲（纯 safe Rust 可测；调用方已把 CVPixelBuffer
+/// 锁定为切片）。逐像素：圆外不动（主画面原样）、描边环白描边、圆内相机盒式采样。
+/// BGRA 字节序（SCStream/相机统一 32BGRA，平台像素序 = 内存序 B,G,R,A）。
+pub fn blend_pip_circle(
+    dst: &mut [u8],
+    dst_stride: usize,
+    dst_w: u32,
+    dst_h: u32,
+    cam: &[u8],
+    cam_w: u32,
+    cam_h: u32,
+    cam_stride: usize,
+    rect: &PipRect,
+) {
+    let size = rect.size;
+    if size == 0 || rect.border as u64 >= size as u64 {
+        return; // 退化（描边 ≥ 直径）——不动 dst（防御，理论不可达）
+    }
+    let cx = rect.x as f64 + size as f64 / 2.0;
+    let cy = rect.y as f64 + size as f64 / 2.0;
+    let r = size as f64 / 2.0;
+    let ring = (r - rect.border as f64).max(0.0);
+    let (r2, ring2) = (r * r, ring * ring);
+    let x_end = (rect.x + size).min(dst_w);
+    let y_end = (rect.y + size).min(dst_h);
+    for j in rect.y..y_end {
+        for i in rect.x..x_end {
+            let dx = i as f64 + 0.5 - cx;
+            let dy = j as f64 + 0.5 - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 > r2 {
+                continue; // 圆外：主画面原样
+            }
+            let px = &mut dst[j as usize * dst_stride + i as usize * 4..][..4];
+            let color = if d2 > ring2 {
+                [255, 255, 255, 255] // 描边环（白，任何背景可辨）
+            } else {
+                pip_box_sample_bgra(cam, cam_w, cam_h, cam_stride, i - rect.x, j - rect.y, size)
+            };
+            px.copy_from_slice(&color);
+        }
+    }
+}
+
+/// 主画面行拷贝（BGRA，src/dst 行距各自独立——IOSurface 行对齐不假设相等）。
+pub fn copy_rows_bgra(dst: &mut [u8], dst_stride: usize, src: &[u8], src_stride: usize, w: u32, h: u32) {
+    let copy = (w as usize * 4).min(src_stride).min(dst_stride);
+    for row in 0..h as usize {
+        let s = &src[row * src_stride..row * src_stride + copy];
+        let d = &mut dst[row * dst_stride..row * dst_stride + copy];
+        d.copy_from_slice(s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N3 F9 证据工具：MP4 视频轨逐帧时长解析（stts）——「主画面无掉帧」的 pts 连续性
+// ---------------------------------------------------------------------------
+
+/// MP4 box 遍历辅助：在 `data[pos..]` 上按 ISO 14496-12 box 布局（size4 + type4，
+/// size==1 时 64 位 largesize；size==0 表示到文件尾）迭代子 box。
+fn mp4_boxes(data: &[u8], start: usize, end: usize) -> Vec<(usize, usize, [u8; 4])> {
+    let mut out = Vec::new();
+    let mut pos = start;
+    while pos + 8 <= end {
+        let size32 = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap_or([0; 4])) as u64;
+        let mut typ = [0u8; 4];
+        typ.copy_from_slice(&data[pos + 4..pos + 8]);
+        let (header, size) = if size32 == 1 {
+            if pos + 16 > end {
+                break;
+            }
+            let large = u64::from_be_bytes(data[pos + 8..pos + 16].try_into().unwrap_or([0; 8]));
+            (16usize, large)
+        } else if size32 == 0 {
+            (8usize, (end - pos) as u64)
+        } else {
+            (8usize, size32)
+        };
+        if size < header as u64 {
+            break; // 损坏
+        }
+        let box_end = pos.saturating_add(size as usize).min(end);
+        out.push((pos + header, box_end, typ));
+        if box_end <= pos {
+            break;
+        }
+        pos = box_end;
+    }
+    out
+}
+
+fn mp4_find_box<'a>(data: &'a [u8], range: (usize, usize), typ: &[u8; 4]) -> Option<(usize, usize)> {
+    mp4_boxes(data, range.0, range.1)
+        .into_iter()
+        .find(|(_, _, t)| *t == *typ)
+        .map(|(s, e, _)| (s, e))
+}
+
+/// 视频轨逐帧时长（秒，纯解析可测）：moov → trak（hdlr handler_type == 'vide'）→
+/// mdia → minf → stbl → stts 展开。**DTS 口径**（stts 是 time-to-sample）：h264
+/// 有无 B 帧均不影响「编码节奏是否连续」——管线丢帧表现为某 delta = k×(1/fps)。
+/// AAC 音轨（'soun'）被 hdlr 过滤。无 moov / 无视频轨 / stts 损坏 → None。
+pub fn mp4_video_sample_deltas(data: &[u8]) -> Option<Vec<f64>> {
+    let moov = mp4_find_box(data, (0, data.len()), b"moov")?;
+    for (s, e, t) in mp4_boxes(data, moov.0, moov.1) {
+        if t != *b"trak" {
+            continue;
+        }
+        // hdlr 校验（v0 布局：version+flags4 + pre_defined4 + handler_type4）。
+        let Some(mdia) = mp4_find_box(data, (s, e), b"mdia") else { continue };
+        let Some((hdlr, _)) = mp4_find_box(data, (mdia.0, mdia.1), b"hdlr") else { continue };
+        if hdlr + 12 > data.len() || &data[hdlr + 8..hdlr + 12] != b"vide" {
+            continue;
+        }
+        let Some(minf) = mp4_find_box(data, (mdia.0, mdia.1), b"minf") else { continue };
+        let Some(stbl) = mp4_find_box(data, (minf.0, minf.1), b"stbl") else { continue };
+        let Some((stts, stts_end)) = mp4_find_box(data, (stbl.0, stbl.1), b"stts") else {
+            continue;
+        };
+        // stts body：version+flags4 + entry_count4 + entries{count4, delta4}。
+        if stts + 8 > stts_end {
+            return None;
+        }
+        let entries =
+            u32::from_be_bytes(data[stts + 4..stts + 8].try_into().ok()?) as usize;
+        let mut deltas = Vec::new();
+        let mut cur = stts + 8;
+        for _ in 0..entries {
+            if cur + 8 > stts_end {
+                return None;
+            }
+            let count = u32::from_be_bytes(data[cur..cur + 4].try_into().ok()?) as usize;
+            let delta = u32::from_be_bytes(data[cur + 4..cur + 8].try_into().ok()?);
+            for _ in 0..count {
+                deltas.push(delta as f64);
+            }
+            cur += 8;
+        }
+        // 时长单位 → 秒需要 timescale（mdhd）。取 mdhd 的 timescale 字段。
+        let Some(mdhd) = mp4_find_box(data, (mdia.0, mdia.1), b"mdhd") else {
+            return None;
+        };
+        let version = *data.get(mdhd.0)?;
+        // mdhd body：version+flags(4) + [v1: ctime8+mtime8 | v0: ctime4+mtime4] + timescale4。
+        let ts_off = mdhd.0 + 4 + if version == 1 { 16 } else { 8 };
+        if ts_off + 4 > mdhd.1 {
+            return None;
+        }
+        let timescale = u32::from_be_bytes(data[ts_off..ts_off + 4].try_into().ok()?);
+        if timescale == 0 {
+            return None;
+        }
+        return Some(deltas.into_iter().map(|d| d / timescale as f64).collect());
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // macOS 管线（SCStream → AVAssetWriter）
 // ---------------------------------------------------------------------------
 
@@ -541,6 +833,12 @@ struct RecSession {
     /// 通道自身有界（32MB）且失败自禁用，绝不写 [`RecSession::error`]——
     /// MP4 的 Failed-gate 语义不被 GIF 侧毒化（plan 硬要求）。
     gif_lane: Option<std::sync::Arc<GifLane>>,
+    /// N3：画中画共享道（None = 不支持 PiP 的调用形态，如 m6 旧构造；Some 时回调
+    /// 侧读 state().visible 决定是否合成——默认 false，非 PiP 会话热路径零变化）。
+    pip_lane: Option<std::sync::Arc<PipLane>>,
+    /// N3：录制显示器的缩放（物理/逻辑，PiP 逻辑坐标 → 帧像素坐标的换算系数；
+    /// begin() 以 CG 口径实测，与 N1 region_stream_params 同源）。
+    pip_scale: f64,
     /// 管线错误（writer append 失败 / stream didStopWithError）：stop 时上抛。
     error: Option<String>,
     info: RecordingInfo,
@@ -568,6 +866,17 @@ mod cg_display_ffi {
 /// 生产启动路径的区域 id 来自覆盖层 payload，不经本函数）。
 pub fn main_display_id() -> u32 {
     unsafe { cg_display_ffi::CGMainDisplayID() }
+}
+
+/// 显示器逻辑边界（points，N3 F9 探针算缩放用；与 begin() 同一 CG 口径）。
+/// SAFETY: 纯查询 extern（无副作用），由 pub 封装收口 unsafe。
+pub fn display_bounds(display_id: u32) -> objc2_core_foundation::CGRect {
+    unsafe { cg_display_ffi::CGDisplayBounds(display_id) }
+}
+
+/// 显示器物理像素宽（N3 F9 探针算缩放用，同上）。
+pub fn display_pixels_wide(display_id: u32) -> usize {
+    unsafe { cg_display_ffi::CGDisplayPixelsWide(display_id) }
 }
 
 // —— 帧回调对象（SCStreamOutput + SCStreamDelegate）——
@@ -695,9 +1004,25 @@ impl HawkRecordOutput {
         // CMSampleBufferGetImageBuffer 返回的 CVImageBuffer 随样本缓冲存活（此处已
         // retain）；CVPixelBuffer 是 CVImageBuffer 的类型别名（同 CF 类型），直通。
         let Some(img) = (unsafe { sb.image_buffer() }) else { return };
+        let main: &CVPixelBuffer = &img;
+        // N3 PiP 合成分支（Ruling 2 预授权 CPU 合成）：visible 才进入（默认关 =
+        // 热路径一次 Mutex 短锁读）；合成失败的降级语义见 PipComposite/PipComposite::Drop——
+        // 相机缺席 = 直通、缓冲故障 = 丢帧背压，均不写会话 error（Failed-gate
+        // 不被 PiP 侧毒化，N2 GIF 同款纪律）。
+        let pip_out = match s.pip_lane.as_ref() {
+            Some(lane) if lane.state().visible => {
+                unsafe { pip_composite_frame(lane, main, s.pip_scale) }
+            }
+            _ => PipComposite::Plain,
+        };
+        let buffer: &CVPixelBuffer = match &pip_out {
+            PipComposite::Composited(b) => b,
+            PipComposite::Plain => main,
+            PipComposite::Drop => return, // 背压丢帧（良性，同 ready=NO）
+        };
         let ok = unsafe {
             adaptor.appendPixelBuffer_withPresentationTime(
-                &img,
+                buffer,
                 CMTime::with_seconds(shifted, OUTPUT_TIMESCALE),
             )
         };
@@ -827,6 +1152,522 @@ unsafe fn sample_gif_frame(sb: &CMSampleBuffer, pts: f64) -> GifTap {
     out
 }
 
+// ---------------------------------------------------------------------------
+// N3 相机采集道（AVCaptureSession → 最新帧槽，latest-wins）+ 共享 PipLane
+// ---------------------------------------------------------------------------
+
+/// 相机帧委托（AVCaptureVideoDataOutputSampleBufferDelegate）：把交付帧的
+/// image buffer **保留**进最新帧槽（latest-wins，只持 1 帧——AVCaptureVideoData
+/// Output 的缓冲池按 alwaysDiscardsLateVideoFrames=true 自动丢帧，无队列堆积；
+/// 持 1 帧 IOSurface 缓冲不会耗尽设备池，下一帧到达即释放旧帧）。
+///
+/// 回调队列 = 自建串行 dispatch 队列（CameraSession 持有），与 SCStream 的视频
+/// 回调队列互不相干；合成发生在 SCStream 帧回调线程，仅经 [`PipLane::latest_camera_buffer`]
+/// 短暂持锁 clone Retained（亚微秒），相机回调与合成线程无锁循环。
+struct PipOutputIvars {
+    latest: std::sync::Arc<std::sync::Mutex<Option<CFRetained<CVPixelBuffer>>>>,
+    frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+define_class!(
+    // SAFETY: NSObject 无子类化约束；本对象不实现 Drop（Retained 归 CameraSession
+    // 持有，AVCaptureSession 对 output 不持强引用——delegate 由我方Retained保活）。
+    #[unsafe(super(NSObject))]
+    #[name = "HawkPipOutput"]
+    #[ivars = PipOutputIvars]
+    struct HawkPipOutput;
+
+    unsafe impl NSObjectProtocol for HawkPipOutput {}
+
+    unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for HawkPipOutput {
+        // 相机帧回调（相机串行队列）：保留 image buffer → 最新帧槽 + 帧计数。
+        // 无图样本（理论不可达）→ 静默跳过，计数不动。
+        #[allow(non_snake_case)]
+        #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
+        unsafe fn captureOutput_didOutputSampleBuffer_fromConnection(
+            &self,
+            _output: &AVCaptureOutput,
+            sample_buffer: &CMSampleBuffer,
+            _connection: &AVCaptureConnection,
+        ) {
+            let Some(img) = (unsafe { sample_buffer.image_buffer() }) else { return };
+            let ivars = self.ivars();
+            let mut slot = ivars.latest.lock().unwrap_or_else(|e| e.into_inner());
+            *slot = Some(img); // Retained<CVImageBuffer> == Retained<CVPixelBuffer>（类型别名链）
+            ivars
+                .frames
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+);
+
+impl HawkPipOutput {
+    fn new(
+        latest: std::sync::Arc<std::sync::Mutex<Option<CFRetained<CVPixelBuffer>>>>,
+        frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Retained<Self> {
+        // alloc → set_ivars → 父类 init（同 HawkRecordOutput 的 ivars 契约）。
+        let this = Self::alloc().set_ivars(PipOutputIvars { latest, frames });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// 一路已运行的相机采集会话（AVCaptureSession + 默认视频设备 + BGRA VideoDataOutput）。
+/// Drop = stopRunning（命令线程调用——生产路径为 async 命令线程，非主线程契约满足）。
+struct CameraSession {
+    session: Retained<AVCaptureSession>,
+    /// 委托回调队列（struct 持有保活——AVCapture 只持队列裸指针，队列先死 = 回调
+    /// 崩溃；Drop 随 struct 释放，stopRunning 之后）。
+    _delegate_queue: dispatch2::DispatchRetained<dispatch2::DispatchQueue>,
+    _delegate: Retained<HawkPipOutput>,
+    frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    latest: std::sync::Arc<std::sync::Mutex<Option<CFRetained<CVPixelBuffer>>>>,
+}
+
+impl CameraSession {
+    /// 启动相机采集（阻塞至 startRunning 完成，~百 ms-1s 级；调用方为 async 命令
+    /// 线程 / 测试线程，不卡主线程）。
+    ///
+    /// TCC 阶梯（plan：相机不可用/拒绝 = PiP 静默缺席，绝不阻塞录制）：
+    /// Authorized → 直启；NotDetermined → 同步请求授权（≤15s，打包后的 app 会弹
+    /// 系统窗）；Denied/Restricted/请求未获准 → Err（调用方把 visible 回落 false，
+    /// 录制不受影响）。设备枚举失败（无相机/被占用）→ Err，同阶梯。
+    fn start() -> Result<CameraSession, String> {
+        // 1. TCC 预检 + （未决时）同步请求。AVMediaTypeVideo 为 AVMediaFormat 常量。
+        // SAFETY: 纯常量读取（extern static 由系统保证有效）。
+        let media = unsafe { objc2_av_foundation::AVMediaTypeVideo }
+            .expect("AVMediaTypeVideo 常量缺失");
+        // SAFETY: 纯常量读取 + TCC 状态查询（无副作用，不弹窗）。
+        let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media) };
+        if status != AVAuthorizationStatus::Authorized {
+            if status == AVAuthorizationStatus::NotDetermined {
+                let (tx, rx) = std::sync::mpsc::channel::<bool>();
+                let block = block2::RcBlock::new(move |granted: objc2::runtime::Bool| {
+                    let _ = tx.send(granted.as_bool());
+                });
+                // SAFETY: 系统授权请求；回调块由系统在授权结果就绪时调用。
+                unsafe {
+                    AVCaptureDevice::requestAccessForMediaType_completionHandler(
+                        media,
+                        &block,
+                    );
+                }
+                match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+                    Ok(true) => {}
+                    Ok(false) => return Err("相机权限未授予：画中画保持关闭（录制不受影响）".into()),
+                    Err(_) => return Err("相机授权请求超时：画中画保持关闭（录制不受影响）".into()),
+                }
+            } else {
+                // Denied / Restricted
+                return Err("相机权限未授予：画中画保持关闭（录制不受影响）".into());
+            }
+        }
+        // 2. 默认视频设备（FaceTime HD 等；discovery session 对单设备场景是过度设计）。
+        let Some(device) = (unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }) else {
+            return Err("未找到可用相机：画中画保持关闭（录制不受影响）".into());
+        };
+        // 3. 设备输入（打开设备可能失败：被独占/拔出）。
+        let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
+            .map_err(|e| format!("相机输入打开失败: {e}（画中画保持关闭，录制不受影响）"))?;
+        // 4. 会话组装：默认 preset（高分辨率档），输出固定 32BGRA（合成按内存序
+        //    B,G,R,A 直算；与 SCStream 帧同格式，零 swizzle）。
+        let session = unsafe { AVCaptureSession::new() };
+        let output = unsafe { AVCaptureVideoDataOutput::new() };
+        unsafe {
+            output.setVideoSettings(Some(&settings_dict(&[(
+                "kCVPixelBufferPixelFormatTypeKey",
+                number_value(kCVPixelFormatType_32BGRA as i64),
+            )])));
+            // 迟到帧直接丢（输出侧背压）——合成只在 SCStream 帧驱动，相机快慢无关。
+            output.setAlwaysDiscardsLateVideoFrames(true);
+        }
+        let latest: std::sync::Arc<std::sync::Mutex<Option<CFRetained<CVPixelBuffer>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let frames = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let delegate = HawkPipOutput::new(latest.clone(), frames.clone());
+        let queue = dispatch2::DispatchQueue::new(
+            "com.hawksnap.pip.camera",
+            dispatch2::DispatchQueueAttr::SERIAL,
+        );
+        unsafe {
+            output.setSampleBufferDelegate_queue(
+                Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)),
+                Some(&*queue),
+            );
+        }
+        if !unsafe { session.canAddInput(&input) } {
+            return Err("AVCaptureSession 拒绝相机输入（画中画保持关闭，录制不受影响）".into());
+        }
+        unsafe { session.addInput(&input) };
+        if !unsafe { session.canAddOutput(&output) } {
+            return Err("AVCaptureSession 拒绝视频输出（画中画保持关闭，录制不受影响）".into());
+        }
+        unsafe { session.addOutput(&output) };
+        unsafe { session.startRunning() };
+        Ok(CameraSession {
+            session,
+            _delegate_queue: queue,
+            _delegate: delegate,
+            frames,
+            latest,
+        })
+    }
+
+    fn stop(&self) {
+        unsafe { self.session.stopRunning() };
+        *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    fn frames(&self) -> u64 {
+        self.frames.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for CameraSession {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// 画中画共享道：悬浮条命令（pip_update）与 SCStream 视频回调的交汇点。
+///
+/// 线程纪律：`state` 锁只被命令线程（短临界区，改值）与视频回调（短临界区，读值）
+/// 触碰；`camera` 锁只被命令线程（启停会话）触碰。视频回调侧持 PipLane 锁**期间
+/// 不拿其他锁**（clone Retained 即出锁）——锁序恒为 会话锁 → pip 状态锁（回调侧）
+/// 或仅 pip 状态锁（命令侧），无环。
+pub struct PipLane {
+    state: std::sync::Mutex<PipState>,
+    camera: std::sync::Mutex<Option<CameraSession>>,
+    /// 测试注入槽（#[doc(hidden)]）：F9 端到端探针在 TCC 相机不可用的 CLI 环境，
+    /// 把合成 CVPixelBuffer 放进**与 delegate 同型的槽**，走通「槽 → 合成 → writer」
+    /// 全程。生产路径零写入、合成读取侧仅多一次 Option 判空（热路径成本可忽略）。
+    injected: std::sync::Mutex<Option<CFRetained<CVPixelBuffer>>>,
+}
+
+impl Default for PipLane {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PipLane {
+    pub fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(PipState::default()),
+            camera: std::sync::Mutex::new(None),
+            injected: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// 状态快照（回调热路径：每次 Screen 帧一次短锁读）。
+    pub fn state(&self) -> PipState {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 部分更新（命令面）。语义（任务简报裁定点的落地）：
+    /// - x/y/size：先改后验——非有限值拒绝（Err，不改状态）；
+    /// - visible=true：先置位再起相机；相机启动失败（TCC 拒绝/无设备）→ visible
+    ///   回落 false 并返回 Err（悬浮条显示瞬态错误，录制继续——LADDER：相机缺席
+    ///   = PiP 静默缺席，绝不阻塞录制）；
+    /// - visible=false：回落 + 停相机（相机指示灯熄灭，资源即刻归还）。
+    pub fn update(&self, patch: PipUpdate) -> Result<(), String> {
+        // 先验证数值合法性（不合法整包拒绝，状态零变化）。
+        if let Some(Some(x)) = patch.x {
+            if !x.is_finite() {
+                return Err(format!("画中画 x 坐标非法: {x}"));
+            }
+        }
+        if let Some(Some(y)) = patch.y {
+            if !y.is_finite() {
+                return Err(format!("画中画 y 坐标非法: {y}"));
+            }
+        }
+        if let Some(size) = patch.size {
+            if !size.is_finite() || size <= 0.0 {
+                return Err(format!("画中画尺寸非法: {size}"));
+            }
+        }
+        let turning_on = patch.visible == Some(true);
+        let turning_off = patch.visible == Some(false);
+        if turning_on {
+            // 先确保相机可用再置位（失败 = 状态零变化 + Err 回流）。
+            let mut cam = self.camera.lock().unwrap_or_else(|e| e.into_inner());
+            if cam.is_none() {
+                *cam = Some(CameraSession::start()?);
+            }
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.visible = true;
+            if let Some(x) = patch.x {
+                st.x = x;
+            }
+            if let Some(y) = patch.y {
+                st.y = y;
+            }
+            if let Some(size) = patch.size {
+                st.size = size;
+            }
+            return Ok(());
+        }
+        // 数值/关闭路径：先改状态。
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(x) = patch.x {
+                st.x = x;
+            }
+            if let Some(y) = patch.y {
+                st.y = y;
+            }
+            if let Some(size) = patch.size {
+                st.size = size;
+            }
+            if turning_off {
+                st.visible = false;
+            }
+        }
+        if turning_off {
+            // 相机停运在状态锁外（stopRunning 阻塞百 ms 级，不持 pip 状态锁）。
+            let mut cam = self.camera.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = cam.take() {
+                s.stop(); // 显式 stop（Drop 兜底；测试断言依赖立即停运）
+            }
+        }
+        Ok(())
+    }
+
+    /// 最新相机帧（Retained clone 亚微秒出锁；None = 相机未启/暂无帧——该帧合成
+    /// 退化为直通，绝不 stall writer）。注入槽非空时优先生效（测试路径，见下）。
+    fn latest_camera_buffer(&self) -> Option<CFRetained<CVPixelBuffer>> {
+        if let Some(buf) = self.injected.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Some(buf);
+        }
+        self.camera
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|c| c.latest.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    }
+
+    /// 相机帧计数（#[ignore] 采集测试与 F9 探针的证据口径）。
+    pub fn camera_frames(&self) -> u64 {
+        self.camera
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|c| c.frames())
+            .unwrap_or(0)
+    }
+
+    /// 相机是否在采（诊断/测试）。
+    pub fn camera_running(&self) -> bool {
+        self.camera.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// 测试注入（#[doc(hidden)]）：把一帧放进注入槽——与 delegate 写入的相机槽
+    /// 同型（Retained<CVPixelBuffer>）、同一读取入口（[`Self::latest_camera_buffer`]）。
+    /// 生产代码不调用；TCC 相机缺席环境下的 F9 端到端证据载体（任务报告「诚实边界」）。
+    #[doc(hidden)]
+    pub fn inject_frame(&self, buf: CFRetained<CVPixelBuffer>) {
+        *self.injected.lock().unwrap_or_else(|e| e.into_inner()) = Some(buf);
+    }
+
+    /// 清空注入槽（测试收口，恢复纯相机路径）。
+    #[doc(hidden)]
+    pub fn clear_injected(&self) {
+        *self.injected.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// 直接覆写状态（#[doc(hidden)]，仅 F9 探针）：注入模式下相机未起，visible
+    /// 无法经 update 置位——探针直接设 visible=true + 注入位置，走同一条合成路。
+    #[doc(hidden)]
+    pub fn set_state_for_probe(&self, st: PipState) {
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = st;
+    }
+}
+
+// SAFETY（Send/Sync）：PipLane 跨线程共享于 pip_update 命令线程（启停相机/改状态）
+// 与 SCStream 视频回调线程（读状态/读相机帧）。槽内 CVPixelBuffer（CVBuffer）为
+// CoreVideo CF 类型——引用计数原子（CFRetain/Release），CVPixelBuffer 系列 API
+// Apple 文档明示线程安全；槽位读写全部经 Mutex 串行化（相机回调写 / 合成读不并发）。
+// CFRetained<CVBuffer> 的非 Send 是绑定层的保守默认，与 RecShared 的手工 Send 同款
+// 裁定（objc2 对 ObjC/CF 对象不做全局线程安全断言）。
+unsafe impl Send for PipLane {}
+unsafe impl Sync for PipLane {}
+
+// ---------------------------------------------------------------------------
+// N3 PiP 合成（SCStream 视频回调线程调用；CPU 侧像素运算）
+// ---------------------------------------------------------------------------
+
+/// N3 PiP 合成结果（append_video 的处置依据）。
+enum PipComposite {
+    /// 直通：PiP 关 / 相机帧缺席 / 几何退化——原样 append 主画面帧（plan：相机
+    /// 帧缺席 → 无 PiP 该帧，绝不 stall writer）。
+    Plain,
+    /// 合成帧（新 CVPixelBuffer：主画面 + 圆形相机贴片）。
+    Composited(CFRetained<CVPixelBuffer>),
+    /// 缓冲分配/锁定真故障 → 丢本帧（实时背压语义，同 isReadyForMoreMediaData
+    /// 的良性丢帧——绝不写会话 error，Failed-gate 不被 PiP 侧毒化）。
+    Drop,
+}
+
+/// N3 PiP 合成（SCStream 视频回调线程，CPU 侧——Ruling 2 预授权：30fps 下
+/// 锁定 + 行拷贝 + 圆形盒式采样 ≈ 2-4ms，预算内；纯 Rust 像素运算而非
+/// CGBitmapContext，N2 降采样同款裁定：更少 unsafe、可测、无双实现）。
+///
+/// 缓冲来源：逐帧 CVPixelBufferCreate（malloc-backed 32BGRA）。**不走 adaptor
+/// 的 CVPixelBufferPool**——实测该池对本管线交付的缓冲 GetBytesPerRow 与其
+/// 声明尺寸矛盾（池裁定注见函数体），正确性优先；Create 失败 = Drop 背压丢帧。
+///
+/// SAFETY: 三块缓冲的基址指针只在各自锁定窗口内解引用；长度 = bytesPerRow ×
+/// height（CoreVideo 契约保证 chunky BGRA 的可达范围；非 planar 32BGRA 由本管线
+/// 两路配置固定——SCStream pixelFormat 与相机 videoSettings）。
+unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) -> PipComposite {
+    use objc2_core_video::{
+        CVPixelBufferCreate, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+        CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+        CVPixelBufferUnlockBaseAddress,
+    };
+    let st = lane.state();
+    let (mw, mh) = (
+        CVPixelBufferGetWidth(main) as u32,
+        CVPixelBufferGetHeight(main) as u32,
+    );
+    let Some(rect) = pip_rect_px(mw, mh, scale, &st) else {
+        eprintln!("[pip] 合成降级 Plain: 几何不可用 (main={mw}x{mh} scale={scale})");
+        return PipComposite::Plain;
+    };
+    let Some(cam) = lane.latest_camera_buffer() else {
+        eprintln!("[pip] 合成降级 Plain: 相机帧缺席");
+        return PipComposite::Plain; // 相机帧缺席 → 无 PiP 该帧
+    };
+    let (cw, ch) = (
+        CVPixelBufferGetWidth(&cam) as u32,
+        CVPixelBufferGetHeight(&cam) as u32,
+    );
+    if cw == 0 || ch == 0 {
+        eprintln!("[pip] 合成降级 Plain: 相机帧退化 {cw}x{ch}");
+        return PipComposite::Plain;
+    }
+
+    // 分配合成缓冲。裁定（实证见任务报告）：**不走 adaptor.pixelBufferPool()**——
+    // 实测该池对本管线（h264 writer + 32BGRA sourcePixelBufferAttributes）交付的
+    // 缓冲 GetBytesPerRow 返回 1268（800×600 BGRA 需 3200）：疑似池内部按编码器
+    // 原生格式（NV12 系）配置缓冲、与 GetWidth 的 800×600 声明不符。逐帧
+    // CVPixelBufferCreate（malloc-backed 32BGRA）确定性正确，分配 ~2ms/帧在
+    // Ruling 2 预算内；池只是优化不是正确性依赖。失败（status≠0）→ Drop 背压。
+    let mut dst: Option<CFRetained<CVPixelBuffer>> = None;
+    {
+        let mut raw: *mut CVPixelBuffer = std::ptr::null_mut();
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                mw as usize,
+                mh as usize,
+                kCVPixelFormatType_32BGRA as u32,
+                None,
+                std::ptr::NonNull::from(&mut raw),
+            )
+        };
+        if status == 0 {
+            // SAFETY: 同上（Create 规则 +1）。
+            dst = std::ptr::NonNull::new(raw).map(|p| unsafe { CFRetained::from_raw(p) });
+        }
+    }
+    let Some(dst) = dst else {
+        eprintln!("[pip] 背压丢帧: CVPixelBufferCreate 失败 (status 非 0)");
+        return PipComposite::Drop; // 分配失败 → 背压丢帧（writer 无感）
+    };
+    // 尺寸防御（Create 按主帧尺寸构造，理论恒一致；防御未知的缓冲形态）。
+    let (dw, dh) = (
+        CVPixelBufferGetWidth(&dst) as u32,
+        CVPixelBufferGetHeight(&dst) as u32,
+    );
+    if (dw, dh) != (mw, mh) {
+        eprintln!("[pip] 合成降级 Plain: 池尺寸不符 dst={dw}x{dh} main={mw}x{mh}");
+        return PipComposite::Plain;
+    }
+
+    // 锁三块缓冲（main/cam 只读，dst 写 = flags 0）。任一失败 → 解锁已锁的并
+    // 降级——绝不带着未解锁的缓冲返回。内联闭包只做锁定/拷贝/混合（返回 true =
+    // 合成完成），Composited 包装在闭包外（不把 dst move 进闭包，锁后仍可解锁）。
+    let read_lock = CVPixelBufferLockFlags::ReadOnly;
+    let write_lock = CVPixelBufferLockFlags(0);
+    if unsafe { CVPixelBufferLockBaseAddress(main, read_lock) } != 0 {
+        eprintln!("[pip] 合成降级 Plain: 主帧锁定失败");
+        return PipComposite::Plain;
+    }
+    let mut cam_locked = false;
+    let mut dst_locked = false;
+    let done = (|| -> bool {
+        if unsafe { CVPixelBufferLockBaseAddress(&cam, read_lock) } != 0 {
+            return false;
+        }
+        cam_locked = true;
+        if unsafe { CVPixelBufferLockBaseAddress(&dst, write_lock) } != 0 {
+            return false;
+        }
+        dst_locked = true;
+        let main_stride = CVPixelBufferGetBytesPerRow(main);
+        let cam_stride = CVPixelBufferGetBytesPerRow(&cam);
+        let dst_stride = CVPixelBufferGetBytesPerRow(&dst);
+        let main_base = CVPixelBufferGetBaseAddress(main) as *const u8;
+        let cam_base = CVPixelBufferGetBaseAddress(&cam) as *const u8;
+        let dst_base = CVPixelBufferGetBaseAddress(&dst) as *mut u8;
+        if main_base.is_null() || cam_base.is_null() || dst_base.is_null() {
+            eprintln!(
+                "[pip] 基址异常: main={} cam={} dst={}",
+                main_base.is_null(),
+                cam_base.is_null(),
+                dst_base.is_null()
+            );
+            return false; // 基址异常：不把半成品入列 → Drop
+        }
+        if main_stride < mw as usize * 4
+            || cam_stride < cw as usize * 4
+            || dst_stride < dw as usize * 4
+        {
+            eprintln!(
+                "[pip] 行距异常: main_stride={main_stride} (需 {}) cam_stride={cam_stride} (需 {}) dst_stride={dst_stride} (需 {})",
+                mw * 4, cw * 4, dw * 4
+            );
+            return false;
+        }
+        // SAFETY: 锁定窗口内的切片；长度按行对齐契约覆盖整幅缓冲。
+        let main_slice =
+            unsafe { std::slice::from_raw_parts(main_base, main_stride * mh as usize) };
+        let cam_slice =
+            unsafe { std::slice::from_raw_parts(cam_base, cam_stride * ch as usize) };
+        {
+            // SAFETY: dst 与 main/cam 是三块独立缓冲，无别名。
+            let dst_slice = unsafe {
+                std::slice::from_raw_parts_mut(dst_base, dst_stride * dh as usize)
+            };
+            copy_rows_bgra(dst_slice, dst_stride, main_slice, main_stride, mw, mh);
+            blend_pip_circle(
+                dst_slice, dst_stride, dw, dh, cam_slice, cw, ch, cam_stride, &rect,
+            );
+        }
+        true
+    })();
+    // SAFETY: 与上方成功 lock 成对解锁（仅解已锁的）。
+    if dst_locked {
+        unsafe { CVPixelBufferUnlockBaseAddress(&dst, write_lock) };
+    }
+    if cam_locked {
+        unsafe { CVPixelBufferUnlockBaseAddress(&cam, read_lock) };
+    }
+    unsafe { CVPixelBufferUnlockBaseAddress(main, read_lock) };
+    if done {
+        PipComposite::Composited(dst)
+    } else {
+        // 合成中途任何失败（锁定/基址/行距）→ 本帧直通主画面原样 append——
+        // writer 永不被 stall；Drop 语义只留给上游的池耗尽路径。
+        eprintln!(
+            "[pip] 合成降级 Plain: 中途失败 (cam_locked={cam_locked} dst_locked={dst_locked})"
+        );
+        PipComposite::Plain
+    }
+}
+
 /// 运行中的录屏器：`start` → `pause`/`resume`（幂等）→ `stop`（阻塞收尾）。
 /// app 层持 `Mutex<Option<ScreenRecorder>>`。
 pub struct ScreenRecorder {
@@ -859,8 +1700,13 @@ impl ScreenRecorder {
     /// 启动全屏（主显示器）录制：SCShareableContent 枚举 → 主显示器 filter →
     /// SCStream（视频 BGRA@30fps + 系统声 48k/2ch）→ AVAssetWriter（h264+AAC → MP4）。
     /// 阻塞至 startCapture 完成（~百 ms 级，调用方为 async 命令线程，不卡主线程）。
-    pub fn start(output_path: PathBuf) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::Main, None, None)
+    /// N3：`pip_lane` = 画中画共享道（None = 无 PiP 能力；Some 时悬浮条命令经它
+    /// 实时改状态，视频回调逐帧读——默认 visible=false，热路径零变化）。
+    pub fn start(
+        output_path: PathBuf,
+        pip_lane: Option<std::sync::Arc<PipLane>>,
+    ) -> Result<ScreenRecorder, String> {
+        Self::begin(output_path, DisplayPick::Main, None, None, pip_lane)
     }
 
     /// N2 全屏 + GIF 旁路：[`Self::start`] 的抽帧形态（回调按 15fps 降采样攒帧，
@@ -868,8 +1714,9 @@ impl ScreenRecorder {
     pub fn start_gif(
         output_path: PathBuf,
         gif_lane: std::sync::Arc<GifLane>,
+        pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::Main, None, Some(gif_lane))
+        Self::begin(output_path, DisplayPick::Main, None, Some(gif_lane), pip_lane)
     }
 
     /// N1 区域录制启动：指定显示器 + 选区逻辑矩形（display 本地 points，左上原点，
@@ -880,8 +1727,9 @@ impl ScreenRecorder {
         output_path: PathBuf,
         display_id: u32,
         region: LogicalRect,
+        pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::ById(display_id), Some(region), None)
+        Self::begin(output_path, DisplayPick::ById(display_id), Some(region), None, pip_lane)
     }
 
     /// N2 区域 + GIF 旁路：[`Self::start_region`] 的抽帧形态（MP4 管线原样不动，
@@ -891,17 +1739,25 @@ impl ScreenRecorder {
         display_id: u32,
         region: LogicalRect,
         gif_lane: std::sync::Arc<GifLane>,
+        pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::ById(display_id), Some(region), Some(gif_lane))
+        Self::begin(
+            output_path,
+            DisplayPick::ById(display_id),
+            Some(region),
+            Some(gif_lane),
+            pip_lane,
+        )
     }
 
     /// start / start_region 的公共实现（N1 参数化：显示器挑选 + 可选区域裁剪；
-    /// N2 参数化：可选 GIF 旁路通道——None = 纯 MP4 会话）。
+    /// N2 参数化：可选 GIF 旁路通道；N3 参数化：可选画中画共享道）。
     fn begin(
         output_path: PathBuf,
         pick: DisplayPick,
         region: Option<LogicalRect>,
         gif_lane: Option<std::sync::Arc<GifLane>>,
+        pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
         if output_path.exists() {
             return Err(format!("输出文件已存在: {}", output_path.display()));
@@ -958,12 +1814,23 @@ impl ScreenRecorder {
         // 区域 = 选区 points × 缩放（偶数取整——h264 4:2:0 色度子采样，见 even_px 注）。
         // 缩放取 CG 口径（物理宽 / 逻辑宽），不信任 IPC 传入值；sourceRect 坐标裁定
         // （points，display 本地）见 region_stream_params 的头文件证据注。
+        // N3：缩放对全屏路径同样计算（PiP 逻辑坐标 → 帧像素的换算系数，pip_scale）。
+        let display_bounds = unsafe { cg_display_ffi::CGDisplayBounds(display_id) };
+        let pip_scale = if display_bounds.size.width > 0.0 {
+            pw as f64 / display_bounds.size.width
+        } else {
+            1.0
+        };
         let (w, h, source_rect) = match region {
             None => (pw, ph, None),
             Some(rect) => {
-                let bounds = unsafe { cg_display_ffi::CGDisplayBounds(display_id) };
-                let scale = pw as f64 / bounds.size.width;
-                let params = region_stream_params(rect, bounds.size.width, bounds.size.height, scale)?;
+                let scale = pip_scale;
+                let params = region_stream_params(
+                    rect,
+                    display_bounds.size.width,
+                    display_bounds.size.height,
+                    scale,
+                )?;
                 (params.out_w as usize, params.out_h as usize, Some(params.source))
             }
         };
@@ -1180,6 +2047,8 @@ impl ScreenRecorder {
             video_queue: Some(video_queue),
             audio_queue: Some(audio_queue),
             gif_lane,
+            pip_lane,
+            pip_scale,
             error: None,
             info: RecordingInfo {
                 width: w as u32,
@@ -1659,7 +2528,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hawksnap-m6-real-{}", std::process::id()));
         let now = Local::now();
         let path = recording_output_path(&dir, now).unwrap();
-        let rec = ScreenRecorder::start(path.clone()).expect("start");
+        let rec = ScreenRecorder::start(path.clone(), None).expect("start");
         std::thread::sleep(std::time::Duration::from_secs(secs));
         let info = rec.stop().expect("stop");
         assert!(info.width >= 1 && info.height >= 1);
@@ -1711,7 +2580,7 @@ mod tests {
     fn real_pause_resume_timeline_gapless() {
         let dir = std::env::temp_dir().join(format!("hawksnap-m6-pause-{}", std::process::id()));
         let path = recording_output_path(&dir, Local::now()).unwrap();
-        let rec = ScreenRecorder::start(path.clone()).expect("start");
+        let rec = ScreenRecorder::start(path.clone(), None).expect("start");
         std::thread::sleep(std::time::Duration::from_secs(2));
         rec.pause();
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1741,7 +2610,7 @@ mod tests {
             .unwrap_or(5);
         let dir = std::env::temp_dir().join(format!("hawksnap-m6-soak-{}", std::process::id()));
         let path = recording_output_path(&dir, Local::now()).unwrap();
-        let rec = ScreenRecorder::start(path).expect("start");
+        let rec = ScreenRecorder::start(path, None).expect("start");
 
         let csv = std::env::var("HAWKSNAP_SOAK_CSV").unwrap_or_default();
         let pid = std::process::id();
@@ -1982,7 +2851,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("hawksnap-n1-region-{}", std::process::id()));
         let path = recording_output_path(&dir, Local::now()).unwrap();
-        let rec = ScreenRecorder::start_region(path.clone(), display_id, region).expect("start_region");
+        let rec = ScreenRecorder::start_region(path.clone(), display_id, region, None).expect("start_region");
         std::thread::sleep(std::time::Duration::from_secs(3));
         let info = rec.stop().expect("stop");
         stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2026,4 +2895,352 @@ mod tests {
             println!("[n1] 区域录制产物保留: {}", path.display());
         }
     }
+
+    // —— N3 画中画：几何（纯逻辑） ——
+
+    #[test]
+    fn pip_rect_default_bottom_right_with_scale() {
+        // 2x Retina 默认态：size 240 逻辑 → 480px，margin 24 逻辑 → 48px，
+        // 1920×1080 → 右下角 (1920-480-48, 1080-480-48) = (1392, 552)；描边 2×2=4px。
+        let st = PipState { visible: true, ..Default::default() };
+        let r = pip_rect_px(1920, 1080, 2.0, &st).unwrap();
+        assert_eq!((r.x, r.y, r.size, r.border), (1392, 552, 480, 4));
+        // 1x 外接屏：240px 贴片、24px 边距、2px 描边。
+        let r = pip_rect_px(1920, 1080, 1.0, &st).unwrap();
+        assert_eq!((r.x, r.y, r.size, r.border), (1656, 816, 240, 2));
+    }
+
+    #[test]
+    fn pip_rect_custom_position_clamped_in_bounds() {
+        // 越界位置（负值/超界）夹取进 [0, 主画面-size]——PiP 完整在界内。
+        let st = PipState { x: Some(-500.0), y: Some(99999.0), visible: true, ..Default::default() };
+        let r = pip_rect_px(1920, 1080, 1.0, &st).unwrap();
+        assert_eq!((r.x, r.y), (0, 1080 - 240));
+        // 右下角极限：clamp 到 max。
+        let st = PipState { x: Some(5000.0), y: Some(5000.0), visible: true, ..Default::default() };
+        let r = pip_rect_px(1920, 1080, 1.0, &st).unwrap();
+        assert_eq!((r.x, r.y), (1920 - 240, 1080 - 240));
+    }
+
+    #[test]
+    fn pip_rect_size_knob_clamps_and_fits_short_edge() {
+        // 旋钮下限 64 逻辑（20 → 64）；上限 480 逻辑（9999 → 480）。
+        let st = PipState { size: 20.0, visible: true, ..Default::default() };
+        assert_eq!(pip_rect_px(1920, 1080, 1.0, &st).unwrap().size, 64);
+        let st = PipState { size: 9999.0, visible: true, ..Default::default() };
+        assert_eq!(pip_rect_px(1920, 1080, 1.0, &st).unwrap().size, 480);
+        // 极小主画面：size 钳到短边（PiP 永不大于主画面），位置 saturating 到 0。
+        let st = PipState { visible: true, ..Default::default() };
+        let r = pip_rect_px(100, 80, 1.0, &st).unwrap();
+        assert_eq!(r.size, 80);
+        assert_eq!((r.x, r.y), (0, 0));
+    }
+
+    #[test]
+    fn pip_rect_none_when_hidden_degenerate_or_bad_scale() {
+        assert!(pip_rect_px(1920, 1080, 1.0, &PipState::default()).is_none(), "默认不可见");
+        let st = PipState { visible: true, ..Default::default() };
+        assert!(pip_rect_px(1, 1, 1.0, &st).is_none(), "主画面退化");
+        assert!(pip_rect_px(1920, 1080, 0.0, &st).is_none(), "缩放异常");
+        assert!(pip_rect_px(1920, 1080, f64::NAN, &st).is_none(), "缩放 NaN");
+    }
+
+    // —— N3 画中画：PipLane 部分更新语义（纯逻辑；相机路径见 #[ignore] 采集测试） ——
+
+    #[test]
+    fn pip_lane_update_rejects_non_finite_and_keeps_state() {
+        let lane = PipLane::new();
+        // NaN/负尺寸整包拒绝，状态零变化。
+        assert!(lane.update(PipUpdate { size: Some(f64::NAN), ..Default::default() }).is_err());
+        assert!(lane.update(PipUpdate { size: Some(-1.0), ..Default::default() }).is_err());
+        assert!(lane.update(PipUpdate { x: Some(Some(f64::INFINITY)), ..Default::default() }).is_err());
+        assert!(lane.update(PipUpdate { y: Some(Some(f64::NAN)), ..Default::default() }).is_err());
+        let st = lane.state();
+        assert_eq!(st, PipState::default(), "非法更新不得污染状态");
+    }
+
+    #[test]
+    fn pip_lane_partial_update_keeps_absent_fields() {
+        let lane = PipLane::new();
+        // 只发 size：x/y 保持 None（默认右下角语义不丢）。
+        lane.update(PipUpdate { size: Some(300.0), ..Default::default() }).unwrap();
+        let st = lane.state();
+        assert_eq!((st.x, st.y, st.size), (None, None, 300.0));
+        assert!(!st.visible, "visible 缺席 = 保持现值");
+        // x/y 用双层 Option 显式清除（Some(None) = 回到默认位）。
+        lane.update(PipUpdate { x: Some(Some(12.0)), y: Some(None), ..Default::default() }).unwrap();
+        let st = lane.state();
+        assert_eq!((st.x, st.y, st.size), (Some(12.0), None, 300.0));
+        // visible=false（从未开相机）：幂等 Ok，不开相机。
+        lane.update(PipUpdate { visible: Some(false), ..Default::default() }).unwrap();
+        assert!(!lane.camera_running());
+        assert!(!lane.state().visible);
+    }
+
+    // —— N3 画中画：像素合成（纯逻辑） ——
+
+    #[test]
+    fn blend_pip_circle_center_camera_border_white_outside_untouched() {
+        // dst 40×40 灰底；cam 10×10 纯红（BGRA = [0,0,255,255]）。
+        // rect 20×20 @(10,10)，描边 2：中心 = 相机红、描边环 = 白、
+        // 圆外矩形内角落 = 灰（主画面原样）。
+        let (w, h) = (40u32, 40u32);
+        let mut dst = vec![0x40u8; (w * h * 4) as usize];
+        let cam: Vec<u8> = [0u8, 0, 255, 255].repeat(10 * 10); // 纯红 BGRA
+        let rect = PipRect { x: 10, y: 10, size: 20, border: 2 };
+        blend_pip_circle(&mut dst, (w * 4) as usize, w, h, &cam, 10, 10, 40, &rect);
+        let px = |i: u32, j: u32| -> [u8; 4] {
+            let o = (j * w + i) as usize * 4;
+            [dst[o], dst[o + 1], dst[o + 2], dst[o + 3]]
+        };
+        assert_eq!(px(20, 20), [0, 0, 255, 255], "圆心 = 相机帧");
+        assert_eq!(px(20, 10), [255, 255, 255, 255], "描边环（圆顶内侧）= 白");
+        assert_eq!(px(11, 11), [0x40, 0x40, 0x40, 0x40], "圆外角落 = 主画面原样");
+        // 对角对称性：四个描边点/四个圆内点一致（圆几何自检）。
+        assert_eq!(px(20, 29), [255, 255, 255, 255], "描边环（圆底）");
+        assert_eq!(px(20, 18), [0, 0, 255, 255], "圆内上移 2px");
+    }
+
+    #[test]
+    fn blend_pip_rejects_degenerate_and_keeps_dst() {
+        let mut dst = vec![7u8; 10 * 10 * 4];
+        let cam = vec![0u8; 4 * 4 * 4];
+        blend_pip_circle(
+            &mut dst, 40, 10, 10, &cam, 4, 4, 16,
+            &PipRect { x: 0, y: 0, size: 0, border: 2 },
+        );
+        assert!(dst.iter().all(|&b| b == 7), "size 0 = 不动 dst");
+        blend_pip_circle(
+            &mut dst, 40, 10, 10, &cam, 4, 4, 16,
+            &PipRect { x: 0, y: 0, size: 4, border: 4 },
+        );
+        assert!(dst.iter().all(|&b| b == 7), "描边 ≥ 直径 = 不动 dst（防御）");
+    }
+
+    #[test]
+    fn pip_box_sample_area_averages_and_honors_stride() {
+        // cam 4×2（stride 20，行尾 4 字节 padding）：size 2 → 每个 dst 像素 = 2×1 块
+        // 均值（水平 4/2=2 列块，垂直 2/2=1 行块）。左块 = 红红 → 红，右块 = 绿绿 → 绿。
+        let mut cam = Vec::new();
+        for _ in 0..2 {
+            cam.extend_from_slice(&[0u8, 0, 255, 255]); // 红
+            cam.extend_from_slice(&[0u8, 0, 255, 255]);
+            cam.extend_from_slice(&[0u8, 255, 0, 255]); // 绿
+            cam.extend_from_slice(&[0u8, 255, 0, 255]);
+            cam.extend_from_slice(&[9u8, 9, 9, 9]); // padding
+        }
+        assert_eq!(
+            pip_box_sample_bgra(&cam, 4, 2, 20, 0, 0, 2),
+            [0, 0, 255, 255],
+            "左块均值 = 红"
+        );
+        assert_eq!(
+            pip_box_sample_bgra(&cam, 4, 2, 20, 1, 0, 2),
+            [0, 255, 0, 255],
+            "右块均值 = 绿（padding 不参与）"
+        );
+    }
+
+    #[test]
+    fn copy_rows_bgra_honors_independent_strides() {
+        // src 3px/行（stride 12）→ dst 4px/行（stride 16），拷贝 w=2：每行 8 字节，
+        // 行距差异不串行、行尾原值保留。
+        let src = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24];
+        let mut dst = vec![0u8; 2 * 16];
+        copy_rows_bgra(&mut dst, 16, &src, 12, 2, 2);
+        assert_eq!(&dst[0..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&dst[16..24], &[13, 14, 15, 16, 17, 18, 19, 20]);
+        assert_eq!(dst[8], 0, "dst 行尾 padding 不被写");
+    }
+
+    // —— N3 F9 证据工具：stts 解析（纯逻辑） ——
+
+    /// 合成最小 MP4 结构：moov→trak→mdia→(hdlr vide | mdhd)→minf→stbl→stts。
+    fn synth_mp4_video_stts(entries: &[(u32, u32)], timescale: u32) -> Vec<u8> {
+        fn box_of(typ: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+            b.extend_from_slice(typ);
+            b.extend_from_slice(body);
+            b
+        }
+        let mut stts_body = vec![0u8; 4]; // version+flags
+        stts_body.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (c, d) in entries {
+            stts_body.extend_from_slice(&c.to_be_bytes());
+            stts_body.extend_from_slice(&d.to_be_bytes());
+        }
+        let stts = box_of(b"stts", &stts_body);
+        let stbl = box_of(b"stbl", &stts);
+        let minf = box_of(b"minf", &stbl);
+        let mut hdlr_body = vec![0u8; 8]; // version+flags + pre_defined
+        hdlr_body.extend_from_slice(b"vide");
+        let hdlr = box_of(b"hdlr", &hdlr_body);
+        let mut mdhd_body = vec![0u8; 4]; // version+flags (v0)
+        mdhd_body.extend_from_slice(&[0u8; 8]); // ctime + mtime
+        mdhd_body.extend_from_slice(&timescale.to_be_bytes());
+        let mdhd = box_of(b"mdhd", &mdhd_body);
+        let mdia = box_of(b"mdia", &[hdlr, mdhd, minf].concat());
+        let trak = box_of(b"trak", &mdia);
+        box_of(b"moov", &trak)
+    }
+
+    #[test]
+    fn mp4_video_deltas_parse_vide_track_and_expand_runs() {
+        // 30fps 匀速：600/30=20 → 300 帧 × 20 → 全 1/30s。
+        let b = synth_mp4_video_stts(&[(300, 20)], 600);
+        let deltas = mp4_video_sample_deltas(&b).unwrap();
+        assert_eq!(deltas.len(), 300);
+        assert!(deltas.iter().all(|d| (d - 1.0 / 30.0).abs() < 1e-12));
+        // 变速 runs：100×20 + 1×40（一次丢帧形态）→ 末位 2/30s。
+        let b = synth_mp4_video_stts(&[(100, 20), (1, 40)], 600);
+        let deltas = mp4_video_sample_deltas(&b).unwrap();
+        assert_eq!(deltas.len(), 101);
+        assert!((deltas[100] - 2.0 / 30.0).abs() < 1e-12);
+        // 音轨（soun）被 hdlr 过滤：只有 soun 轨 → None。
+        let moov_only_soun = {
+            fn box_of(typ: &[u8; 4], body: &[u8]) -> Vec<u8> {
+                let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+                b.extend_from_slice(typ);
+                b.extend_from_slice(body);
+                b
+            }
+            let mut hdlr_body = vec![0u8; 8];
+            hdlr_body.extend_from_slice(b"soun");
+            let trak = box_of(b"trak", &box_of(b"mdia", &box_of(b"hdlr", &hdlr_body)));
+            box_of(b"moov", &trak)
+        };
+        assert_eq!(mp4_video_sample_deltas(&moov_only_soun), None);
+        assert_eq!(mp4_video_sample_deltas(b"not an mp4"), None);
+    }
+
+    // —— N3 画中画：CVPixelBuffer 级合成（CoreVideo 直调，无权限需求） ——
+
+    /// 合成一张 BGRA CVPixelBuffer 并填充。
+    unsafe fn make_bgra_buffer(w: usize, h: usize, fill: [u8; 4]) -> CFRetained<CVPixelBuffer> {
+        use objc2_core_video::{
+            CVPixelBufferCreate, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+            CVPixelBufferGetHeight, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
+        };
+        let mut raw: *mut CVPixelBuffer = std::ptr::null_mut();
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                w,
+                h,
+                kCVPixelFormatType_32BGRA as u32,
+                None,
+                std::ptr::NonNull::from(&mut raw),
+            )
+        };
+        assert_eq!(status, 0, "CVPixelBufferCreate");
+        let buf = unsafe { CFRetained::from_raw(std::ptr::NonNull::new(raw).unwrap()) };
+        unsafe { CVPixelBufferLockBaseAddress(&buf, CVPixelBufferLockFlags(0)) };
+        let base = CVPixelBufferGetBaseAddress(&buf) as *mut u8;
+        let stride = CVPixelBufferGetBytesPerRow(&buf);
+        let height = CVPixelBufferGetHeight(&buf);
+        for row in 0..height {
+            // SAFETY: 锁定窗口内的行切片写入；长度 w*4 ≤ stride。
+            let line = unsafe { std::slice::from_raw_parts_mut(base.add(row * stride), w * 4) };
+            for px in line.chunks_exact_mut(4) {
+                px.copy_from_slice(&fill);
+            }
+        }
+        unsafe { CVPixelBufferUnlockBaseAddress(&buf, CVPixelBufferLockFlags(0)) };
+        buf
+    }
+
+    /// 读回 CVPixelBuffer 一个像素（锁定→读→解锁）。
+    unsafe fn read_px(buf: &CVPixelBuffer, i: usize, j: usize) -> [u8; 4] {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+            CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
+        };
+        unsafe { CVPixelBufferLockBaseAddress(buf, CVPixelBufferLockFlags::ReadOnly) };
+        let base = CVPixelBufferGetBaseAddress(buf) as *const u8;
+        let stride = CVPixelBufferGetBytesPerRow(buf);
+        // SAFETY: 锁定窗口内的只读 4 字节。
+        let out = unsafe {
+            let p = base.add(j * stride + i * 4);
+            [*p, *p.add(1), *p.add(2), *p.add(3)]
+        };
+        unsafe { CVPixelBufferUnlockBaseAddress(buf, CVPixelBufferLockFlags::ReadOnly) };
+        out
+    }
+
+    #[test]
+    fn pip_composite_composes_main_camera_and_border_on_real_buffers() {
+        // 64×64 灰主帧 + 32×32 红相机帧 → 真实 CVPixelBuffer 合成（分配路径 =
+        // CVPixelBufferCreate，与生产一致——见 pip_composite_frame 的池裁定注）。
+        let main = unsafe { make_bgra_buffer(64, 64, [0x40, 0x40, 0x40, 0xFF]) };
+        let cam = unsafe { make_bgra_buffer(32, 32, [0, 0, 255, 255]) };
+        let lane = std::sync::Arc::new(PipLane::new());
+        let st = PipState { x: Some(10.0), y: Some(10.0), size: 20.0, visible: true };
+        *lane.state.lock().unwrap() = st;
+        lane.inject_frame(cam);
+        let out = unsafe { pip_composite_frame(&lane, &main, 1.0) };
+        let PipComposite::Composited(dst) = out else {
+            panic!("合成应成功");
+        };
+        // rect：size=20px @(10,10)（1x：240→20 旋钮 clamp？——size 20 逻辑 < 64 下限
+        // → 64px……此处直接断言真实几何：size = clamp(20,64,480)=64，夹取 (0,0)）。
+        let rect = pip_rect_px(64, 64, 1.0, &st).unwrap();
+        let cx = (rect.x + rect.size / 2) as usize;
+        let cy = (rect.y + rect.size / 2) as usize;
+        assert_eq!(unsafe { read_px(&dst, cx, cy) }, [0, 0, 255, 255], "圆心 = 相机");
+        assert_eq!(unsafe { read_px(&dst, cx, rect.y as usize) }, [255; 4], "描边 = 白");
+        assert_eq!(unsafe { read_px(&dst, 2, 2) }, [0x40, 0x40, 0x40, 0xFF], "圆外 = 主画面");
+    }
+
+    #[test]
+    fn pip_composite_plain_when_hidden_or_no_camera_frame() {
+        let main = unsafe { make_bgra_buffer(32, 32, [1, 2, 3, 255]) };
+        // 不可见 → Plain。
+        let lane = std::sync::Arc::new(PipLane::new());
+        assert!(matches!(
+            unsafe { pip_composite_frame(&lane, &main, 1.0) },
+            PipComposite::Plain
+        ));
+        // 可见但无相机帧 → Plain（无 PiP 该帧，writer 不被 stall）。
+        lane.update(PipUpdate { visible: Some(true), ..Default::default() })
+            .unwrap_or_else(|e| {
+                // TCC 拒绝环境（headless CLI）：visible 未置位，语义同为 Plain——
+                // 两分支都断言即可。
+                eprintln!("[test] 相机不可用（环境性）：{e}");
+            });
+        assert!(matches!(
+            unsafe { pip_composite_frame(&lane, &main, 1.0) },
+            PipComposite::Plain
+        ));
+    }
+
+    // —— N3 相机采集道（#[ignore]，需相机权限；无权限/无设备环境打印后跳过） ——
+
+    /// 真实相机采集：enable → 2s 帧计数 ≥ 30（30fps 下限）→ disable。
+    /// TCC 未授予（headless/CI）→ 打印环境说明后提前返回（skip 语义，不算失败）。
+    #[test]
+    #[ignore = "需要 macOS 相机权限（FaceTime HD）；授权后 -- --ignored 运行"]
+    fn real_camera_lane_counts_frames_over_2s() {
+        let lane = std::sync::Arc::new(PipLane::new());
+        match lane.update(PipUpdate { visible: Some(true), ..Default::default() }) {
+            Ok(()) => {}
+            Err(e) => {
+                println!("[n3] SKIP（相机不可用，权限/设备环境性）: {e}");
+                assert!(!lane.camera_running(), "失败后不得留下半启会话");
+                assert!(!lane.state().visible, "失败后 visible 必须回落 false");
+                return;
+            }
+        }
+        assert!(lane.camera_running());
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let frames = lane.camera_frames();
+        println!("[n3] 相机 2s 交付 {frames} 帧（30fps 下限 30）");
+        assert!(frames >= 30, "2s 内相机帧数 {frames} 应 ≥30");
+        lane.update(PipUpdate { visible: Some(false), ..Default::default() })
+            .expect("disable");
+        assert!(!lane.camera_running(), "disable 后会话应停运");
+    }
+
+    // —— N3 F9 端到端（#[ignore]）：经 pip-f9-probe 子进程（动窗驱动 30fps 交付 +
+    // 相机/注入源合成）→ pts 连续性 + PiP 区域运动熵断言。见 src/bin/pip-f9-probe.rs
+    // 与 tests/real_pip_recording.rs（probe 载体与 swift 抽帧工具在那边断言）。
 }
