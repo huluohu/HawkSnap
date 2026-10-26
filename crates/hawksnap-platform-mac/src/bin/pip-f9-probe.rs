@@ -21,7 +21,10 @@ use hawksnap_platform_mac::record::{
 };
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSBackingStoreType, NSColor, NSWindow, NSWindowStyleMask};
+// CoreVideo 直调仅注入模式（test-util）使用——门控与 make_synthetic_frame 同步。
+#[cfg(feature = "test-util")]
 use objc2_core_foundation::CFRetained;
+#[cfg(feature = "test-util")]
 use objc2_core_video::{
     kCVPixelFormatType_32BGRA, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
     CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
@@ -99,12 +102,24 @@ fn main() {
             "camera"
         }
         Err(e) => {
-            println!("[probe] camera unavailable ({e}) → injected synthetic source");
-            // 注入模式：visible=true（相机未启——探针专用直写）+ 合成动画帧槽。
-            lane.set_state_for_probe(PipState { visible: true, ..Default::default() });
-            start_injector(lane.clone());
-            println!("[probe] mode=injected");
-            "injected"
+            // 相机缺席 → 注入模式（test-util 门控的合成帧槽——评审清单④）。
+            #[cfg(feature = "test-util")]
+            {
+                println!("[probe] camera unavailable ({e}) → injected synthetic source");
+                lane.set_state_for_probe(PipState { visible: true, ..Default::default() });
+                start_injector(lane.clone());
+                println!("[probe] mode=injected");
+                "injected"
+            }
+            #[cfg(not(feature = "test-util"))]
+            {
+                let _ = e;
+                eprintln!(
+                    "[probe] FAIL: 相机不可用且未启用 test-util（注入模式缺席）——\
+                     以 --features test-util 重跑（F9 注入模式载体，评审清单④）"
+                );
+                std::process::exit(3);
+            }
         }
     };
     let pip_path_for_thread = pip_path.clone();
@@ -232,8 +247,9 @@ fn run_motion_loop<R: Send + 'static>(
     result.expect("录制线程未返回结果（超时/panic，见上方日志）")
 }
 
-/// 注入模式：30fps 合成动画帧（移动方块 + 帧计数色移）→ 相机槽；线程在
+/// 注入模式：30fps 合成动画帧（7 色轮转 + 游走白方块）→ 相机槽；线程在
 /// PIP_SECS+5s 后自停（录制收尾后无消费方，不留残）。
+#[cfg(feature = "test-util")]
 fn start_injector(lane: Arc<PipLane>) {
     std::thread::spawn(move || {
         let t0 = Instant::now();
@@ -254,6 +270,7 @@ fn start_injector(lane: Arc<PipLane>) {
 }
 
 /// 合成一帧 BGRA（移动方块 + 色移——帧间必变，运动熵源）。
+#[cfg(feature = "test-util")]
 fn make_synthetic_frame(w: usize, h: usize, n: u64) -> Option<CFRetained<CVPixelBuffer>> {
     unsafe {
         let mut raw: *mut CVPixelBuffer = std::ptr::null_mut();

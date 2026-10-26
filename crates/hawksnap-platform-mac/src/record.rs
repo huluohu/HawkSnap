@@ -593,25 +593,43 @@ pub fn pip_rect_px(main_w: u32, main_h: u32, scale: f64, st: &PipState) -> Optio
     Some(PipRect { x, y, size: size_px, border: border_px })
 }
 
+/// 相机画幅的 cover 裁剪（评审清单④：16:9 相机直塞 1:1 圆会横向压扁——取
+/// **居中方形的 cover-crop**：边 = min(w,h)，短边满幅、长边居中裁，画面内容
+/// 不变形（等价 CSS object-fit: cover）。返回 (x0, y0, side)。
+pub fn pip_cover_crop(cam_w: u32, cam_h: u32) -> (u32, u32, u32) {
+    let side = cam_w.min(cam_h).max(1);
+    (cam_w.saturating_sub(side) / 2, cam_h.saturating_sub(side) / 2, side)
+}
+
 /// PiP 内的相机采样（纯函数可测）：目标圆内像素 (tx, ty)（相对 rect 原点）←
-/// 相机帧盒式均值（同 [`downsample_bgra_to_rgba_max_edge`] 的整数块划分——缩小时
-/// 区域平均，1:1 时退化为直采，无双实现）。u64 累加防大块溢出（N2 同款纪律）。
+/// 相机帧 cover-crop 区（见 [`pip_cover_crop`]）的盒式均值（同
+/// [`downsample_bgra_to_rgba_max_edge`] 的整数块划分——缩小时区域平均，1:1 时
+/// 退化为直采，无双实现）。u64 累加防大块溢出（N2 同款纪律）。
 fn pip_box_sample_bgra(
     cam: &[u8],
     cam_w: u32,
     cam_h: u32,
     cam_stride: usize,
+    (crop_x0, crop_y0, crop_side): (u32, u32, u32),
     tx: u32,
     ty: u32,
     size: u32,
 ) -> [u8; 4] {
-    if size == 0 || cam_w == 0 || cam_h == 0 {
+    if size == 0 || crop_side == 0 {
         return [0, 0, 0, 255];
     }
     let (cw, ch) = (cam_w as usize, cam_h as usize);
     let (tx, ty, size) = (tx as usize, ty as usize, size as usize);
-    let (x0, x1) = (tx * cw / size, ((tx + 1) * cw + size - 1) / size);
-    let (y0, y1) = (ty * ch / size, ((ty + 1) * ch + size - 1) / size);
+    let side = crop_side as usize;
+    // 采样块在 cover-crop 区内划分，再平移到整帧坐标（行距仍按整帧 stride 取）。
+    let (x0, x1) = (
+        crop_x0 as usize + tx * side / size,
+        crop_x0 as usize + (((tx + 1) * side + size - 1) / size),
+    );
+    let (y0, y1) = (
+        crop_y0 as usize + ty * side / size,
+        crop_y0 as usize + (((ty + 1) * side + size - 1) / size),
+    );
     let (x1, y1) = (x1.max(x0 + 1).min(cw), y1.max(y0 + 1).min(ch));
     let (mut b, mut g, mut r, mut a) = (0u64, 0u64, 0u64, 0u64);
     for sy in y0..y1 {
@@ -652,6 +670,8 @@ pub fn blend_pip_circle(
     let r = size as f64 / 2.0;
     let ring = (r - rect.border as f64).max(0.0);
     let (r2, ring2) = (r * r, ring * ring);
+    // cover-crop 每帧算一次（16:9 相机 → 居中 1:1 方区，画面不变形）。
+    let crop = pip_cover_crop(cam_w, cam_h);
     let x_end = (rect.x + size).min(dst_w);
     let y_end = (rect.y + size).min(dst_h);
     for j in rect.y..y_end {
@@ -666,7 +686,7 @@ pub fn blend_pip_circle(
             let color = if d2 > ring2 {
                 [255, 255, 255, 255] // 描边环（白，任何背景可辨）
             } else {
-                pip_box_sample_bgra(cam, cam_w, cam_h, cam_stride, i - rect.x, j - rect.y, size)
+                pip_box_sample_bgra(cam, cam_w, cam_h, cam_stride, crop, i - rect.x, j - rect.y, size)
             };
             px.copy_from_slice(&color);
         }
@@ -1338,9 +1358,10 @@ impl Drop for CameraSession {
 pub struct PipLane {
     state: std::sync::Mutex<PipState>,
     camera: std::sync::Mutex<Option<CameraSession>>,
-    /// 测试注入槽（#[doc(hidden)]）：F9 端到端探针在 TCC 相机不可用的 CLI 环境，
-    /// 把合成 CVPixelBuffer 放进**与 delegate 同型的槽**，走通「槽 → 合成 → writer」
-    /// 全程。生产路径零写入、合成读取侧仅多一次 Option 判空（热路径成本可忽略）。
+    /// 测试注入槽（评审清单④：`test-util` feature / cfg(test) 门控，生产构建零
+    /// 注入面）：F9 端到端探针在 TCC 相机不可用的 CLI 环境，把合成 CVPixelBuffer
+    /// 放进**与 delegate 同型的槽**，走通「槽 → 合成 → writer」全程。
+    #[cfg(any(test, feature = "test-util"))]
     injected: std::sync::Mutex<Option<CFRetained<CVPixelBuffer>>>,
 }
 
@@ -1355,6 +1376,7 @@ impl PipLane {
         Self {
             state: std::sync::Mutex::new(PipState::default()),
             camera: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "test-util"))]
             injected: std::sync::Mutex::new(None),
         }
     }
@@ -1437,6 +1459,7 @@ impl PipLane {
     /// 最新相机帧（Retained clone 亚微秒出锁；None = 相机未启/暂无帧——该帧合成
     /// 退化为直通，绝不 stall writer）。注入槽非空时优先生效（测试路径，见下）。
     fn latest_camera_buffer(&self) -> Option<CFRetained<CVPixelBuffer>> {
+        #[cfg(any(test, feature = "test-util"))]
         if let Some(buf) = self.injected.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Some(buf);
         }
@@ -1462,23 +1485,23 @@ impl PipLane {
         self.camera.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
-    /// 测试注入（#[doc(hidden)]）：把一帧放进注入槽——与 delegate 写入的相机槽
+    /// 测试注入（`test-util` 门控）：把一帧放进注入槽——与 delegate 写入的相机槽
     /// 同型（Retained<CVPixelBuffer>）、同一读取入口（[`Self::latest_camera_buffer`]）。
-    /// 生产代码不调用；TCC 相机缺席环境下的 F9 端到端证据载体（任务报告「诚实边界」）。
-    #[doc(hidden)]
+    /// 生产代码不存在；TCC 相机缺席环境下的 F9 端到端证据载体（任务报告「诚实边界」）。
+    #[cfg(any(test, feature = "test-util"))]
     pub fn inject_frame(&self, buf: CFRetained<CVPixelBuffer>) {
         *self.injected.lock().unwrap_or_else(|e| e.into_inner()) = Some(buf);
     }
 
     /// 清空注入槽（测试收口，恢复纯相机路径）。
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn clear_injected(&self) {
         *self.injected.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    /// 直接覆写状态（#[doc(hidden)]，仅 F9 探针）：注入模式下相机未起，visible
+    /// 直接覆写状态（`test-util` 门控，仅 F9 探针）：注入模式下相机未起，visible
     /// 无法经 update 置位——探针直接设 visible=true + 注入位置，走同一条合成路。
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn set_state_for_probe(&self, st: PipState) {
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = st;
     }
@@ -1496,6 +1519,28 @@ unsafe impl Sync for PipLane {}
 // ---------------------------------------------------------------------------
 // N3 PiP 合成（SCStream 视频回调线程调用；CPU 侧像素运算）
 // ---------------------------------------------------------------------------
+
+/// 降级留痕限频（评审清单④）：合成降级路径按帧触发（30fps）——持续降级（如相机
+/// 被系统回收）会刷屏 stderr。限频 **5s 一条**（毫秒挂钟，Relaxed 即可：视频回调
+/// 单串行队列，原子只防多会话并发时的重复打印，丢一次打印无语义损失）。
+fn pip_warn_limited(msg: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_WARN_MS: AtomicU64 = AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_WARN_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) >= 5000 && LAST_WARN_MS.compare_exchange(
+        last,
+        now_ms,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    ) == Ok(last)
+    {
+        eprintln!("[pip] {msg}");
+    }
+}
 
 /// N3 PiP 合成结果（append_video 的处置依据）。
 enum PipComposite {
@@ -1532,11 +1577,11 @@ unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) 
         CVPixelBufferGetHeight(main) as u32,
     );
     let Some(rect) = pip_rect_px(mw, mh, scale, &st) else {
-        eprintln!("[pip] 合成降级 Plain: 几何不可用 (main={mw}x{mh} scale={scale})");
+        pip_warn_limited(&format!("合成降级 Plain: 几何不可用 (main={mw}x{mh} scale={scale})"));
         return PipComposite::Plain;
     };
     let Some(cam) = lane.latest_camera_buffer() else {
-        eprintln!("[pip] 合成降级 Plain: 相机帧缺席");
+        pip_warn_limited("合成降级 Plain: 相机帧缺席");
         return PipComposite::Plain; // 相机帧缺席 → 无 PiP 该帧
     };
     let (cw, ch) = (
@@ -1544,7 +1589,7 @@ unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) 
         CVPixelBufferGetHeight(&cam) as u32,
     );
     if cw == 0 || ch == 0 {
-        eprintln!("[pip] 合成降级 Plain: 相机帧退化 {cw}x{ch}");
+        pip_warn_limited(&format!("合成降级 Plain: 相机帧退化 {cw}x{ch}"));
         return PipComposite::Plain;
     }
 
@@ -1573,7 +1618,7 @@ unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) 
         }
     }
     let Some(dst) = dst else {
-        eprintln!("[pip] 背压丢帧: CVPixelBufferCreate 失败 (status 非 0)");
+        pip_warn_limited("背压丢帧: CVPixelBufferCreate 失败 (status 非 0)");
         return PipComposite::Drop; // 分配失败 → 背压丢帧（writer 无感）
     };
     // 尺寸防御（Create 按主帧尺寸构造，理论恒一致；防御未知的缓冲形态）。
@@ -1582,7 +1627,7 @@ unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) 
         CVPixelBufferGetHeight(&dst) as u32,
     );
     if (dw, dh) != (mw, mh) {
-        eprintln!("[pip] 合成降级 Plain: 池尺寸不符 dst={dw}x{dh} main={mw}x{mh}");
+        pip_warn_limited(&format!("合成降级 Plain: 合成缓冲尺寸不符 dst={dw}x{dh} main={mw}x{mh}"));
         return PipComposite::Plain;
     }
 
@@ -1592,7 +1637,7 @@ unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) 
     let read_lock = CVPixelBufferLockFlags::ReadOnly;
     let write_lock = CVPixelBufferLockFlags(0);
     if unsafe { CVPixelBufferLockBaseAddress(main, read_lock) } != 0 {
-        eprintln!("[pip] 合成降级 Plain: 主帧锁定失败");
+        pip_warn_limited("合成降级 Plain: 主帧锁定失败");
         return PipComposite::Plain;
     }
     let mut cam_locked = false;
@@ -1613,22 +1658,22 @@ unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) 
         let cam_base = CVPixelBufferGetBaseAddress(&cam) as *const u8;
         let dst_base = CVPixelBufferGetBaseAddress(&dst) as *mut u8;
         if main_base.is_null() || cam_base.is_null() || dst_base.is_null() {
-            eprintln!(
-                "[pip] 基址异常: main={} cam={} dst={}",
+            pip_warn_limited(&format!(
+                "基址异常: main={} cam={} dst={}",
                 main_base.is_null(),
                 cam_base.is_null(),
                 dst_base.is_null()
-            );
+            ));
             return false; // 基址异常：不把半成品入列 → Drop
         }
         if main_stride < mw as usize * 4
             || cam_stride < cw as usize * 4
             || dst_stride < dw as usize * 4
         {
-            eprintln!(
-                "[pip] 行距异常: main_stride={main_stride} (需 {}) cam_stride={cam_stride} (需 {}) dst_stride={dst_stride} (需 {})",
+            pip_warn_limited(&format!(
+                "行距异常: main_stride={main_stride} (需 {}) cam_stride={cam_stride} (需 {}) dst_stride={dst_stride} (需 {})",
                 mw * 4, cw * 4, dw * 4
-            );
+            ));
             return false;
         }
         // SAFETY: 锁定窗口内的切片；长度按行对齐契约覆盖整幅缓冲。
@@ -1661,9 +1706,9 @@ unsafe fn pip_composite_frame(lane: &PipLane, main: &CVPixelBuffer, scale: f64) 
     } else {
         // 合成中途任何失败（锁定/基址/行距）→ 本帧直通主画面原样 append——
         // writer 永不被 stall；Drop 语义只留给上游的池耗尽路径。
-        eprintln!(
-            "[pip] 合成降级 Plain: 中途失败 (cam_locked={cam_locked} dst_locked={dst_locked})"
-        );
+        pip_warn_limited(&format!(
+            "合成降级 Plain: 中途失败 (cam_locked={cam_locked} dst_locked={dst_locked})"
+        ));
         PipComposite::Plain
     }
 }
@@ -3029,13 +3074,17 @@ mod tests {
             cam.extend_from_slice(&[0u8, 255, 0, 255]);
             cam.extend_from_slice(&[9u8, 9, 9, 9]); // padding
         }
+        // cam 4×2 非方形：cover-crop 取 side=2、居中 x0=1 → 采样区 = 列 [1,3)
+        // （左块 = 第 1 列红、右块 = 第 2 列绿——padding 与两侧裁掉列不参与）。
+        let crop = pip_cover_crop(4, 2);
+        assert_eq!(crop, (1, 0, 2));
         assert_eq!(
-            pip_box_sample_bgra(&cam, 4, 2, 20, 0, 0, 2),
+            pip_box_sample_bgra(&cam, 4, 2, 20, crop, 0, 0, 2),
             [0, 0, 255, 255],
-            "左块均值 = 红"
+            "左块均值 = 红（crop 平移后）"
         );
         assert_eq!(
-            pip_box_sample_bgra(&cam, 4, 2, 20, 1, 0, 2),
+            pip_box_sample_bgra(&cam, 4, 2, 20, crop, 1, 0, 2),
             [0, 255, 0, 255],
             "右块均值 = 绿（padding 不参与）"
         );

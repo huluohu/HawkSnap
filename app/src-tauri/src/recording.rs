@@ -559,12 +559,21 @@ pub fn pip_update(
     }
     #[cfg(target_os = "macos")]
     {
-        let guard = lock_rec();
-        let rt = guard.as_ref().ok_or_else(|| "没有进行中的录屏".to_string())?;
-        let lane = rt
-            .pip_lane
-            .clone()
-            .ok_or_else(|| "本会话不支持画中画".to_string())?;
+        // 只在锁内做「取 lane 引用」——**drop(guard) 后再 update**（评审 Important 修复）：
+        // update 内部的首次开启会走 TCC 同步等待（≤15s）+ startRunning（百 ms-1s 级），
+        // 持 REC 锁跨这段会让悬浮条计时/暂停/停止整窗无响应。PipLane 内部自同步
+        // （状态/相机各一把 Mutex），锁外调用安全；REC 取出（stop 路径 take）与
+        // update 的竞态由 Arc 存活语义兜底——lane 归 stop 后的收口线程拥有，update
+        // 只碰其中自同步的状态/相机锁，无悬垂。
+        let lane = {
+            let guard = lock_rec();
+            guard
+                .as_ref()
+                .ok_or_else(|| "没有进行中的录屏".to_string())?
+                .pip_lane
+                .clone()
+                .ok_or_else(|| "本会话不支持画中画".to_string())?
+        };
         lane.update(PipUpdate { x, y, size, visible })
     }
 }

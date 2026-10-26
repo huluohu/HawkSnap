@@ -6,6 +6,12 @@ edition.workspace = true
 [lints]
 workspace = true
 
+# 评审清单④：测试注入面（PipLane::inject_frame / set_state_for_probe / clear_injected
+# + injected 槽）只在本 feature 或 crate 自身单测（cfg(test)）下编译——生产构建零
+# 注入面。F9 探针与 real_pip_recording 集成测试需 --features test-util。
+[features]
+test-util = []
+
 [dependencies]
 hawksnap-core.workspace = true
 xcap = "0.4"
