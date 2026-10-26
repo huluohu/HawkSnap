@@ -3,10 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { t } from "../../lib/i18n";
 
-// M6 录屏悬浮条（280×56 深色实心、常驻复用——与 countdown 同款 show/hide 模式）：
-// 计时 mm:ss + 暂停/恢复 + 停止。时间语义单源在 Rust（hawk://record-tick 每秒广播
-// {session, seconds, paused}），本页纯渲染——webview 后台节流不影响计时正确性。mount 时先经
-// record_status 拉取补显（push 早于 listen 必丢，countdown 同一问题形态）。
+// 录屏悬浮条（M6 首版 280×56；N4 加按键显示开关后加宽为 320×56——顶部居中定位
+// 不变、宽度自适应内容，常驻复用与 countdown 同款 show/hide 模式）：
+// 计时 mm:ss + 暂停/恢复 + 停止 + 画中画/按键显示开关。时间语义单源在 Rust
+//（hawk://record-tick 每秒广播{session, seconds, paused}），本页纯渲染——webview
+// 后台节流不影响计时正确性。mount 时先经 record_status 拉取补显（push 早于 listen
+// 必丢，countdown 同一问题形态）。
 // mm:ss（tabular-nums 由 time 样式保证）
 const mmss = (s: number) =>
   `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -24,6 +26,9 @@ export default function RecordingBarWindow() {
   // N3 画中画开关（bar 单侧驱动：pip_update(visible) → 共享 PiPState → 下一帧生效）。
   // 本地乐观置位 + 失败回落（Err 回流 = 相机不可用/权限拒绝 → 瞬态错误提示，PiP 保持关）。
   const [pipOn, setPipOn] = useState(false);
+  // N4 按键显示开关（同 pip 口径：乐观置位 + keycast_set Err 回落 + 瞬态错误——
+  // 未授予辅助功能 / 未在录制中均为 Err；录屏停止时 Rust 侧自动收口，新会话默认关）。
+  const [keycastOn, setKeycastOn] = useState(false);
   // 上一 tick 的会话号（ref 而非 state：listen 回调闭包不随渲染更新，state 会取到
   // 初值 null 导致每 tick 都判「新会话」而误清当会话错误）。
   const lastSessionRef = useRef<number | null>(null);
@@ -82,7 +87,7 @@ export default function RecordingBarWindow() {
   };
 
   // N3 画中画开关：乐观置位 → pip_update 失败（相机权限未授予/无相机）回落 +
-  // 瞬态错误（Rust Err 文案中文，2s 自动清除避免占满 280px 条）。
+  // 瞬态错误（Rust Err 文案中文，2s 自动清除避免占满条宽）。
   const pipTimerRef = useRef<number | null>(null);
   const togglePip = () => {
     const next = !pipOn;
@@ -92,6 +97,21 @@ export default function RecordingBarWindow() {
       setError(String(e));
       if (pipTimerRef.current !== null) window.clearTimeout(pipTimerRef.current);
       pipTimerRef.current = window.setTimeout(() => setError(null), 2000);
+    });
+  };
+
+  // N4 按键显示开关：与 togglePip 同款乐观置位 + Err 回落 + 2s 瞬态错误。
+  // 错误文案来自 Rust（辅助功能未授予 / 没有进行中的录屏），中文长文案由
+  // maxWidth+overflow 截断显示（与既有错误行同口径）。
+  const keycastTimerRef = useRef<number | null>(null);
+  const toggleKeycast = () => {
+    const next = !keycastOn;
+    setKeycastOn(next);
+    void invoke("keycast_set", { enabled: next }).catch((e) => {
+      setKeycastOn(false);
+      setError(String(e));
+      if (keycastTimerRef.current !== null) window.clearTimeout(keycastTimerRef.current);
+      keycastTimerRef.current = window.setTimeout(() => setError(null), 2000);
     });
   };
 
@@ -116,7 +136,7 @@ export default function RecordingBarWindow() {
     background: "#16202E", color: "#E8ECF1", cursor: "pointer", flexShrink: 0,
   };
   const btnDanger: CSSProperties = { ...btn, background: "#3A1620", borderColor: "#5B2430" };
-  // N1：区域标题（「区域 W×H」，小号灰字）。可收缩（minWidth 0 + ellipsis）——280px
+  // N1：区域标题（「区域 W×H」，小号灰字）。可收缩（minWidth 0 + ellipsis）——320px
   // 条内与计时/按钮共存，挤压时先缩标题、计时与按钮不动（flexShrink 0）。
   const regionLabel: CSSProperties = {
     fontSize: 10, lineHeight: 1, color: "#8A8F98", flexShrink: 1, minWidth: 0,
@@ -132,6 +152,13 @@ export default function RecordingBarWindow() {
     ...btn,
     ...(pipOn ? { border: "1px solid #3E6B4C", color: "#7ED087" } : {}),
     padding: "5px 8px",
+  };
+  // N4：按键显示开关（同 pip 的 aria-pressed 口径；图标字形「⌨」+ aria-label/
+  // title 走 i18n——320px 条内与全部文字按钮共存，图标是唯一放得下的形态）。
+  const keycastBtn: CSSProperties = {
+    ...btn,
+    ...(keycastOn ? { border: "1px solid #3E6B4C", color: "#7ED087" } : {}),
+    padding: "5px 8px", fontSize: 14, lineHeight: 1,
   };
 
   return (
@@ -153,6 +180,15 @@ export default function RecordingBarWindow() {
       {error && <span style={{ fontSize: 10, color: "#E5484D", maxWidth: 80, overflow: "hidden" }}>{error}</span>}
       <button style={pipBtn} onClick={togglePip} aria-pressed={pipOn} title={t("record.pip")}>
         {t("record.pip")}
+      </button>
+      <button
+        style={keycastBtn}
+        onClick={toggleKeycast}
+        aria-pressed={keycastOn}
+        aria-label={t("record.keycast")}
+        title={t("record.keycast")}
+      >
+        <span aria-hidden="true">⌨</span>
       </button>
       <button style={btn} onClick={togglePause}>
         {paused ? t("record.resume") : t("record.pause")}

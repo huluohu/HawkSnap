@@ -108,6 +108,7 @@
   "record.format.mp4": "MP4",
   "record.format.gif": "GIF",
   "record.pip": "画中画",
+  "record.keycast": "按键显示",
   "record.pause": "暂停",
   "record.resume": "恢复",
   "record.stop": "停止",

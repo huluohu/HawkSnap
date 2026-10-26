@@ -99,3 +99,35 @@ describe("recording bar pip toggle (N3)", () => {
     expect(screen.getByText(/相机权限未授予/)).toBeTruthy();
   });
 });
+
+describe("recording bar keycast toggle (N4)", () => {
+  it("invokes keycast_set with optimistic on/off and reverts on permission failure", async () => {
+    const calls: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "keycast_set") {
+        calls.push({ cmd, args: args ?? {} });
+        // 第三次调用（第二次开启）模拟辅助功能未授予（Rust Err 中文回流）。
+        if (calls.length === 3) return Promise.reject("需辅助功能权限：系统设置→隐私与安全性→辅助功能 中添加 HawkSnap");
+      }
+      return Promise.resolve(null);
+    });
+    render(<RecordingBarWindow />);
+    await act(async () => {});
+    // 图标字形按钮：可达名走 aria-label（i18n en-US = "Keycast"）。
+    const btn = () => screen.getByRole("button", { name: "Keycast" });
+    // 默认关（aria-pressed=false）→ 点击 = 开启，乐观置位 + invoke 载荷 enabled:true。
+    expect(btn().getAttribute("aria-pressed")).toBe("false");
+    await act(async () => { btn().click(); });
+    expect(calls[0]).toEqual({ cmd: "keycast_set", args: { enabled: true } });
+    expect(btn().getAttribute("aria-pressed")).toBe("true");
+    // 再点击 = 关闭（enabled:false）。
+    await act(async () => { btn().click(); });
+    expect(calls[1]).toEqual({ cmd: "keycast_set", args: { enabled: false } });
+    // 失败路径：开启被拒 → 回落 aria-pressed=false + 行内错误（Rust 文案）。
+    await act(async () => { btn().click(); });
+    expect(calls[2].args).toEqual({ enabled: true });
+    await act(async () => {}); // flush rejection
+    expect(btn().getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText(/辅助功能权限/)).toBeTruthy();
+  });
+});

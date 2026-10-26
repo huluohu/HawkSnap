@@ -6,7 +6,8 @@
 //! 兑现区域录制**：F6 统一进入覆盖层录制选区模式（拖选=区域、Enter/双击=整屏快捷
 //! 确认、Esc=取消，旧「直接全屏」语义废除），确认路径走 [`record_start_region`]；
 //! 全屏路径 [`record_start`] 命令**保留给 API 兼容**（plan Interfaces 裁定）。
-//! 悬浮条 280×56 常驻复用（与 countdown 同款 show/hide），区域录制在条上追加
+//! 悬浮条 320×56 常驻复用（与 countdown 同款 show/hide；M6 首版 280 宽，N4 加
+//! 按键显示开关后 280 容不下——顶部居中定位不变，宽度自适应内容），区域录制在条上追加
 //! 「区域 W×H」标题（选区逻辑尺寸，与覆盖层选区标签同口径）。**N2 输出格式**：
 //! 覆盖层录制横幅的 MP4/GIF 分段开关 → 会话 `format`（中途不可切）；GIF 会话 =
 //! MP4 管线原样 + 旁路抽帧（平台侧 GifLane 32MB 有界队列），stop 时编码 .gif
@@ -606,6 +607,12 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
     // close 须非主线程（record_stop 为 async 命令，运行时线程 ✓）；不入 idle_reaper
     //（close 语义更干净，reaper 是「隐藏满 10 分钟」的兜底，此处有明确生命周期点）。
 
+    // N4 按键显示随录停止（不变量「tap 只在录制中存活」的执行点，best-effort）：
+    // 取出 rt（REC 已空）后立即停 tap + 关 keycast 小窗——覆盖 stop 收尾成功与
+    // 失败两条路径（收尾失败时录制同样已结束，监听不留过夜）。此点在 ≤25s 阻塞
+    // 收尾**之前**：录屏一停 UI 即收，不等 writer。
+    crate::keycast::keycast_disable(&app);
+
     // 录制时长（M3 继承项①，入库 duration 列）：stop 收尾**前**取时刻——
     // recorder.stop() 阻塞 ≤25s 不得计入；口径与 tick/record_status 一致。
     // 注意：gif 会话的实际入库时长换成 GIF 时间线（末帧 PTS），此处值只作降级兜底。
@@ -725,7 +732,8 @@ fn spawn_tick_thread(app: AppHandle) {
 }
 
 // ---------------------------------------------------------------------------
-// 悬浮条窗口（常驻复用，与 countdown 同款 show/hide；280×56 深色实心）
+// 悬浮条窗口（常驻复用，与 countdown 同款 show/hide；320×56 深色实心——N4 加按键
+// 显示开关后由 280 加宽，见模块注）
 // ---------------------------------------------------------------------------
 
 /// 位置裁定：主显示器顶部居中（录制条贴着屏幕上缘不遮挡内容区）；
@@ -741,7 +749,7 @@ fn show_recording_bar(app: &AppHandle) -> Result<(), String> {
         "recording-bar",
         WebviewUrl::App("recording-bar?window=recording-bar".into()),
     )
-    .inner_size(280.0, 56.0)
+    .inner_size(320.0, 56.0)
     .decorations(false)
     .always_on_top(true)
     .resizable(false)
@@ -757,7 +765,7 @@ fn show_recording_bar(app: &AppHandle) -> Result<(), String> {
 
 fn position_bar(w: &tauri::WebviewWindow) {
     if let Some(m) = w.primary_monitor().ok().flatten() {
-        let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(280, 56));
+        let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(320, 56));
         let x = m.position().x + ((m.size().width as i32 - size.width as i32) / 2).max(0);
         // 顶部安全区下移一点（刘海屏）：24 逻辑 px。
         let y = m.position().y + 24;

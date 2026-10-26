@@ -108,6 +108,7 @@
   "record.format.mp4": "MP4",
   "record.format.gif": "GIF",
   "record.pip": "PiP",
+  "record.keycast": "Keycast",
   "record.pause": "Pause",
   "record.resume": "Resume",
   "record.stop": "Stop",

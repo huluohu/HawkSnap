@@ -5,6 +5,7 @@ mod g4;
 mod gif;
 mod history;
 mod idle_reaper;
+mod keycast;
 mod ocr;
 mod overlay;
 mod panel;
@@ -101,6 +102,7 @@ pub fn run() {
             recording::record_start, recording::record_pause, recording::record_resume,
             recording::record_stop, recording::record_status, recording::record_start_region,
             recording::pip_update,
+            keycast::keycast_set,
             updater::check_for_updates, updater::install_update, updater::restart_app
         ])
         .setup(|app| {
