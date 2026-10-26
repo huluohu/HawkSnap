@@ -137,6 +137,20 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     eprintln!("[hawksnap] {combo_owned} 热键触发（record toggle）");
                     let app = app2.clone();
                     std::thread::spawn(move || {
+                        // 互斥守卫（终审 wave，F6→截图方向）：截图覆盖层可见（一轮截图
+                        // 进行中）时拒绝**启动**录屏——否则覆盖层冻结帧 + 录制条同屏叠加，
+                        // 两套全屏 UI 互抢输入。停止路径不受影响（recording_active 时
+                        // 放行去停；两态经对向守卫后不再共存，此处防御性放行）。
+                        // 反馈走既有 capture-error 横幅通道（懒拉面板，不静默；文案是
+                        // 「先完成截图」语义，归截图侧通道）。
+                        let overlay_visible =
+                            super::flow::ANY_OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::SeqCst);
+                        if !crate::recording::recording_active() {
+                            if let Some(msg) = crate::recording::f6_start_guard_msg(overlay_visible) {
+                                crate::panel::show_capture_error(&app, msg.to_string());
+                                return;
+                            }
+                        }
                         // M6 录屏 toggle：空闲 → 启动全屏录制；录制/暂停中 → 停止。
                         // toggle 内部含权限预检/建窗（非主线程 ✓）/阻塞收尾（stop ≤25s，
                         // 热键线程可承受——与托盘入口同款纪律）。

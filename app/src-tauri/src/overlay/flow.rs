@@ -39,8 +39,28 @@ pub struct DisplayPayloadForTest {
     pub flow: u64,
 }
 
+/// 截图流程的录屏互斥守卫文案（纯函数可测）：录屏进行中 → Some(拒绝文案)，否则
+/// None。start_capture_flow 首行据此拒绝（互斥守卫 b，F6 对向守卫见 hotkey.rs）。
+pub fn capture_guard_msg(recording_active: bool) -> Option<&'static str> {
+    if recording_active {
+        Some("录屏进行中，请先停止录屏")
+    } else {
+        None
+    }
+}
+
 // 必须在非主线程调用（register_hotkeys 已保证；Task 10 的托盘入口同样需要放到线程里）。
 pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
+    // 互斥守卫（终审 wave，F1→录屏方向）：录屏进行中（Recording/Paused/收尾窗）时拒绝
+    // 启动截图流程——覆盖层与录屏两套全屏 UI 不叠屏，也避免截图抓屏与 SCStream 并发
+    // 争抢。守卫在 mark_hotkey 之前（被拒的触发不计入 perf 打点，与 bench 守卫同款
+    // 摆位纪律）；反馈走既有 capture-error 横幅通道（懒拉面板，不静默），返回 Ok(())
+    // ——本轮「无截图」是既定产品行为而非失败。F1/媒体键（trigger_capture_flow）/
+    // 托盘 / 面板按钮全部经本入口，一处守卫全路径生效。
+    if let Some(msg) = capture_guard_msg(crate::recording::recording_active()) {
+        crate::panel::show_capture_error(app, msg.to_string());
+        return Ok(());
+    }
     // 修复（终审 wave）：手动 F1 撞上进行中的延时截图倒计时时，先置中止旗标再走本流程
     // ——延时 worker 的轮询循环每 ≤50ms 检查 DELAY_ABORT，见真即隐藏倒计时窗、清
     // DELAY_ACTIVE、直接返回（跳过它自己到点的 start_capture_flow）。否则倒计时归零与
@@ -223,5 +243,12 @@ mod tests {
         // 修复（终审 wave）：payload 携带流程代数（单词字段 camelCase 无操作），
         // 前端按 flow 丢弃旧代迟到补发（代数守卫）
         assert!(s.contains("\"flow\":3"));
+    }
+
+    /// 互斥守卫（终审 wave）纯逻辑：录屏进行中 → 拒绝文案；空闲 → 放行。
+    #[test]
+    fn capture_guard_only_when_recording() {
+        assert_eq!(capture_guard_msg(true).unwrap(), "录屏进行中，请先停止录屏");
+        assert_eq!(capture_guard_msg(false), None);
     }
 }

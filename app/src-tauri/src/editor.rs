@@ -196,8 +196,9 @@ pub fn editor_save(
     Ok(())
 }
 
-/// editor_save 的纯落盘半程（AppHandle-free，可测）：校验路径/扩展名/魔数 → 覆盖写
-/// → 解码写盘字节返回 `(rgba, w, h)`（origin 副作用直接复用，免二次读盘）。
+/// editor_save 的纯落盘半程（AppHandle-free，可测）：校验路径/扩展名/魔数 → 原子
+/// 覆盖写（同目录 tmp + rename，见函数体注）→ 解码写盘字节返回 `(rgba, w, h)`
+/// （origin 副作用直接复用，免二次读盘）。
 fn save_png_bytes(path: &str, png_base64: &str) -> Result<(Vec<u8>, u32, u32), String> {
     if path.trim().is_empty() {
         return Err("路径为空".into());
@@ -219,7 +220,23 @@ fn save_png_bytes(path: &str, png_base64: &str) -> Result<(Vec<u8>, u32, u32), S
     if bytes.len() < PNG_MAGIC.len() || bytes[..PNG_MAGIC.len()] != PNG_MAGIC {
         return Err("不是有效的 PNG 数据".into());
     }
-    std::fs::write(p, &bytes).map_err(|e| format!("写入截图文件失败: {e}"))?;
+    // 原子落盘（终审修复，数据丢失类）：先写同目录 `<path>.tmp` 再 rename 覆盖——
+    // 同目录 rename 是 POSIX 原子操作，覆盖瞬间无第三态；直接 fs::write 覆盖会在
+    // 进程中途被杀/磁盘满时留下截断的半张 PNG（原图已损，且历史/贴图双消费方都
+    // 读同一路径）。写失败/rename 失败时清理 tmp 残留后上抛（原文件保持完好）。
+    let tmp: std::path::PathBuf = {
+        let mut s = p.as_os_str().to_os_string();
+        s.push(".tmp");
+        s.into()
+    };
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入截图文件失败: {e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, p) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入截图文件失败: {e}"));
+    }
     hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| format!("截图文件解码失败: {e}"))
 }
 
@@ -275,6 +292,38 @@ mod editor_tests {
         assert_eq!((w, h), (2, 1), "返回 dims 供 origin 副作用复用");
         assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 255]);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 原子落盘（终审修复）：成功保存后同目录无 `.tmp` 残留；校验失败（魔数不过）
+    /// 时原文件保持原样且同样无残留——半成品只会存在于写盘中途，rename 后要么
+    /// 完整新图、要么完整旧图。
+    #[test]
+    fn atomic_write_leaves_no_tmp_residue() {
+        let path = temp_png("atomic");
+        std::fs::write(&path, b"stale-bytes").unwrap();
+        let dir = path.parent().unwrap();
+        let tmp = {
+            let mut s = path.as_os_str().to_os_string();
+            s.push(".tmp");
+            std::path::PathBuf::from(s)
+        };
+        // 预置一个陈旧 tmp（模拟上次异常退出残留）：本次成功保存应把它消费掉（rename 覆盖）。
+        std::fs::write(&tmp, b"leftover").unwrap();
+        let png = hawksnap_core::crop::rgba_to_png(&[0, 0, 0, 255], 1, 1).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        save_png_bytes(path.to_string_lossy().as_ref(), &b64).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        assert!(!tmp.exists(), "成功保存后不得残留 .tmp");
+        // 失败路径（非 PNG 魔数）：原文件原样、无新增 tmp。
+        let not_png = base64::engine::general_purpose::STANDARD.encode(b"JPEG data, honestly");
+        assert!(save_png_bytes(path.to_string_lossy().as_ref(), &not_png).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        let leftovers: Vec<_> = std::fs::read_dir(dir).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "失败路径不得残留 .tmp: {leftovers:?}");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -105,6 +105,22 @@ fn lock_rec() -> std::sync::MutexGuard<'static, Option<RecRuntime>> {
     REC.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 互斥守卫（终审 wave）：录屏是否进行中（Recording / Paused 均算，含收尾阻塞窗）。
+/// F6 截图侧（start_capture_flow）据此拒绝在录屏进行中启动截图流程。
+pub fn recording_active() -> bool {
+    lock_rec().is_some()
+}
+
+/// F6 启动路径的守卫文案（纯函数可测）：截图覆盖层可见（一轮截图进行中）时返回
+/// Some(拒绝文案)，否则放行 None。热键处理线程据此先拒后启（互斥守卫 a）。
+pub fn f6_start_guard_msg(overlay_visible: bool) -> Option<&'static str> {
+    if overlay_visible {
+        Some("请先完成或取消当前截图再录屏")
+    } else {
+        None
+    }
+}
+
 /// hawk://record-tick 载荷（悬浮条渲染输入；单词字段无需 rename）。
 #[derive(Serialize, Clone)]
 struct RecordTick {
@@ -181,17 +197,31 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
     let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
     let path = recording_output_path(&base, chrono::Local::now())?;
 
+    // **先建悬浮条窗口，再启动流**（终审修复的自排除前置，platform 侧 start() 注②）：
+    // SCShareableContent.applications 只列出「名下有窗口」的进程——若先 start 再建窗，
+    // 枚举瞬间本进程可能还零窗口 → excludingApplications 降级为空 → 悬浮条被录进
+    // MP4（正是本修复要杀的 bug）。窗口 build 返回时 NSWindow 已在主线程落成，
+    // 此后 ScreenRecorder::start 内的枚举必然能按 PID 匹配到本进程。
+    show_recording_bar(&app)?;
+
     // 构造录屏器（阻塞至 startCapture 完成，~百 ms 级；async 命令线程，不卡主线程）。
-    #[cfg(target_os = "macos")]
-    let recorder = hawksnap_platform_mac::record::ScreenRecorder::start(path.clone())?;
+    let recorder = match hawksnap_platform_mac::record::ScreenRecorder::start(path.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            // 启动失败：回收刚拉起的悬浮条（无录制不残留 UI；与成功停止路径的
+            // close_recording_bar 同款 best-effort）。
+            close_recording_bar(&app);
+            return Err(e);
+        }
+    };
 
     {
         let mut guard = lock_rec();
         if guard.is_some() {
             // 并发窗口内第二请求胜出检查（理论不可达：锁外无 await 点）。
-            #[cfg(target_os = "macos")]
             let _ = recorder.stop();
             let _ = std::fs::remove_file(&path);
+            close_recording_bar(&app);
             return Err("已有录屏进行中".into());
         }
         // 会话取号在安装锁内：只有成功启动才消耗序号（失败路径不跳号不影响单调）。
@@ -208,7 +238,7 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
         });
     }
 
-    show_recording_bar(&app)?;
+    // 悬浮条已在启动前拉起（上方，自排除前置）；此处仅补 tick 广播。
     spawn_tick_thread(app);
     Ok(())
     }
@@ -242,8 +272,9 @@ pub fn record_resume() -> Result<(), String> {
     Ok(())
 }
 
-/// 停止：writer 收尾（阻塞 ≤25s）→ 悬浮条隐藏 → 历史入库（kind=recording，
-/// thumb 留空——M0 网格对空 thumbPath 已有占位渲染）。返回 MP4 路径。
+/// 停止：writer 收尾（阻塞 ≤25s）→ 历史入库（kind=recording，
+/// thumb 留空——M0 网格对空 thumbPath 已有占位渲染）→ 关闭悬浮条窗口（终审修复，
+/// 见函数体注；失败路径条保持可见展示行内错误）。返回 MP4 路径。
 #[tauri::command(async)]
 pub fn record_stop(app: AppHandle) -> Result<String, String> {
     let rt = {
@@ -254,9 +285,14 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
         rt
     };
 
-    // 悬浮条在**成功收尾后**才隐藏（评审修复）：stop 失败（磁盘满/收尾超时）时
-    // 悬浮条保持可见并展示行内错误——若先隐藏，主停止入口的失败零反馈（不静默）。
-    // 收尾阻塞期（≤25s）条冻结在最后秒数（REC 已 take，tick 线程自然退出）。
+    // 悬浮条回收（终审修复，webview 泄漏）：成功收尾 + 历史入库后**关闭**（而非隐藏）
+    // 悬浮条窗口——常驻隐藏的 webview 永不回收（每屏一份 WKWebView 常驻内存），
+    // 与 overlay 的复用/销毁取舍同款：下次 record_start 走 show_recording_bar 的
+    // 懒建分支冷加载重建（~300ms，每次录制一次，可接受）。失败路径**不关**（错误
+    // 行内必须可见）；失败残留的条被下次启动 show 复用、在下次**成功**停止时关闭，
+    // 若下次也失败则继续留着（正确——错误仍可见）。
+    // close 须非主线程（record_stop 为 async 命令，运行时线程 ✓）；不入 idle_reaper
+    //（close 语义更干净，reaper 是「隐藏满 10 分钟」的兜底，此处有明确生命周期点）。
 
     let (path, info) = {
         #[cfg(target_os = "macos")]
@@ -270,13 +306,13 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
         }
     };
 
-    hide_recording_bar(&app);
-
     // 历史入库（旁路语义：失败仅记录，不影响录制产物返回——与历史库总裁定一致）。
     #[cfg(target_os = "macos")]
     if let Err(e) = crate::history::record(&app, &path.to_string_lossy(), "", info.width as i64, info.height as i64, "recording") {
         eprintln!("[hawksnap] 录屏历史入库失败: {e}");
     }
+
+    close_recording_bar(&app);
 
     Ok(path.to_string_lossy().into_owned())
 }
@@ -357,9 +393,12 @@ fn position_bar(w: &tauri::WebviewWindow) {
     }
 }
 
-fn hide_recording_bar(app: &AppHandle) {
+/// 成功停止后关闭悬浮条窗口（终审修复，见 record_stop 注）：close 走 tauri 默认
+/// destroy，下次 show_recording_bar 的懒建分支重建。best-effort（关失败仅忽略——
+/// 窗口最多退化为常驻隐藏的旧行为，不影响录制产物）。非主线程调用（命令线程 ✓）。
+fn close_recording_bar(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("recording-bar") {
-        let _ = w.hide();
+        let _ = w.close();
     }
 }
 
@@ -442,5 +481,26 @@ mod tests {
         let a = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let b = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         assert!(b > a, "会话号必须单调递增：{a} → {b}");
+    }
+
+    /// 互斥守卫（终审 wave）纯逻辑：覆盖层可见 → F6 启动拒绝文案；不可见 → 放行。
+    #[test]
+    fn f6_guard_only_when_overlay_visible() {
+        assert_eq!(
+            f6_start_guard_msg(true).unwrap(),
+            "请先完成或取消当前截图再录屏"
+        );
+        assert_eq!(f6_start_guard_msg(false), None);
+    }
+
+    /// recording_active 与 REC 槽位一致（空闲基线；启动/停止路径由集成行为覆盖）。
+    /// 注意先取后放（is_none 的临时 guard 在语句末释放）再调 recording_active，
+    /// 避免 std::Mutex 同线程重入死锁。
+    #[test]
+    fn recording_active_false_when_idle() {
+        let idle = lock_rec().is_none();
+        if idle {
+            assert!(!recording_active());
+        }
     }
 }

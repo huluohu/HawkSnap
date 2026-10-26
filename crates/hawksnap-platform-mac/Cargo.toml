@@ -41,7 +41,9 @@ objc2-app-kit = { version = "0.3", features = [
 # objc2-screen-capture-kit 0.3.2 与 objc2 0.6 生态同版（锁文件其余 objc2-* 均 0.3.2，
 # 全部经 wry/tauri 已在依赖树，features 只增不改版本解析；screen-capture-kit 是唯一
 # 新增 crate）。features 按用到的头文件取：SCShareableContent（含 SCDisplay/
-# SCContentFilter）+ SCStream（含 SCStreamConfiguration/Output/Delegate）+ SCError。
+# SCContentFilter/SCRunningApplication）+ SCStream（含 SCStreamConfiguration/Output/
+# Delegate）+ SCError；libc 解锁 SCRunningApplication::processID（视频自排除按 PID
+# 匹配本进程；libc 0.2 已在依赖树，不引入新版本解析）。
 # AVFoundation 侧 AVAssetWriter/Input/PixelBufferAdaptor（MP4 mux + 内部 VT 硬编），
 # AVMediaFormat（AVMediaTypeVideo/Audio）+ AVVideoSettings（AVVideoCodecH264）；
 # block2：getShareableContent/finishWriting 的 completion handler 块。
@@ -50,7 +52,7 @@ objc2-app-kit = { version = "0.3", features = [
 # （screen-capture-kit 0.3.2 要求 >=0.3，wry 树内 0.2 为旧命名 Queue——0.3 更名
 # DispatchQueue；双版本共存为 objc2 生态常规）。
 objc2-screen-capture-kit = { version = "0.3", features = [
-    "SCShareableContent", "SCStream", "SCError",
+    "SCShareableContent", "SCStream", "SCError", "libc",
 ] }
 objc2-av-foundation = { version = "0.3", features = [
     "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings", "block2",

@@ -14,7 +14,8 @@
 //! - `objc2-screen-capture-kit 0.3.2`（crates.io 已发布，与锁文件 objc2 0.6 生态同版）：
 //!   覆盖 SCStream / SCStreamConfiguration（width/height/minimumFrameInterval/pixelFormat/
 //!   capturesAudio/sampleRate/channelCount/excludesCurrentProcessAudio）/ SCContentFilter
-//!   (initWithDisplay:excludingWindows:) / SCShareableContent（completion handler 版）/
+//!   (initWithDisplay:excludingApplications:exceptingWindows:，视频侧排除本应用) /
+//!   SCShareableContent（completion handler 版）/
 //!   SCStreamOutput（stream:didOutputSampleBuffer:ofType:）/ SCStreamDelegate。**用 crate，
 //!   不手写 extern**（ax.rs 模式仅用于 crate 缺口的 CGDisplayPixels{Wide,High}/
 //!   CGMainDisplayID 三个 C 函数——ScreenCaptureKit 绑定不包含 CoreGraphics 显示查询）。
@@ -68,8 +69,8 @@ use objc2_core_video::kCVPixelFormatType_32BGRA;
 use objc2::runtime::NSObject;
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL, NSError, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
-    SCStreamOutput, SCStreamOutputType,
+    SCContentFilter, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
 
 // ---------------------------------------------------------------------------
@@ -203,12 +204,15 @@ const AV_NUMBER_OF_CHANNELS_KEY: &str = "AVNumberOfChannelsKey";
 /// kAudioFormatMPEG4AAC = 'aac '（AudioToolbox 四字符码）。
 const K_AUDIO_FORMAT_MPEG4_AAC: i64 = 0x6161_6320;
 
-/// 录屏元信息（stop 后供 app 层历史入库 w/h）。
+/// 录屏元信息（stop 后供 app 层历史入库 w/h；`excluded_apps` = 视频自排除的
+/// 应用数，集成测试据此断言本应用已入 excludingApplications）。
 #[derive(Debug, Clone, Copy)]
 pub struct RecordingInfo {
     pub width: u32,
     pub height: u32,
     pub has_audio: bool,
+    /// filter.excludingApplications 的条数（期望 1 = 本应用；0 = 降级空排除）。
+    pub excluded_apps: u32,
 }
 
 /// 共享运行态：帧回调（两条 dispatch 队列）与控制方（start/pause/resume/stop）交汇。
@@ -481,11 +485,58 @@ impl ScreenRecorder {
             return Err(format!("显示器物理尺寸异常: {w}x{h}"));
         }
 
-        // 2. filter = 主显示器、排除窗口列表为空（不排除任何窗口 → 全桌面）。
+        // 2. filter = 主显示器 + 排除**整个本应用**（终审修复：原实现排除窗口列表为空，
+        //    常置顶的录制悬浮条会被录进每一帧 MP4）。
+        //
+        // 产品裁定（评审确认）：截图工具自己的 chrome 永不出现在成片里是正确默认，
+        // 故用 `initWithDisplay:excludingApplications:exceptingWindows:` 排除本应用全部
+        // 窗口；代价是**贴图（本应用窗口）同样不入镜**——这是接受的取舍。
+        //
+        // 实现注（两处经验事实，swift 探针实测于本机，见终审报告）：
+        // ① SCRunningApplication 是 ScreenCaptureKit 自有类（父类 NSObject，只读值对象，
+        //    无按 PID 的公开构造器），并非 AppKit 的 NSRunningApplication（后者按契约不能
+        //    塞进 excludingApplications 数组）→ 正确做法是从 SCShareableContent.applications
+        //    按 PID 精确匹配本进程，取系统签发的真实实例。
+        // ② SCShareableContent.applications **不含零窗口进程**——即便
+        //    onScreenWindowsOnly=false 也一样（实测：无窗 CLI 进程两种旗标下均缺席；一旦
+        //    进程名下存在任意 NSWindow——哪怕从未 orderFront / 位置在屏外——false 旗标下
+        //    即被列出）。故这里必须用 onScreenWindowsOnly=false 枚举，且调用方（app 层
+        //    record_start）**先建悬浮条窗口再启动流**，保证枚举时本进程名下已有窗口。
+        //    真找不到（零窗口进程，如裸跑本 crate 测试二进制）→ 降级为空排除并留痕，
+        //    让「录制条入画」类回归在现场可归因。
+        // 音频自排除（setExcludesCurrentProcessAudio）保留不动：belt and suspenders。
+        let excluded_apps = {
+            let apps = unsafe { content.applications() };
+            let my_pid = std::process::id() as i32;
+            let mut own: Option<Retained<SCRunningApplication>> = None;
+            for i in 0..apps.len() {
+                let a = apps.objectAtIndex(i);
+                if unsafe { a.processID() } == my_pid {
+                    own = Some(a);
+                    break;
+                }
+            }
+            match own {
+                Some(app) => vec![app],
+                None => {
+                    // 可达于零窗口进程（如裸跑本 crate 测试二进制）：降级为空排除并留痕。
+                    // app 层生产路径不可达（record_start 先建悬浮条再启动流，见上方注②）；
+                    // ==1 的端到端断言由 src/bin/record-selfexcl-probe.rs（自建窗口的主线程
+                    // 探针）经 tests/real_record_selfexcl.rs 覆盖。
+                    eprintln!(
+                        "[record] SCShareableContent.applications 未包含本进程 (pid {my_pid})，\
+                         视频自排除降级为空（本应用 UI 可能入画）"
+                    );
+                    Vec::new()
+                }
+            }
+        };
+        let excluded_refs: Vec<&SCRunningApplication> = excluded_apps.iter().map(|a| &**a).collect();
         let filter = unsafe {
-            SCContentFilter::initWithDisplay_excludingWindows(
+            SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                 objc2_screen_capture_kit::SCContentFilter::alloc(),
                 &display,
+                &NSArray::from_slice(&excluded_refs),
                 &NSArray::new(),
             )
         };
@@ -641,6 +692,7 @@ impl ScreenRecorder {
                 width: w as u32,
                 height: h as u32,
                 has_audio: true,
+                excluded_apps: excluded_refs.len() as u32,
             },
             output_path,
         });
@@ -785,9 +837,14 @@ fn get_shareable_content() -> Result<Retained<SCShareableContent>, String> {
             let _ = tx.send(res);
         },
     );
+    // onScreenWindowsOnly=false（终审修复）：applications 只列出「名下有窗口」的进程，
+    // 且 true 旗标把「有窗口但均不在屏/从未 orderFront」的进程整体漏掉（swift 探针实测，
+    // 见 start() 注②）——本进程一旦缺席 → excludingApplications 降级为空 → 悬浮条入画
+    // （正是本修复要杀的 bug）。false 旗标下窗口/应用列表变大，但 start() 只消费
+    // displays + 本进程条目，无其他消费方，无副作用。
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
-            false, true, &block,
+            false, false, &block,
         );
     }
     rx.recv_timeout(std::time::Duration::from_secs(10))
@@ -989,14 +1046,38 @@ mod tests {
         assert!(data.len() > min_bytes, "录屏应 >{min_bytes} 字节，实际 {}", data.len());
         // MP4 ftyp 魔数（offset 4..8）
         assert_eq!(&data[4..8], b"ftyp", "应为 MP4 容器");
+        // 自排除结构断言（终审修复）：excluded_apps ∈ {0,1}——本测试二进制是零窗口进程，
+        // SCShareableContent.applications 不列出零窗口进程（start() 注②），此处**预期**
+        // 降级为 0（降级有 eprintln 留痕）；==1 的端到端断言在
+        // tests/real_record_selfexcl.rs（经 src/bin/record-selfexcl-probe.rs 主线程
+        // 自建窗口后录制）。生产 app 进程恒有悬浮条窗口 → 恒为 1。
+        assert!(
+            info.excluded_apps <= 1,
+            "excludingApplications 至多含本应用一条，实际 {}",
+            info.excluded_apps
+        );
+        println!(
+            "[m6] self-exclusion: excluded_apps={}（0=零窗口测试进程预期降级；1=本应用已排除）",
+            info.excluded_apps
+        );
         // mvhd 时长 ≈ 录制时长（±1.5s：首帧落位 + mux 收尾的固有偏移）
         let dur = mp4_duration_secs(&data).expect("mvhd 解析");
-        println!("[m6] real recording: {} bytes, duration={dur:.3}s (target {secs}s)", data.len());
+        println!(
+            "[m6] real recording: {} bytes, duration={dur:.3}s (target {secs}s), \
+             excluded_apps={} (self-exclusion)",
+            data.len(),
+            info.excluded_apps
+        );
         assert!(
             (dur - secs as f64).abs() <= 1.5,
             "时长 {dur}s 应 ≈ {secs}s ±1.5"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // HAWKSNAP_RECORD_KEEP=1：保留 MP4 供人工/抽帧复核（soak 的 SOAK_KEEP 同款）。
+        if std::env::var("HAWKSNAP_RECORD_KEEP").is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+        } else {
+            println!("[m6] 录屏产物保留: {}", path.display());
+        }
     }
 
     /// 暂停/恢复时间线检查：录 2s → 暂停 2s → 恢复 2s → 停止，mvhd 时长应 ≈4s
