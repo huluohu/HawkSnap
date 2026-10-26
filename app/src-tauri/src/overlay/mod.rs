@@ -1,4 +1,4 @@
-//! overlay 模块门面：实现按关注点拆分为子模块（flow/hover/delay/candidates/hotkey）。
+//! overlay 模块门面：实现按关注点拆分为子模块（flow/hover/delay/candidates/hotkey/intent）。
 //! 本文件只承载子模块声明与既有 `overlay::X` 路径的重导出——对外路径零变化。
 mod candidates;
 mod delay;
@@ -6,6 +6,7 @@ mod flow;
 #[cfg(target_os = "macos")]
 mod hover;
 mod hotkey;
+mod intent;
 
 // 公开 API 重导出：lib.rs 与 crate 内既有的 overlay::X 路径保持不变。
 pub use candidates::snap_candidates;

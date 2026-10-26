@@ -191,6 +191,116 @@ pub fn mp4_duration_secs_at(path: &std::path::Path) -> Option<f64> {
     mp4_duration_secs(&std::fs::read(path).ok()?)
 }
 
+/// MP4 视频轨帧尺寸（宽, 高 像素）：扫描 `tkhd`（track header）atom 的 width/height
+/// 字段——**16.16 定点**（ISO 14496-12：宽高各 4 字节，值 = u32 / 2^16）。mvhd 只有
+/// 时长没有帧尺寸，区域录制的帧尺寸断言（N1）走本解析。文件含多条轨（视频+音频），
+/// 音轨 tkhd 宽高为 0——返回首个非零条目（视频轨按惯例在前，且宽高非零判据与次序
+/// 无关地唯一点名视频轨）；无 tkhd / 全零 → None。跨平台纯解析（同 mp4_duration_secs）。
+pub fn mp4_track_dims(data: &[u8]) -> Option<(u32, u32)> {
+    // tkhd 布局（box: [size4]["tkhd"][version1+flags3][body...]）：
+    //   v0: ctime4 mtime4 track_id4 reserved4 duration4 reserved8 layer2 alt2 vol2 reserved2 matrix36 → width @ body+72
+    //   v1: ctime8 mtime8 track_id4 reserved4 duration8 reserved8 layer2 alt2 vol2 reserved2 matrix36 → width @ body+84
+    let mut from = 0;
+    while let Some(rel) = data[from..].windows(4).position(|w| w == b"tkhd") {
+        let pos = from + rel;
+        let v = *data.get(pos + 4)? as u32;
+        let width_off = if v == 1 { pos + 8 + 84 } else { pos + 8 + 72 };
+        let w = u32::from_be_bytes(data.get(width_off..width_off + 4)?.try_into().ok()?);
+        let h = u32::from_be_bytes(data.get(width_off + 4..width_off + 8)?.try_into().ok()?);
+        if w > 0 && h > 0 {
+            // 16.16 定点 → 像素（四舍五入到整数像素）
+            let px = |v: u32| ((v as f64) / 65536.0).round() as u32;
+            return Some((px(w), px(h)));
+        }
+        from = pos + 4; // 音轨（宽高 0）等——继续找下一个 tkhd
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// N1 区域录制：流参数计算（纯逻辑可测）——坐标裁定（证据见函数注与任务报告）
+// ---------------------------------------------------------------------------
+
+/// 选区逻辑矩形（display 本地，points，原点**左上**——与覆盖层 webview 的
+/// clientX/Y 同一坐标系，即 overlay 选区/载荷 Rect 的连续值形态）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LogicalRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// 区域录制流参数：SCStreamConfiguration 的 sourceRect + 输出帧像素尺寸。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegionStreamParams {
+    /// `SCStreamConfiguration.sourceRect`——**points**（display 本地逻辑坐标，
+    /// 左上原点）。坐标口径证据：objc2-screen-capture-kit 0.3.2 生成绑定
+    /// （src/generated/SCStream.rs，逐字转写 Apple SCStreamConfiguration.h）：
+    /// 「SCStreamProperty that specifies that the stream only samples a subset
+    /// of the frame input. ... **The rectangle is specified in points in the
+    /// display's logical coordinate system.**」——即选区逻辑坐标**直传**（不乘
+    /// scale、不转物理像素）；SCStream 内部按显示变换取样。
+    pub source: objc2_core_foundation::CGRect,
+    /// 输出帧宽（**物理像素**）：SCStreamConfiguration.width/height 的口径与既有
+    /// 全屏路径一致（CGDisplayPixelsWide/High）= 选区 points × 显示缩放。帧内容 =
+    /// sourceRect 缩放充满输出面（destinationRect 缺省 = 整个输出面），故
+    /// out = round(points × scale) 恰好保持 1:1 物理像素密度（Retina 不降采样）。
+    pub out_w: u32,
+    pub out_h: u32,
+}
+
+/// 偶数像素取整：h264（4:2:0 色度子采样）对奇数帧宽高的编码器路径不可靠
+/// （AVAssetWriter 实践：奇数尺寸可能收尾失败/花屏）——向下取到偶数。输入 ≥ 2
+/// 时结果 ≥ 2（调用方另设下限守卫）。
+fn even_px(v: f64) -> u32 {
+    (v.round() as u32 / 2) * 2
+}
+
+/// 区域流参数计算（纯函数）：选区逻辑矩形 + 显示器逻辑尺寸 + 缩放 → sourceRect
+/// （points 直传，夹取进显示边界）+ 输出像素尺寸（× scale 后偶数取整）。
+/// 选区来自覆盖层 webview，已被前端夹取进显示边界——此处夹取是防御性复算（hover
+/// 直选的 AX 帧理论上可能越界），同边界语义：越界部分裁掉、完全出界/退化 → Err。
+pub fn region_stream_params(
+    region: LogicalRect,
+    display_logical_w: f64,
+    display_logical_h: f64,
+    scale: f64,
+) -> Result<RegionStreamParams, String> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(format!("显示器缩放异常: {scale}"));
+    }
+    if !display_logical_w.is_finite() || !display_logical_h.is_finite()
+        || display_logical_w <= 0.0 || display_logical_h <= 0.0
+    {
+        return Err(format!(
+            "显示器逻辑尺寸异常: {display_logical_w}x{display_logical_h}"
+        ));
+    }
+    if !region.x.is_finite() || !region.y.is_finite()
+        || !region.w.is_finite() || !region.h.is_finite()
+    {
+        return Err("选区坐标异常（非有限值）".into());
+    }
+    // 夹取进显示边界（display 本地 points，[0, W]×[0, H]）。
+    let x0 = region.x.clamp(0.0, display_logical_w);
+    let y0 = region.y.clamp(0.0, display_logical_h);
+    let x1 = (region.x + region.w).clamp(x0, display_logical_w);
+    let y1 = (region.y + region.h).clamp(y0, display_logical_h);
+    let (w, h) = (x1 - x0, y1 - y0);
+    if w < 1.0 || h < 1.0 {
+        return Err(format!("选区尺寸过小: {w:.1}x{h:.1}"));
+    }
+    let out_w = even_px(w * scale).max(2);
+    let out_h = even_px(h * scale).max(2);
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    Ok(RegionStreamParams {
+        source: CGRect::new(CGPoint::new(x0, y0), CGSize::new(w, h)),
+        out_w,
+        out_h,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // macOS 管线（SCStream → AVAssetWriter）
 // ---------------------------------------------------------------------------
@@ -240,7 +350,7 @@ struct RecSession {
     output_path: PathBuf,
 }
 
-// —— ScreenCaptureKit 不覆盖 CoreGraphics 显示查询 → ax.rs 同款裸 extern（3 个 C 函数）——
+// —— ScreenCaptureKit 不覆盖 CoreGraphics 显示查询 → ax.rs 同款裸 extern（4 个 C 函数）——
 mod cg_display_ffi {
     // CGDirectDisplayID = UInt32（CGDisplayConfiguration.h）。
     pub type CGDirectDisplayID = u32;
@@ -251,6 +361,9 @@ mod cg_display_ffi {
         /// 物理像素宽（SCDisplay.width 是 points；SCStreamConfiguration.width 要物理像素）。
         pub fn CGDisplayPixelsWide(display: CGDirectDisplayID) -> usize;
         pub fn CGDisplayPixelsHigh(display: CGDirectDisplayID) -> usize;
+        /// 显示器逻辑边界（**points**，全局桌面坐标、原点左下——本 crate 只消费
+        /// size；N1 区域录制用它推缩放 = 物理像素宽 / 逻辑宽）。
+        pub fn CGDisplayBounds(display: CGDirectDisplayID) -> objc2_core_foundation::CGRect;
     }
 }
 
@@ -445,11 +558,41 @@ pub struct ScreenRecorder {
 unsafe impl Send for RecShared {}
 unsafe impl Send for ScreenRecorder {}
 
+/// 显示器挑选策略（N1 从硬编码「主显示器优先，首个兜底」参数化）。
+enum DisplayPick {
+    /// 全屏录制（既有语义）：主显示器优先，缺失时首个可用屏兜底。
+    Main,
+    /// 区域录制（N1）：精确匹配指定显示器，**不回退**——回退意味着录错屏，
+    /// 选区几何对不上。
+    ById(u32),
+}
+
 impl ScreenRecorder {
     /// 启动全屏（主显示器）录制：SCShareableContent 枚举 → 主显示器 filter →
     /// SCStream（视频 BGRA@30fps + 系统声 48k/2ch）→ AVAssetWriter（h264+AAC → MP4）。
     /// 阻塞至 startCapture 完成（~百 ms 级，调用方为 async 命令线程，不卡主线程）。
     pub fn start(output_path: PathBuf) -> Result<ScreenRecorder, String> {
+        Self::begin(output_path, DisplayPick::Main, None)
+    }
+
+    /// N1 区域录制启动：指定显示器 + 选区逻辑矩形（display 本地 points，左上原点，
+    /// [`LogicalRect`]）→ SCStreamConfiguration.sourceRect 裁剪取样——帧尺寸 = 选区
+    /// 物理像素（CPU 随面积下降，非「录全屏再裁」）。坐标裁定（points vs pixels）
+    /// 证据见 [`region_stream_params`] 注；阻塞语义同 [`Self::start`]。
+    pub fn start_region(
+        output_path: PathBuf,
+        display_id: u32,
+        region: LogicalRect,
+    ) -> Result<ScreenRecorder, String> {
+        Self::begin(output_path, DisplayPick::ById(display_id), Some(region))
+    }
+
+    /// start / start_region 的公共实现（N1 参数化：显示器挑选 + 可选区域裁剪）。
+    fn begin(
+        output_path: PathBuf,
+        pick: DisplayPick,
+        region: Option<LogicalRect>,
+    ) -> Result<ScreenRecorder, String> {
         if output_path.exists() {
             return Err(format!("输出文件已存在: {}", output_path.display()));
         }
@@ -462,30 +605,63 @@ impl ScreenRecorder {
         // 1. 可共享内容（completion handler 异步 → channel 同步收口）。
         let content = get_shareable_content()?;
         let displays = unsafe { content.displays() };
-        let main_id = unsafe { cg_display_ffi::CGMainDisplayID() };
-        let mut picked: Option<Retained<objc2_screen_capture_kit::SCDisplay>> = None;
-        let count = displays.len();
-        for i in 0..count {
-            let d = displays.objectAtIndex(i);
-            if unsafe { d.displayID() } == main_id {
-                picked = Some(d);
-                break;
+        let display = match pick {
+            DisplayPick::Main => {
+                let main_id = unsafe { cg_display_ffi::CGMainDisplayID() };
+                let mut picked: Option<Retained<objc2_screen_capture_kit::SCDisplay>> = None;
+                let count = displays.len();
+                for i in 0..count {
+                    let d = displays.objectAtIndex(i);
+                    if unsafe { d.displayID() } == main_id {
+                        picked = Some(d);
+                        break;
+                    }
+                    if picked.is_none() {
+                        picked = Some(d);
+                    }
+                }
+                picked.ok_or_else(|| "未找到可捕获的显示器".to_string())?
             }
-            if picked.is_none() {
-                picked = Some(d);
+            DisplayPick::ById(id) => {
+                let count = displays.len();
+                let mut picked: Option<Retained<objc2_screen_capture_kit::SCDisplay>> = None;
+                for i in 0..count {
+                    let d = displays.objectAtIndex(i);
+                    if unsafe { d.displayID() } == id {
+                        picked = Some(d);
+                        break;
+                    }
+                }
+                picked
+                    .ok_or_else(|| format!("未找到 id 为 {id} 的显示器（选区所在屏已断开？）"))?
             }
-        }
-        let display = picked.ok_or_else(|| "未找到可捕获的显示器".to_string())?;
+        };
         let display_id = unsafe { display.displayID() };
-        let (w, h) = (
+        let (pw, ph) = (
             unsafe { cg_display_ffi::CGDisplayPixelsWide(display_id) },
             unsafe { cg_display_ffi::CGDisplayPixelsHigh(display_id) },
         );
+        if pw == 0 || ph == 0 {
+            return Err(format!("显示器物理尺寸异常: {pw}x{ph}"));
+        }
+        // N1：输出帧尺寸 + 可选裁剪源。全屏 = 显示器物理像素（既有口径不变）；
+        // 区域 = 选区 points × 缩放（偶数取整——h264 4:2:0 色度子采样，见 even_px 注）。
+        // 缩放取 CG 口径（物理宽 / 逻辑宽），不信任 IPC 传入值；sourceRect 坐标裁定
+        // （points，display 本地）见 region_stream_params 的头文件证据注。
+        let (w, h, source_rect) = match region {
+            None => (pw, ph, None),
+            Some(rect) => {
+                let bounds = unsafe { cg_display_ffi::CGDisplayBounds(display_id) };
+                let scale = pw as f64 / bounds.size.width;
+                let params = region_stream_params(rect, bounds.size.width, bounds.size.height, scale)?;
+                (params.out_w as usize, params.out_h as usize, Some(params.source))
+            }
+        };
         if w == 0 || h == 0 {
-            return Err(format!("显示器物理尺寸异常: {w}x{h}"));
+            return Err(format!("输出帧尺寸异常: {w}x{h}"));
         }
 
-        // 2. filter = 主显示器 + 排除**整个本应用**（终审修复：原实现排除窗口列表为空，
+        // 2. filter = 所选显示器 + 排除**整个本应用**（终审修复：原实现排除窗口列表为空，
         //    常置顶的录制悬浮条会被录进每一帧 MP4）。
         //
         // 产品裁定（评审确认）：截图工具自己的 chrome 永不出现在成片里是正确默认，
@@ -542,10 +718,16 @@ impl ScreenRecorder {
         };
 
         // 3. 配置：30fps BGRA + 系统声（48k/2ch，排除本进程自己的音频）。
+        //    N1 区域：sourceRect = 选区（**points 直传**，display 本地逻辑坐标——
+        //    SCK 头文件证据见 region_stream_params 注）；destinationRect 缺省 =
+        //    整个输出面（源裁剪区缩放充满输出面，out 尺寸恰为 1:1 物理密度）。
         let config = unsafe {
             let cfg = SCStreamConfiguration::new();
             cfg.setWidth(w);
             cfg.setHeight(h);
+            if let Some(src) = source_rect {
+                cfg.setSourceRect(src);
+            }
             cfg.setMinimumFrameInterval(CMTime::new(1, 30));
             cfg.setPixelFormat(kCVPixelFormatType_32BGRA);
             cfg.setShowsCursor(true);
@@ -1168,6 +1350,238 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         } else {
             println!("[m6] soak 产物保留在 {dir:?}");
+        }
+    }
+
+    // —— N1 区域录制：流参数纯数学（坐标裁定见 region_stream_params 注）——
+
+    #[test]
+    fn region_params_region_at_2x() {
+        // 2x Retina：800×600 逻辑选区 → sourceRect 原样（points 直传，不乘 scale），
+        // 输出 = 1600×1200 物理像素（1:1 密度不降采样）。
+        let p = region_stream_params(
+            LogicalRect { x: 100.0, y: 50.0, w: 800.0, h: 600.0 },
+            1440.0, 900.0, 2.0,
+        )
+        .unwrap();
+        assert_eq!(p.source.origin.x, 100.0);
+        assert_eq!(p.source.origin.y, 50.0);
+        assert_eq!(p.source.size.width, 800.0);
+        assert_eq!(p.source.size.height, 600.0);
+        assert_eq!(p.out_w, 1600);
+        assert_eq!(p.out_h, 1200);
+    }
+
+    #[test]
+    fn region_params_full_display_at_1x() {
+        // 1x 外接屏：整屏快捷确认（Enter 无选区）= 选区即全屏 → sourceRect = 全边界，
+        // 输出 = 显示器物理像素（与全屏路径同尺寸）。
+        let p = region_stream_params(
+            LogicalRect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 },
+            1920.0, 1080.0, 1.0,
+        )
+        .unwrap();
+        assert_eq!(p.source.origin.x, 0.0);
+        assert_eq!(p.source.size.width, 1920.0);
+        assert_eq!((p.out_w, p.out_h), (1920, 1080));
+    }
+
+    #[test]
+    fn region_params_clamp_out_of_bounds_selection() {
+        // 越界选区（理论上前端已夹取；防御复算）：负原点 + 超界尺寸 → 夹进显示边界。
+        let p = region_stream_params(
+            LogicalRect { x: -10.0, y: -10.0, w: 2000.0, h: 2000.0 },
+            1920.0, 1080.0, 1.0,
+        )
+        .unwrap();
+        assert_eq!(p.source.origin.x, 0.0);
+        assert_eq!(p.source.origin.y, 0.0);
+        assert_eq!(p.source.size.width, 1920.0);
+        assert_eq!(p.source.size.height, 1080.0);
+        assert_eq!((p.out_w, p.out_h), (1920, 1080));
+    }
+
+    #[test]
+    fn region_params_fractional_rect_rounds_even() {
+        // 分数坐标（HiDPI 下 clientX 可为小数）：输出像素 = round(points×scale) 后
+        // 向下取偶（h264 4:2:0 色度子采样约束，见 even_px 注）。101.3×1 → round 101
+        // → 偶数 100；50.7×1 → round 51 → 偶数 50。
+        let p = region_stream_params(
+            LogicalRect { x: 428.75, y: 10.2, w: 101.3, h: 50.7 },
+            1920.0, 1080.0, 1.0,
+        )
+        .unwrap();
+        assert_eq!((p.out_w, p.out_h), (100, 50));
+        assert_eq!(p.source.origin.x, 428.75, "sourceRect 保留原值（points 直传）");
+    }
+
+    #[test]
+    fn region_params_rejects_degenerate_regions() {
+        // 完全出界（夹取后退化）与零尺寸 → Err（拒绝启动，不静默录空）。
+        assert!(region_stream_params(
+            LogicalRect { x: 5000.0, y: 5000.0, w: 100.0, h: 100.0 },
+            1920.0, 1080.0, 1.0,
+        )
+        .is_err());
+        assert!(region_stream_params(
+            LogicalRect { x: 10.0, y: 10.0, w: 0.5, h: 0.5 },
+            1920.0, 1080.0, 1.0,
+        )
+        .is_err());
+        // 缩放/逻辑尺寸异常（CG 查询失败兜底）→ Err。
+        assert!(region_stream_params(
+            LogicalRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            1920.0, 1080.0, 0.0,
+        )
+        .is_err());
+        assert!(region_stream_params(
+            LogicalRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            0.0, 0.0, 1.0,
+        )
+        .is_err());
+    }
+
+    // —— N1：MP4 tkhd 轨道帧尺寸解析 ——
+
+    /// 合成 tkhd box（指定 version），width/height 为 16.16 定点像素。
+    fn synth_tkhd(version: u8, w_px: u32, h_px: u32) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"tkhd");
+        b.extend_from_slice(&[version, 0, 0, 0]); // version + flags
+        let pre = if version == 1 { 8 + 8 } else { 4 + 4 }; // ctime + mtime
+        b.extend_from_slice(&vec![0u8; pre]);
+        b.extend_from_slice(&[0; 8]); // track_id + reserved
+        b.extend_from_slice(&[0; 4]); // duration（v0；v1 的 duration 在下方补齐后此处偏移不同——见 layout 注）
+        if version == 1 {
+            b.extend_from_slice(&[0; 4]); // v1 duration 为 8 字节：上 4 字节已在上一行
+        }
+        b.extend_from_slice(&[0; 8]); // reserved
+        b.extend_from_slice(&[0; 8]); // layer/alt/volume/reserved（2+2+2+2）
+        b.extend_from_slice(&[0; 36]); // matrix
+        b.extend_from_slice(&(w_px * 65536).to_be_bytes()); // width（16.16）
+        b.extend_from_slice(&(h_px * 65536).to_be_bytes()); // height（16.16）
+        b
+    }
+
+    #[test]
+    fn mp4_track_dims_parses_video_track_from_synthetic_boxes() {
+        // 音轨（0×0）在前、视频轨在后：应返回首个非零（视频轨），与次序无关。
+        let mut b = b"xx".to_vec();
+        b.extend_from_slice(&synth_tkhd(0, 0, 0));
+        b.extend_from_slice(&synth_tkhd(0, 1600, 1200));
+        assert_eq!(mp4_track_dims(&b), Some((1600, 1200)));
+        // version 1（64 位时间字段）
+        let mut b1 = synth_tkhd(1, 1920, 1080);
+        b1.splice(0..0, b"moov".to_vec());
+        assert_eq!(mp4_track_dims(&b1), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn mp4_track_dims_fixed_point_rounding_and_garbage() {
+        // 16.16 定点：0x000A_0000 = 10.0px；0.5px = 0x0000_8000 → round 到 1（防御
+        // 性整数化，实际轨道尺寸恒为整数像素）。
+        let mut b = Vec::new();
+        b.extend_from_slice(b"tkhd");
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        // width 前的 body 字段共 72 字节（ctime4+mtime4+track_id4+reserved4+duration4
+        // +reserved8+layer2+alt2+volume2+reserved2+matrix36，见 mp4_track_dims 注）。
+        b.extend_from_slice(&[0; 72]);
+        b.extend_from_slice(&0x000A_0000u32.to_be_bytes());
+        b.extend_from_slice(&0x0000_8000u32.to_be_bytes());
+        assert_eq!(mp4_track_dims(&b), Some((10, 1)));
+        // 无 tkhd → None。
+        assert_eq!(mp4_track_dims(b"not an mp4 at all"), None);
+    }
+
+    // —— N1 区域录制端到端（#[ignore]，需屏幕录制权限，开发机直跑）——
+
+    /// CPU 采样（测试内 helper）：ps %cpu 瞬时值（与 soak_record 同款口径）。
+    fn sample_cpu_percent(pid: u32) -> Option<f64> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "%cpu=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+
+    /// N1 区域录制端到端：800×600 逻辑选区录 3s →
+    /// ① RecordingInfo 尺寸 = 选区×缩放（region_stream_params 同源期望）；
+    /// ② MP4 tkhd 视频轨帧尺寸 == info 尺寸——**帧尺寸真为选区尺寸**的证据
+    ///   （sourceRect 生效；全屏路径同断言会得显示器物理像素）；
+    /// ③ mvhd 时长 ≈ 3s；④ CPU 采样均值 < 8%（F7 预算；plan 预期面积裁剪后
+    ///   显著低于全屏，实测值打印进报告）。
+    #[test]
+    #[ignore = "需要 macOS 屏幕录制权限 + 真实显示器；cargo test -p hawksnap-platform-mac -- --ignored real_region 运行"]
+    fn real_region_recording_produces_region_dims_and_low_cpu() {
+        let region = LogicalRect { x: 50.0, y: 50.0, w: 800.0, h: 600.0 };
+        let display_id = unsafe { cg_display_ffi::CGMainDisplayID() };
+        // 期望输出尺寸：与 begin() 完全同源（CG 查询 → region_stream_params）。
+        let bounds = unsafe { cg_display_ffi::CGDisplayBounds(display_id) };
+        let scale = unsafe { cg_display_ffi::CGDisplayPixelsWide(display_id) } as f64
+            / bounds.size.width;
+        let expected =
+            region_stream_params(region, bounds.size.width, bounds.size.height, scale)
+                .expect("region params");
+
+        // CPU 采样线程（录制期间每 500ms 一次，停止旗标收口；Arc 供 'static 线程）。
+        let pid = std::process::id();
+        let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sampler_stop = stop_flag.clone();
+        let sampler = std::thread::spawn(move || {
+            let mut samples: Vec<f64> = Vec::new();
+            while !sampler_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Some(v) = sample_cpu_percent(pid) {
+                    samples.push(v);
+                }
+            }
+            samples
+        });
+
+        let dir = std::env::temp_dir().join(format!("hawksnap-n1-region-{}", std::process::id()));
+        let path = recording_output_path(&dir, Local::now()).unwrap();
+        let rec = ScreenRecorder::start_region(path.clone(), display_id, region).expect("start_region");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let info = rec.stop().expect("stop");
+        stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(stop_flag); // 采样线程只持另一 Arc 引用，join 不被本侧引用阻塞
+        let samples = sampler.join().unwrap();
+
+        assert_eq!(info.width, expected.out_w, "输出宽 = 选区×缩放（偶数取整）");
+        assert_eq!(info.height, expected.out_h, "输出高 = 选区×缩放（偶数取整）");
+
+        let data = std::fs::read(&path).expect("read output");
+        assert_eq!(&data[4..8], b"ftyp", "应为 MP4 容器");
+        let dims = mp4_track_dims(&data).expect("tkhd 解析");
+        assert_eq!(
+            dims,
+            (expected.out_w, expected.out_h),
+            "视频轨帧尺寸应 = 选区尺寸（sourceRect 生效的证据）"
+        );
+        let dur = mp4_duration_secs(&data).expect("mvhd 解析");
+        assert!((dur - 3.0).abs() <= 1.5, "时长 {dur}s 应 ≈ 3s ±1.5");
+
+        let avg = if samples.is_empty() {
+            0.0
+        } else {
+            samples.iter().sum::<f64>() / samples.len() as f64
+        };
+        println!(
+            "[n1] region {}x{} pts @scale={scale:.2}: track dims {dims:?}, \
+             duration={dur:.3}s, cpu avg={avg:.2}% over {} samples",
+            region.w, region.h, samples.len()
+        );
+        // F7 预算断言（≤8%）仅在 release 生效：debug 构建的帧处理路径（未优化的
+        // memcpy/msg_send）CPU 约 2-3 倍，实测 ~15%——G 预算口径历来按 release 验收
+        // （M6 soak 同口径），debug 下打印不断言。
+        if !cfg!(debug_assertions) {
+            assert!(avg < 8.0, "F7 预算：区域录制 CPU 均值 {avg}% 应 <8%");
+        }
+        // HAWKSNAP_RECORD_KEEP=1：保留 MP4 供人工复核（m6 同款）。
+        if std::env::var("HAWKSNAP_RECORD_KEEP").is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+        } else {
+            println!("[n1] 区域录制产物保留: {}", path.display());
         }
     }
 }

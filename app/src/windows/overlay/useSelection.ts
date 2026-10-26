@@ -20,6 +20,10 @@ export function useSelection(opts: {
   // 拾色（第一次 Esc 不该连截图一起取消），Enter 不触发确认复制。方向键不动（选区
   // 微调与拾色不冲突）。opts 每渲染新对象 → effect 随 pickerMode 重挂，闭包必新。
   keysSuppressed?: boolean;
+  // N1 录制模式整屏快捷确认：无选区（或选区过小）时 Enter/双击以此 rect 确认
+  // （= 选区即整屏，rect 为本 display 全边界）。缺省（截图模式）保持「无选区不
+  // 确认」不变——截图侧零行为变化。
+  emptyConfirmRect?: Rect;
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [rect, setRect] = useState<SelRect | null>(null);
@@ -56,16 +60,32 @@ export function useSelection(opts: {
   // 动作参数，走复制；"save" 仅由浮条按钮显式传入。
   const confirm = useCallback((action: ConfirmAction = "copy") => {
     if (confirmingRef.current) return;
-    if (phase !== "selected" || !rect || rect.w < 2 || rect.h < 2) return;
-    confirmingRef.current = true;
-    // HiDPI 分数坐标修正（0.1 hotfix）：缩放屏上 clientX/Y 可为小数（如 428.75），norm()
-    // 原样保留 → Rust 侧 Rect 是 i32/u32，serde 在 IPC 层直接拒绝浮点 → finish_capture
-    // 失败。出口统一取整（round(w≥2) ≥ 2，既有 w/h≥2 守卫取整后仍成立，无需复检）。
-    const r = {
-      x: Math.round(rect.x), y: Math.round(rect.y),
-      w: Math.round(rect.w), h: Math.round(rect.h),
-    };
-    opts.onConfirm?.(r, action);
+    if (phase === "selected" && rect && rect.w >= 2 && rect.h >= 2) {
+      confirmingRef.current = true;
+      // HiDPI 分数坐标修正（0.1 hotfix）：缩放屏上 clientX/Y 可为小数（如 428.75），norm()
+      // 原样保留 → Rust 侧 Rect 是 i32/u32，serde 在 IPC 层直接拒绝浮点 → finish_capture
+      // 失败。出口统一取整（round(w≥2) ≥ 2，既有 w/h≥2 守卫取整后仍成立，无需复检）。
+      const r = {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        w: Math.round(rect.w), h: Math.round(rect.h),
+      };
+      opts.onConfirm?.(r, action);
+      return;
+    }
+    // N1 录制模式整屏快捷确认：无选区（idle/空选区）Enter/双击 → 选区即整屏。
+    // 拖拽中不触发（与既有 phase 门一致）；截图模式无 emptyConfirmRect → 不确认，
+    // 行为与改动前逐字节一致。
+    const fallback = opts.emptyConfirmRect;
+    if (fallback && phase !== "dragging") {
+      confirmingRef.current = true;
+      opts.onConfirm?.(
+        {
+          x: Math.round(fallback.x), y: Math.round(fallback.y),
+          w: Math.round(fallback.w), h: Math.round(fallback.h),
+        },
+        action,
+      );
+    }
   }, [phase, rect, opts]);
 
   // 失败解锁（0.1 hotfix）：confirm 置位的在途守卫原只有 cancel/reset 两个出口——

@@ -4,6 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use super::delay::{DELAY_ABORT, DELAY_ACTIVE};
+use super::intent::{CaptureIntent, F6Route};
 use crate::commands;
 
 /// 截图流程代数（单调递增）：每轮 start_capture_flow 分配一个新代数并写入该轮全部
@@ -36,6 +37,8 @@ pub static HIDE_WINDOWS: AtomicBool = AtomicBool::new(false);
 pub struct DisplayPayloadForTest {
     pub display_id: u64, pub x: i32, pub y: i32,
     pub width: u32, pub height: u32, pub scale: f64, pub frame_url: String,
+    /// N1：本轮覆盖层用途（"capture" | "record"）——与 commands::DisplayPayload 同步演进。
+    pub intent: &'static str,
     pub flow: u64,
 }
 
@@ -69,14 +72,54 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     if DELAY_ACTIVE.load(Ordering::SeqCst) {
         DELAY_ABORT.store(true, Ordering::SeqCst);
     }
+    // N1：截图入口统一落 Capture 意图（载荷 intent 字段的单一事实源，见 intent.rs）。
+    super::intent::set(CaptureIntent::Capture);
+    launch_overlay_flow(app, CaptureIntent::Capture)
+}
+
+/// N1：F6 空闲触发 → 录制选区模式。覆盖层以 Record 意图启动——选区 UI 与截图
+/// 完全同款（同冻结帧/十字准线/遮罩/磁吸），差异全部由前端按载荷 `intent` 切换：
+/// 提示横幅文案、动作浮条缺席、确认路由到 record_start_region、Enter/双击无选区
+/// = 整屏快捷确认。**F6 旧「直接全屏录制」语义废除**（plan Interfaces 裁定，
+/// record_start API 保留给兼容）；F6 录制中 → 停止的 toggle 语义保留（hotkey.rs
+/// 经 f6_route 分派）。
+// 必须在非主线程调用（与 start_capture_flow 同一建窗纪律）。
+pub fn start_record_selection_flow(app: &AppHandle) -> Result<(), String> {
+    // 防御性重查（f6_route 在热键侧已路由；本函数自持守卫——未来托盘/面板等新入口
+    // 复用本函数时同门槛生效，不依赖调用方记得先查）。StopRecording 分支 = 录制
+    // 进行中（不应到这，热键侧已先路由去停）→ 按 capture_guard 文案拒绝。
+    match super::intent::f6_route(
+        crate::recording::recording_active(),
+        ANY_OVERLAY_VISIBLE.load(Ordering::SeqCst),
+    ) {
+        F6Route::StartRecordSelection => {}
+        F6Route::StopRecording => {
+            return Err(capture_guard_msg(true).unwrap().to_string());
+        }
+        F6Route::Reject(msg) => return Err(msg.to_string()),
+    }
+    // 延时倒计时中止（与 start_capture_flow 同款语义：新流程优先，倒计时让位）。
+    if DELAY_ACTIVE.load(Ordering::SeqCst) {
+        DELAY_ABORT.store(true, Ordering::SeqCst);
+    }
+    super::intent::set(CaptureIntent::Record);
+    launch_overlay_flow(app, CaptureIntent::Record)
+}
+
+/// 两条流程入口的公共实现（N1 从 start_capture_flow 抽取，截图行为逐字节不变）：
+/// TCC 预检 → 抓屏 → 覆盖层窗口建/复用+show → 悬停总闸 → 代数分配 + overlay-ready
+/// 三连发。`intent` 决定：payload 的 intent 字段值；截图模式的 perf 打点（录制选区
+/// 不使用 perf marks——F6 链路无 bench 配对语义，mark_hotkey 的门闩武装/overlay_shown
+/// 计数都属截图基准口径，混入录制轮会污染配对）。
+fn launch_overlay_flow(app: &AppHandle, intent: CaptureIntent) -> Result<(), String> {
     // Plan D Task D4（修 Plan B 裁定的静默壁纸缺陷）：抓屏前屏幕录制权限预检。macOS 14+
     // 未授权时抓屏 API 不报错、静默返回纯壁纸帧——用户看到"冻结的画面"却毫无解释。预检
     // 未过 → 尽力打开系统设置的屏幕录制面板 + 拒绝本轮截图（Err 经既有
     // hawk://capture-error → App.tsx 横幅链回流，前端零改动）。
     // bench 守卫（裁定 1）：bench 量链路延迟，与本机授权态无关（bench 宿主可能从未授权），
     // HIDE_WINDOWS 为真（bench 轮次进行中）时跳过预检，基准轮次照常。
-    // 覆盖面：F1 / 媒体键（trigger_capture_flow）/ 托盘 / 面板按钮全部经本入口，
-    // 一处预检全路径生效。
+    // 覆盖面：F1 / 媒体键（trigger_capture_flow）/ 托盘 / 面板按钮（截图意图）与
+    // F6（录制选区意图）全部经本入口，一处预检全路径生效。
     if !HIDE_WINDOWS.load(Ordering::SeqCst)
         && !hawksnap_platform_mac::permissions::screen_recording_prechecked()
     {
@@ -86,13 +129,33 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
             eprintln!("[hawksnap] 打开屏幕录制权限设置失败: {e}");
         }
         // Rust 字面量（G6 i18n 范围裁定：Rust 侧文案不入 t() 字典），面向用户可读中文。
-        return Err("屏幕录制权限未授予：已为你打开系统设置，授权后重新按 F1 即可".into());
+        // 提示的快捷键随意图回显（截图=F1，录制选区=F6——用户刚按的那个键）。
+        let combo = if intent == CaptureIntent::Capture { "F1" } else { "F6" };
+        return Err(format!(
+            "屏幕录制权限未授予：已为你打开系统设置，授权后重新按 {combo} 即可"
+        ));
     }
     // Task 11 埋点：热键/托盘共用此入口，首行即触发时刻（stage: hotkey）；
-    // mark_hotkey 同时武装 overlay_shown 单发门闩（多显示器只记首个 shown，与 hotkey 1:1）
-    crate::perf::mark_hotkey();
+    // mark_hotkey 同时武装 overlay_shown 单发门闩（多显示器只记首个 shown，与 hotkey 1:1）。
+    // 录制选区模式（N1）不打点：无 bench 配对语义（见函数注）。
+    if intent == CaptureIntent::Capture {
+        crate::perf::mark_hotkey();
+    }
+    let result = spawn_overlay_flow(app, intent);
+    if result.is_err() {
+        // 失败清槽：本轮没有（成功）出口经过 hide_all_overlays，意图不得残留
+        // （否则下一次 f6_route/hide 语义被上一轮污染）。
+        super::intent::clear();
+    }
+    result
+}
+
+/// launch_overlay_flow 的抓屏与建窗主体（无错误清槽职责，拆出仅为可读性）。
+fn spawn_overlay_flow(app: &AppHandle, intent: CaptureIntent) -> Result<(), String> {
     let mut displays = tauri::async_runtime::block_on(commands::capture_screens(app.clone()))?;
-    crate::perf::mark("grab_done"); // 抓屏成功返回
+    if intent == CaptureIntent::Capture {
+        crate::perf::mark("grab_done"); // 抓屏成功返回
+    }
     // Plan B Task 1（G3-1）：覆盖层窗口常驻复用——首轮 build（webview 冷加载 ~267ms），
     // 之后每轮仅 set_position/set_size/show，页面由 overlay-ready 的新 payload 重绘，
     // 砍掉每轮的冷加载段。show/hide/set_position 都是投递给主线程事件循环的消息，
@@ -139,7 +202,9 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
             let _ = win.set_focus();
         }
     }
-    crate::perf::mark("overlay_created"); // 覆盖层窗口就绪（build 或复用 show 完成；每轮一次，便于脚本按索引配对）
+    if intent == CaptureIntent::Capture {
+        crate::perf::mark("overlay_created"); // 覆盖层窗口就绪（build 或复用 show 完成；每轮一次，便于脚本按索引配对）
+    }
     // Plan B Task 5：覆盖层已就绪 → 开启悬停探测总闸（handler 首行检查，见
     // ANY_OVERLAY_VISIBLE 注）；hide_all_overlays 隐藏全部覆盖层后落下。
     ANY_OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
@@ -156,6 +221,8 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     let flow = FLOW_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     for d in displays.iter_mut() {
         d.flow = flow;
+        // N1：本轮用途随载荷下发（capture_screens 占位 "capture" → 此处按意图覆写）。
+        d.intent = intent.as_payload_str();
     }
     let app2 = app.clone();
     let repeats = displays.clone();
@@ -215,6 +282,9 @@ pub(crate) fn hide_all_overlays(app: &AppHandle) -> Result<(), String> {
         }
     }
     ANY_OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+    // N1：流程到此结束（确认/取消/录制启动的全部收口路径都经此）→ 用途意图同步清槽
+    // （空槽 = 无进行中的选区流程，见 intent.rs 模块注）。
+    super::intent::clear();
     // 修复（终审 wave，G2）：流程到此结束（本时刻起没有任何覆盖层能再确认），释放
     // CAPTURES 钉住的整帧 RGBA（~24-59MB/屏）——此前它常驻至下一轮覆盖，是空载残余
     // 内存的主力。frame_path 保留（下一轮 capture_screens 删除上一轮冻结帧仍需要）。
@@ -234,6 +304,7 @@ mod tests {
         let p = DisplayPayloadForTest {
             display_id: 7, x: 0, y: 0, width: 100, height: 50, scale: 2.0,
             frame_url: "hawk-grab:///tmp/a.raw".into(),
+            intent: "capture",
             flow: 3,
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -243,6 +314,15 @@ mod tests {
         // 修复（终审 wave）：payload 携带流程代数（单词字段 camelCase 无操作），
         // 前端按 flow 丢弃旧代迟到补发（代数守卫）
         assert!(s.contains("\"flow\":3"));
+        // N1：payload 携带本轮用途（"capture" | "record" 小写单词）——前端按
+        // intent 切换录制模式提示/隐藏动作浮条/路由确认到 record_start_region。
+        assert!(s.contains("\"intent\":\"capture\""));
+        let p2 = DisplayPayloadForTest {
+            intent: "record",
+            ..p.clone()
+        };
+        let s2 = serde_json::to_string(&p2).unwrap();
+        assert!(s2.contains("\"intent\":\"record\""), "{s2}");
     }
 
     /// 互斥守卫（终审 wave）纯逻辑：录屏进行中 → 拒绝文案；空闲 → 放行。

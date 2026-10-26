@@ -98,7 +98,7 @@ pub fn run() {
             panel::panel_trigger, panel::open_path,
             ocr::ocr_recognize, ocr::ocr_export_txt,
             recording::record_start, recording::record_pause, recording::record_resume,
-            recording::record_stop, recording::record_status,
+            recording::record_stop, recording::record_status, recording::record_start_region,
             updater::check_for_updates, updater::install_update, updater::restart_app
         ])
         .setup(|app| {

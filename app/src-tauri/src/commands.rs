@@ -13,6 +13,10 @@ pub struct DisplayPayload {
     /// 并覆写——capture_screens 先填 0 占位，emit 前统一改为本轮代数。前端按 flow
     /// 丢弃旧代迟到补发（overlay-ready 300ms 补发线程 vs 新一轮的竞态）。
     pub flow: u64,
+    /// N1：本轮覆盖层用途（"capture" | "record" 小写单词，CaptureIntent::as_payload_str
+    /// 派生）。capture_screens 先填 "capture" 占位，flow 侧按本轮意图覆写——前端按
+    /// record 切换提示横幅/隐藏动作浮条/把确认路由到 record_start_region。
+    pub intent: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +105,7 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
             width: f.width, height: f.height, scale: f.scale,
             frame_url: format!("hawk-grab://{}", file.display()),
             flow: 0, // 占位：start_capture_flow 在 emit 前统一覆写为本轮代数（见结构体注）
+            intent: "capture", // 占位：flow 侧按本轮 CaptureIntent 覆写（N1）
         });
     }
     Ok(out)
@@ -448,10 +453,13 @@ mod tests {
             display_id: 7, x: 0, y: 0, width: 100, height: 50, scale: 2.0,
             frame_url: "hawk-grab:///tmp/a.raw".into(),
             flow: 1,
+            intent: "capture",
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"frameUrl\":\"hawk-grab:///tmp/a.raw\""));
         assert!(!s.contains("pngUrl"), "旧字段不得残留");
+        // N1：intent 字段随载荷在场（capture_screens 占位值）
+        assert!(s.contains("\"intent\":\"capture\""));
     }
 
     #[test]

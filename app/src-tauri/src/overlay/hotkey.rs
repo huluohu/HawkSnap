@@ -134,30 +134,47 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
         HotkeyKind::Record => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
-                    eprintln!("[hawksnap] {combo_owned} 热键触发（record toggle）");
+                    eprintln!("[hawksnap] {combo_owned} 热键触发（record）");
                     let app = app2.clone();
                     std::thread::spawn(move || {
-                        // 互斥守卫（终审 wave，F6→截图方向）：截图覆盖层可见（一轮截图
-                        // 进行中）时拒绝**启动**录屏——否则覆盖层冻结帧 + 录制条同屏叠加，
-                        // 两套全屏 UI 互抢输入。停止路径不受影响（recording_active 时
-                        // 放行去停；两态经对向守卫后不再共存，此处防御性放行）。
-                        // 反馈走既有 capture-error 横幅通道（懒拉面板，不静默；文案是
-                        // 「先完成截图」语义，归截图侧通道）。
-                        let overlay_visible =
-                            super::flow::ANY_OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::SeqCst);
-                        if !crate::recording::recording_active() {
-                            if let Some(msg) = crate::recording::f6_start_guard_msg(overlay_visible) {
-                                crate::panel::show_capture_error(&app, msg.to_string());
-                                return;
-                            }
+                        // bench 轮次保护（D0-③，与 F1/托盘入口同款）：基准模式进行中
+                        // 忽略外部触发——录制选区覆盖层是全屏 UI，混入 bench 轮会污染
+                        // 时延样本（M2 的 F6 toggle 无此守卫；N1 起覆盖层参与，补齐）。
+                        if crate::bench_mode::is_running() {
+                            return;
                         }
-                        // M6 录屏 toggle：空闲 → 启动全屏录制；录制/暂停中 → 停止。
-                        // toggle 内部含权限预检/建窗（非主线程 ✓）/阻塞收尾（stop ≤25s，
-                        // 热键线程可承受——与托盘入口同款纪律）。
-                        if let Err(e) = crate::recording::toggle(&app) {
-                            // 错误横幅可见化：懒拉主面板（show_record_error，非主线程合法），
-                            // 拉起失败仅 eprintln，横幅退化为 push 通道尽力投递。
-                            crate::panel::show_record_error(&app, e);
+                        // N1：F6 完整路由（intent::f6_route 纯函数，热键侧分派）——
+                        // 录制/暂停中 → 停止（M6 toggle 的停止路径原样保留，即便覆盖层
+                        // 可见也放行去停：两态经对向守卫后不再共存，此处防御性放行）；
+                        // 空闲 → 进入录制选区模式（**旧「直接全屏录制」语义废除**，plan
+                        // Interfaces 裁定：F6 统一进入选区模式，拖选=区域、Enter/双击=
+                        // 全屏快捷确认、Esc=取消；record_start API 保留给兼容）；
+                        // 覆盖层可见（截图或录制选区进行中）→ 拒绝横幅（M2 守卫 a：
+                        // 两套全屏 UI 不叠屏；反馈走 capture-error 通道，与 M2 同口径）。
+                        use super::intent::{f6_route, F6Route};
+                        let overlay_visible = super::flow::ANY_OVERLAY_VISIBLE
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        match f6_route(
+                            crate::recording::recording_active(),
+                            overlay_visible,
+                        ) {
+                            F6Route::StopRecording => {
+                                if let Err(e) = crate::recording::record_stop(app.clone()) {
+                                    // 错误横幅可见化（show_record_error，非主线程合法），
+                                    // 拉起失败仅 eprintln，横幅退化为 push 通道尽力投递。
+                                    crate::panel::show_record_error(&app, e);
+                                }
+                            }
+                            F6Route::StartRecordSelection => {
+                                if let Err(e) =
+                                    super::flow::start_record_selection_flow(&app)
+                                {
+                                    crate::panel::show_record_error(&app, e);
+                                }
+                            }
+                            F6Route::Reject(msg) => {
+                                crate::panel::show_capture_error(&app, msg.to_string());
+                            }
                         }
                     });
                 }

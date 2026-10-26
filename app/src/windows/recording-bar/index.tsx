@@ -15,22 +15,31 @@ export default function RecordingBarWindow() {
   const [seconds, setSeconds] = useState<number | null>(null);
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // N1：区域录制的选区逻辑尺寸（「区域 W×H」标题）；null = 全屏录制（不显示标题）。
+  // 数据源与时间同通道（tick push + mount pull），每会话刷新——全屏会话自动清残留。
+  const [region, setRegion] = useState<{ w: number; h: number } | null>(null);
   // 上一 tick 的会话号（ref 而非 state：listen 回调闭包不随渲染更新，state 会取到
   // 初值 null 导致每 tick 都判「新会话」而误清当会话错误）。
   const lastSessionRef = useRef<number | null>(null);
+
+  const regionOf = (p: { regionW?: number; regionH?: number }) =>
+    typeof p.regionW === "number" && typeof p.regionH === "number"
+      ? { w: p.regionW, h: p.regionH }
+      : null;
 
   // pull 补显 + push 订阅（窗口常驻复用：监听与页面同寿命）
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    void invoke<{ seconds: number; paused: boolean } | null>("record_status")
+    void invoke<{ seconds: number; paused: boolean; regionW?: number; regionH?: number } | null>("record_status")
       .then((r) => {
         if (disposed || !r) return;
         setSeconds(r.seconds);
         setPaused(r.paused);
+        setRegion(regionOf(r));
       })
       .catch(() => {});
-    listen<{ session: number; seconds: number; paused: boolean }>("hawk://record-tick", (e) => {
+    listen<{ session: number; seconds: number; paused: boolean; regionW?: number; regionH?: number }>("hawk://record-tick", (e) => {
       // 新会话（session 由 Rust 每次 record_start 单调取号）：清除上一会话的行内
       // 错误残留（M6 遗留 minor——窗口常驻复用，组件状态跨会话存活）。
       if (lastSessionRef.current !== e.payload.session) {
@@ -39,6 +48,7 @@ export default function RecordingBarWindow() {
       }
       setSeconds(e.payload.seconds);
       setPaused(e.payload.paused);
+      setRegion(regionOf(e.payload));
     }).then((un) => {
       if (disposed) un();
       else unlisten = un;
@@ -74,18 +84,30 @@ export default function RecordingBarWindow() {
   };
   const time: CSSProperties = {
     fontSize: 20, lineHeight: 1, color: "#F5F7FA", fontWeight: 600,
-    fontVariantNumeric: "tabular-nums", flex: 1, minWidth: 0,
+    fontVariantNumeric: "tabular-nums", flex: 1, minWidth: 0, whiteSpace: "nowrap",
+    flexShrink: 0, // 挤压时由区域标题先缩（N1），计时永不换行/截断
   };
   const btn: CSSProperties = {
     fontSize: 12, padding: "5px 10px", borderRadius: 6, border: "1px solid #2A3648",
     background: "#16202E", color: "#E8ECF1", cursor: "pointer", flexShrink: 0,
   };
   const btnDanger: CSSProperties = { ...btn, background: "#3A1620", borderColor: "#5B2430" };
+  // N1：区域标题（「区域 W×H」，小号灰字）。可收缩（minWidth 0 + ellipsis）——280px
+  // 条内与计时/按钮共存，挤压时先缩标题、计时与按钮不动（flexShrink 0）。
+  const regionLabel: CSSProperties = {
+    fontSize: 10, lineHeight: 1, color: "#8A8F98", flexShrink: 1, minWidth: 0,
+    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+  };
 
   return (
     <div style={bar} role="status" aria-label={t("record.barLabel")}>
       <style>{`@keyframes hawksnap-rec-pulse { 50% { opacity: 0.35; } }`}</style>
       <span style={dot} aria-hidden="true" />
+      {region && (
+        <span style={regionLabel} title={t("record.regionTitle", region)}>
+          {t("record.regionTitle", region)}
+        </span>
+      )}
       <span style={time}>
         {paused ? <span style={{ color: "#FFB020", fontSize: 12, marginRight: 6 }}>{t("record.paused")}</span> : null}
         {seconds === null ? "00:00" : mmss(seconds)}

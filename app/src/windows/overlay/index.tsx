@@ -15,7 +15,7 @@ import { toLocalHover, type HoverFrame } from "./hover";
 import { barPosition } from "./actionBar";
 import { hexOf, rgbOf, rulerTicks, samplePixel, type Rgb } from "./picker";
 
-type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string; flow: number };
+type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string; flow: number; intent: string };
 
 // window.__LABEL__ 由 Rust 侧建窗后 eval 注入（overlay.rs），用于认领自己的 DisplayPayload
 declare global {
@@ -77,6 +77,15 @@ export default function OverlayWindow() {
   // 当前悬停框。state 而非 ref——重绘 effect 依赖它触发；selected 态仍更新但不绘制
   // （绘制按 phase 门控，见重绘 effect）。
   const [hoverRect, setHoverRect] = useState<Rect | null>(null);
+
+  // —— N1 录制选区模式 ——
+  // payload.intent === "record"（F6 触发的流程）：选区 UI 与截图完全同款（同冻结帧/
+  // 十字准线/遮罩/磁吸/hover 直选），差异只有四件事——提示横幅文案不同、动作浮条
+  // 缺席、无选区时 Enter/双击 = 整屏快捷确认、确认路由到 record_start_region。
+  // 录制启动失败的行内错误（覆盖层不是横幅宿主、主面板可能不存在——错误就地可见，
+  // 覆盖层保留可重试/Esc 退出，Rust 侧失败路径不 hide）。
+  const recordMode = display?.intent === "record";
+  const [recordError, setRecordError] = useState<string | null>(null);
 
   // —— M2 Task M5 取色器（Snipaste 式）——
   // C 进入/退出拾色模式；移动 = 浮签跟随光标实时显示光标下像素（冻结帧缓冲直采，
@@ -182,9 +191,30 @@ export default function OverlayWindow() {
     candidatesRef,
     // M2 M5：拾色中 Esc/Enter 归拾色器（见 pickerMode 声明处注）
     keysSuppressed: pickerMode,
+    // N1：录制模式无选区 Enter/双击 = 整屏快捷确认（rect = 本 display 全边界，
+    // Rust 侧按整屏 sourceRect 录制）。截图模式不传——无选区不确认（原语义）。
+    emptyConfirmRect: recordMode && display
+      ? { x: 0, y: 0, w: display.width, h: display.height }
+      : undefined,
     onConfirm: async (r: SelRect, action: ConfirmAction) => {
       if (!display) return;
       const myFlow = flowRef.current;
+      // N1：录制模式确认路由——record_start_region（成功由 Rust 收口：hide 全部
+      // 覆盖层 + 清意图槽 + 拉起录制条；失败覆盖层保留，行内错误 + 解锁在途守卫）。
+      if (display.intent === "record") {
+        try {
+          await invoke("record_start_region", {
+            req: { displayId: display.displayId, rect: r },
+          });
+          if (flowRef.current !== myFlow) return;
+        } catch (err) {
+          if (flowRef.current !== myFlow) return;
+          console.error("record_start_region failed", err);
+          setRecordError(String(err));
+          unlockConfirm();
+        }
+        return;
+      }
       try {
         const outcome = await invoke<{ copied: boolean; savedTo: string | null }>("finish_capture", {
           req: { displayId: display.displayId, rect: r, copy: action === "copy", save: action === "save" },
@@ -268,6 +298,8 @@ export default function OverlayWindow() {
         setPickerMode(false);
         pickerDownRef.current = null;
         setCopied(null);
+        // N1：清上一轮的录制启动错误（新一轮 payload 到达 = 覆盖层复活，横幅回到提示态）
+        setRecordError(null);
         if (copiedTimerRef.current !== null) {
           window.clearTimeout(copiedTimerRef.current);
           copiedTimerRef.current = null;
@@ -600,10 +632,27 @@ export default function OverlayWindow() {
           border: "1px solid #22405F", borderRadius: 8, padding: "4px 12px",
           fontSize: 12, color: "#7ED087" }}>{t("overlay.picker.copied", { color: copied })}</div>
       )}
+      {/* N1 录制模式提示横幅：与截图模式唯一的常驻视觉差异（选区视觉刻意一致）。
+          录制启动失败时替换为红色行内错误（覆盖层保留可重试）。 */}
+      {recordMode && (
+        recordError ? (
+          <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
+            zIndex: 10, pointerEvents: "none", background: "#0D1522",
+            border: "1px solid #5B2430", borderRadius: 8, padding: "4px 12px",
+            fontSize: 12, color: "#E5484D", maxWidth: "80vw" }}>{recordError}</div>
+        ) : (
+          <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
+            zIndex: 10, pointerEvents: "none", background: "#0D1522",
+            border: "1px solid #22405F", borderRadius: 8, padding: "4px 12px",
+            fontSize: 12, color: "#D8E2EE" }}>{t("overlay.record.hint")}</div>
+        )
+      )}
       {/* 选区确认浮条：canvas 的兄弟节点（fixed 定位）。pointer/dblclick 处理器都只挂在
           canvas 元素上，浮条内的 mousedown/双击按构造不进入选区状态机——既不清选区也不
-          触发拖拽/双击确认。Enter 缺省 confirm() = "copy"（语义裁定：保存须显式点按钮）。 */}
-      {phase === "selected" && rect && (
+          触发拖拽/双击确认。Enter 缺省 confirm() = "copy"（语义裁定：保存须显式点按钮）。
+          N1：录制模式动作浮条**缺席**（确认语义只有「录制这个选区」——Enter/双击/点击，
+          无复制/保存/标注分支），选区出现即录即可达。 */}
+      {phase === "selected" && rect && !recordMode && (
         <div style={{ position: "fixed", display: "flex", gap: 8, alignItems: "center",
           ...barPosition(rect, display.width, display.height),
           background: "#0D1522", border: "1px solid #22405F", borderRadius: 8,

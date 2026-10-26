@@ -184,6 +184,46 @@ describe("useSelection", () => {
     expect(onConfirm).toHaveBeenCalledTimes(2); // 解锁后重试通过
   });
 
+  // —— N1：录制模式整屏快捷确认（emptyConfirmRect）——
+
+  it("emptyConfirmRect confirms the full display on Enter with no selection", () => {
+    // 录制模式：无选区 Enter = 选区即整屏（rect = 本 display 全边界）。
+    const onConfirm = vi.fn();
+    const full = { x: 0, y: 0, w: 1000, h: 600 };
+    const { result } = renderHook(() => useSelection({
+      width: 1000, height: 600, onConfirm, emptyConfirmRect: full,
+    }));
+    expect(result.current.phase).toBe("idle");
+    act(() => result.current.confirm());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm).toHaveBeenCalledWith(full, "copy");
+  });
+
+  it("emptyConfirmRect is ignored mid-drag and yields to a real selection", () => {
+    const onConfirm = vi.fn();
+    const full = { x: 0, y: 0, w: 1000, h: 600 };
+    const { result } = renderHook(() => useSelection({
+      width: 1000, height: 600, onConfirm, emptyConfirmRect: full,
+    }));
+    // 拖拽中（phase=dragging）不触发整屏快捷确认——与既有 phase 门一致。
+    act(() => result.current.pointerHandlers.onPointerDown({ clientX: 10, clientY: 10 } as PointerEvent));
+    act(() => result.current.confirm());
+    expect(onConfirm).not.toHaveBeenCalled();
+    // 拖出真实选区后：确认走选区（非 fallback）。
+    act(() => result.current.pointerHandlers.onPointerMove({ clientX: 60, clientY: 40 } as PointerEvent));
+    act(() => result.current.pointerHandlers.onPointerUp({} as PointerEvent));
+    act(() => result.current.confirm());
+    expect(onConfirm).toHaveBeenCalledWith({ x: 10, y: 10, w: 50, h: 30 }, "copy");
+  });
+
+  it("capture mode (no emptyConfirmRect) keeps rejecting empty confirms", () => {
+    // 截图模式回归：无选区 Enter 不可确认（原语义零变化——整屏快捷确认是录制专属）。
+    const onConfirm = vi.fn();
+    const { result } = renderHook(() => useSelection({ width: 1000, height: 600, onConfirm }));
+    act(() => result.current.confirm());
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   // —— Task 4：方向键微调 + 磁吸 ——
 
   const arrowKey = (key: string, shift = false) => {

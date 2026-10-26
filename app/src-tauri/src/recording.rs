@@ -1,10 +1,13 @@
-//! M6 基础录屏 app 层：状态机 + 命令 + 悬浮条窗口 + tick 广播 + 历史入库。
+//! 录屏 app 层：状态机 + 命令 + 悬浮条窗口 + tick 广播 + 历史入库。
 //!
-//! ## 范围裁定（任务简报记录在案）
+//! ## 范围演进
 //!
-//! **M6 首版 = F6 直接录制整个主显示器**（无选区）。区域录制需要 overlay 选区模式
-//! 的状态机改造（覆盖层正忙于截图流），值得独立任务——scope cut 归 M3 计划，README
-//! 与任务报告均有显著记录。悬浮条 280×56 常驻复用（与 countdown 同款 show/hide）。
+//! M6 首版 = F6 直接录制整个主显示器（无选区，区域录制 scope cut 归 M3）。**M3 N1
+//! 兑现区域录制**：F6 统一进入覆盖层录制选区模式（拖选=区域、Enter/双击=整屏快捷
+//! 确认、Esc=取消，旧「直接全屏」语义废除），确认路径走 [`record_start_region`]；
+//! 全屏路径 [`record_start`] 命令**保留给 API 兼容**（plan Interfaces 裁定）。
+//! 悬浮条 280×56 常驻复用（与 countdown 同款 show/hide），区域录制在条上追加
+//! 「区域 W×H」标题（选区逻辑尺寸，与覆盖层选区标签同口径）。
 //!
 //! ## 状态机（纯逻辑可测）
 //!
@@ -24,11 +27,12 @@
 //! 系统声（SCStream `capturesAudio`）进 AAC 音轨；**麦克风 M6 不做**（AVAudioEngine
 //! tap + 双路混音过深，计划预授权 ladder 的该项裁定，列 M2.1/M3）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
+use hawksnap_core::geometry::Rect;
 use hawksnap_platform_mac::record::recording_output_path;
 
 // ---------------------------------------------------------------------------
@@ -46,6 +50,10 @@ pub enum Phase {
 /// 用户动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecAction {
+    /// 启动。N1 起 F6 空闲路径改走覆盖层录制选区流程（不经理 Start 装机），Start
+    /// 在生产中暂无构造点——仍属状态机纯契约（转移矩阵测试构造之），并是
+    /// record_start 兼容命令未来重连状态机的既有落点。
+    #[cfg_attr(not(test), allow(dead_code))]
     Start,
     Pause,
     Resume,
@@ -100,6 +108,9 @@ struct RecRuntime {
     #[cfg(target_os = "macos")]
     recorder: hawksnap_platform_mac::record::ScreenRecorder,
     output_path: std::path::PathBuf,
+    /// N1：区域录制的选区逻辑尺寸（悬浮条「区域 W×H」标题的数据源，与覆盖层选区
+    /// 标签同口径——逻辑 px，非物理）；None = 全屏录制（record_start 兼容路径）。
+    region: Option<(u32, u32)>,
 }
 
 static REC: Mutex<Option<RecRuntime>> = Mutex::new(None);
@@ -132,11 +143,18 @@ pub fn f6_start_guard_msg(overlay_visible: bool) -> Option<&'static str> {
 
 /// hawk://record-tick 载荷（悬浮条渲染输入；单词字段无需 rename）。
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct RecordTick {
-    /// 会话号（record_start 单调取号）：前端据此清上一会话的错误残留。
+    /// 会话号（record_start/record_start_region 单调取号）：前端据此清上一会话的错误残留。
     session: u64,
     seconds: u64,
     paused: bool,
+    /// N1：区域录制选区逻辑尺寸（条上「区域 W×H」标题）；None = 全屏（序列化时
+    /// 整字段缺席——前端以 regionW in payload 判别，不与 null 纠缠）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region_w: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region_h: Option<u32>,
 }
 
 /// pull 通道载荷（悬浮条 mount 拉取补显——push 早于 listen 必丢，同 countdown）。
@@ -146,6 +164,11 @@ pub struct RecordStatus {
     pub seconds: u64,
     pub paused: bool,
     pub active: bool,
+    /// N1：区域录制选区逻辑尺寸（同 RecordTick 语义；skip 序列化，前端可选读取）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_w: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region_h: Option<u32>,
 }
 
 #[tauri::command]
@@ -159,6 +182,8 @@ pub fn record_status() -> Option<RecordStatus> {
         seconds: elapsed_secs(rt.started_at.elapsed(), rt.paused_total, current_pause),
         paused: rt.phase == Phase::Paused,
         active: true,
+        region_w: rt.region.map(|r| r.0),
+        region_h: rt.region.map(|r| r.1),
     })
 }
 
@@ -252,11 +277,124 @@ pub fn record_start(app: AppHandle) -> Result<(), String> {
             #[cfg(target_os = "macos")]
             recorder,
             output_path: path,
+            region: None, // 全屏录制（兼容路径）：无区域标题
         });
     }
 
-    // 悬浮条已在启动前拉起（上方，自排除前置）；此处仅补 tick 广播。
+    // 立即广播首 tick：条新建分支 mount 时 pull 早于装机（record_status 返 None），
+    // 推通道补上 0 秒起点；条复用分支同步清上一会话的「区域」标题残留（N1）。
+    emit_initial_tick(&app);
+    // 悬浮条已在启动前拉起（上方，自排除前置）；此处补 tick 广播线程。
     spawn_tick_thread(app);
+    Ok(())
+    }
+}
+
+/// N1 区域录制启动（覆盖层 record 模式确认路径）：F6 拖选（或 Enter/双击整屏快捷
+/// 确认，rect = 显示器全边界）→ 本命令。TCC 预检 → 悬浮条先建（自排除前置，同
+/// record_start）→ ScreenRecorder::start_region(display_id, 逻辑 rect) → 装机 +
+/// tick 线程 + 隐藏**全部**覆盖层（多显示器语义：只录选区所在屏，他屏覆盖层随
+/// hide_all_overlays 一并收口；意图槽同步清除）。
+///
+/// 成功时覆盖层由本命令收口（前端无需再 hide）；失败时覆盖层**保留**（可重试/
+/// Esc 退出），Err 回流 → 前端解锁在途守卫 + 行内错误。rect 为 display 本地逻辑
+/// 坐标（与 finish_capture 的 FinishReq.rect 同系同源），物理换算与 sourceRect
+/// 坐标裁定在平台侧（record.rs region_stream_params，points 口径）。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegionReq {
+    pub display_id: u64,
+    pub rect: Rect,
+}
+
+#[tauri::command(async)]
+pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String> {
+    // 平台门槛（同 record_start）：录屏管线仅 macOS。
+    #[cfg(not(target_os = "macos"))]
+    return Err("仅 macOS 支持录屏（跨平台适配归后续计划）".into());
+
+    #[cfg(target_os = "macos")]
+    {
+    if lock_rec().is_some() {
+        return Err("已有录屏进行中".into());
+    }
+    if req.rect.w < 1 || req.rect.h < 1 {
+        return Err(format!("选区尺寸无效: {}x{}", req.rect.w, req.rect.h));
+    }
+    let display_id = u32::try_from(req.display_id)
+        .map_err(|_| format!("显示器 id 非法: {}", req.display_id))?;
+
+    // 屏幕录制权限预检（同 record_start：拒绝 → 深链系统设置 + Err 文案）。
+    if !hawksnap_platform_mac::permissions::screen_recording_prechecked() {
+        if let Err(e) = hawksnap_platform_mac::permissions::open_screen_recording_settings() {
+            eprintln!("[hawksnap] 打开屏幕录制权限设置失败: {e}");
+        }
+        return Err("屏幕录制权限未授予：已为你打开系统设置，授权后重新按 F6 即可".into());
+    }
+
+    let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
+    let path = recording_output_path(&base, chrono::Local::now())?;
+
+    // **先建悬浮条窗口，再启动流**（自排除前置，record_start 同款论证：SCShareable
+    // Content.applications 只列出「名下有窗口」的进程，先 start 再建窗会让排除降级
+    // 为空、录制条入画）。区域录制同受此约束——覆盖层虽也是本应用窗口且此刻可见，
+    // 但排除按整个应用生效，与条的可见性互不影响。
+    show_recording_bar(&app)?;
+
+    let region = hawksnap_platform_mac::record::LogicalRect {
+        x: req.rect.x as f64,
+        y: req.rect.y as f64,
+        w: req.rect.w as f64,
+        h: req.rect.h as f64,
+    };
+    let recorder = match hawksnap_platform_mac::record::ScreenRecorder::start_region(
+        path.clone(),
+        display_id,
+        region,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            // 启动失败：回收刚拉起的悬浮条（并发守卫同 record_start——条只属于
+            // 无对手的本请求）；覆盖层不 hide（保留选区供重试）。
+            if lock_rec().is_none() {
+                close_recording_bar(&app);
+            }
+            return Err(e);
+        }
+    };
+
+    {
+        let mut guard = lock_rec();
+        if guard.is_some() {
+            // 并发败者路径（同 record_start）：只清自己的半成品，不碰悬浮条/覆盖层。
+            let _ = recorder.stop();
+            let _ = std::fs::remove_file(&path);
+            return Err("已有录屏进行中".into());
+        }
+        let session = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        guard.replace(RecRuntime {
+            session,
+            phase: Phase::Recording,
+            started_at: Instant::now(),
+            paused_total: Duration::ZERO,
+            pause_started: None,
+            #[cfg(target_os = "macos")]
+            recorder,
+            output_path: path,
+            // 悬浮条标题用选区**逻辑**尺寸（与覆盖层选区标签同口径，用户所见一致）。
+            region: Some((req.rect.w, req.rect.h)),
+        });
+    }
+
+    // 首 tick（0 秒起点 + 区域标题立即上条，同 record_start 论证）+ tick 线程。
+    emit_initial_tick(&app);
+    spawn_tick_thread(app.clone());
+
+    // 录制已开始 → 全部覆盖层收口（他屏覆盖层一并隐藏；CAPTURES 整帧内存释放；
+    // CaptureIntent 清槽——确认出口与 cancel/emit_capture_done 走同一收口函数）。
+    if let Err(e) = crate::overlay::hide_all_overlays(&app) {
+        eprintln!("[hawksnap] 区域录制启动后隐藏覆盖层失败: {e}");
+    }
     Ok(())
     }
 }
@@ -354,21 +492,30 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// F6 toggle（hotkey.rs 调用）：录制/暂停中 → 停止；空闲 → 启动。错误由调用方
-/// 走 record-error 横幅（panel::show_record_error）。
-pub fn toggle(app: &AppHandle) -> Result<(), String> {
-    let phase = lock_rec().as_ref().map(|rt| rt.phase).unwrap_or(Phase::Idle);
-    match phase {
-        Phase::Idle => record_start(app.clone()),
-        Phase::Recording | Phase::Paused => {
-            record_stop(app.clone()).map(|_| ())
-        }
-    }
-}
+/// F6 toggle 旧入口已随 N1 移除：F6 完整语义改由 overlay::intent::f6_route 分派
+/// （录制中 → record_stop；空闲 → start_record_selection_flow 进入选区模式），
+/// 全屏 record_start 命令保留给 API 兼容。
 
 // ---------------------------------------------------------------------------
 // tick 广播线程：每秒 hawk://record-tick；Idle（None）即退（每次启动新线程）。
 // ---------------------------------------------------------------------------
+
+/// 装机后立即广播首 tick（0 秒起点）：条新建分支 mount 时 pull 早于装机（record_status
+/// 返 None），推通道补上起点；条复用分支同步刷新区域标题（N1：清上一会话残留）。
+fn emit_initial_tick(app: &AppHandle) {
+    let tick = {
+        let guard = lock_rec();
+        let Some(rt) = guard.as_ref() else { return };
+        RecordTick {
+            session: rt.session,
+            seconds: 0,
+            paused: false,
+            region_w: rt.region.map(|r| r.0),
+            region_h: rt.region.map(|r| r.1),
+        }
+    };
+    let _ = app.emit("hawk://record-tick", tick);
+}
 
 fn spawn_tick_thread(app: AppHandle) {
     std::thread::spawn(move || loop {
@@ -381,6 +528,8 @@ fn spawn_tick_thread(app: AppHandle) {
                 session: rt.session,
                 seconds: elapsed_secs(rt.started_at.elapsed(), rt.paused_total, current_pause),
                 paused: rt.phase == Phase::Paused,
+                region_w: rt.region.map(|r| r.0),
+                region_h: rt.region.map(|r| r.1),
             }
         };
         let _ = app.emit("hawk://record-tick", tick);
@@ -529,8 +678,37 @@ mod tests {
     /// tick 载荷契约（M7）：session/seconds/paused 三字段（前端按 session 变化清错）。
     #[test]
     fn record_tick_serializes_with_session() {
-        let s = serde_json::to_string(&RecordTick { session: 7, seconds: 65, paused: false }).unwrap();
+        let s = serde_json::to_string(&RecordTick {
+            session: 7, seconds: 65, paused: false, region_w: None, region_h: None,
+        })
+        .unwrap();
         assert_eq!(s, r#"{"session":7,"seconds":65,"paused":false}"#);
+    }
+
+    /// N1：区域录制 tick 载荷契约——regionW/regionH 以 camelCase 在场（悬浮条
+    /// 「区域 W×H」标题数据源）；全屏录制（None）整字段缺席。
+    #[test]
+    fn record_tick_serializes_region_dims_camel_case() {
+        let s = serde_json::to_string(&RecordTick {
+            session: 7, seconds: 0, paused: false, region_w: Some(1600), region_h: Some(1200),
+        })
+        .unwrap();
+        assert_eq!(
+            s,
+            r#"{"session":7,"seconds":0,"paused":false,"regionW":1600,"regionH":1200}"#
+        );
+    }
+
+    /// N1：RegionReq 反序列化契约（覆盖层 invoke 载荷：camelCase 外壳 + rect 的
+    /// {x,y,w,h} 小写字段，与 FinishReq 同款纪律）。
+    #[test]
+    fn region_req_deserializes_camel_case() {
+        let req: RegionReq = serde_json::from_str(
+            r#"{"displayId":2,"rect":{"x":10,"y":20,"w":800,"h":600}}"#,
+        )
+        .unwrap();
+        assert_eq!(req.display_id, 2);
+        assert_eq!((req.rect.x, req.rect.y, req.rect.w, req.rect.h), (10, 20, 800, 600));
     }
 
     /// 会话计数单调：连续取号严格递增（Relaxed 下单线程语义即可保证）。
