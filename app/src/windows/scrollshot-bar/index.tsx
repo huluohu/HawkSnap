@@ -24,6 +24,10 @@ export default function ScrollshotBarWindow() {
   const [error, setError] = useState<string | null>(null);
   // ⌘S 完成热键是否可用（false → 「完成」按钮是唯一出口，条上明示）。
   const [hotkeyOk, setHotkeyOk] = useState(true);
+  // **收尾在飞行中**（评审 Minor：并发「完成」）：点「完成」后 Rust 侧要跑
+  // 秒级拼接 → 期间禁用按钮（连点会被 Rust 的单飞守卫挡下，但前端禁用能
+  // 少一次无谓的失败提示）。
+  const [finishing, setFinishing] = useState(false);
   // 上一 tick 的会话号（ref 而非 state：listen 回调闭包不随渲染更新）。
   const lastSessionRef = useRef<number | null>(null);
 
@@ -101,7 +105,13 @@ export default function ScrollshotBarWindow() {
   // **条不会因此消失**：Rust 改成「先拼接、成功后才关条」→ 失败时提示条仍活着，
   // 错误渲染在行内（用户可重试，或点「放弃」丢弃）。
   const finish = () => {
-    void invoke<string>("scrollshot_stop").catch((e) => setError(String(e)));
+    if (finishing) return; // 收尾在飞行中 → 忽略重复点击
+    setFinishing(true);
+    void invoke<string>("scrollshot_stop")
+      .catch((e) => {
+        setError(String(e));
+        setFinishing(false); // 失败 → 恢复可点（用户可重试或「放弃」）
+      });
   };
 
   // 放弃：强制丢弃会话（Rust 清槽位 + 停采集 + 注销热键 + 关条）。
@@ -129,11 +139,15 @@ export default function ScrollshotBarWindow() {
   const err: CSSProperties = {
     fontSize: 10, color: "#E5484D", maxWidth: 110, overflow: "hidden",
     whiteSpace: "nowrap", flexShrink: 1,
+    // 评审 Minor：加了 nowrap + overflow 却**没有** textOverflow → 长文案被
+    // **硬切**（半个字），读不出来。ellipsis → 至少是「看得出的省略」。
+    textOverflow: "ellipsis",
   };
   const btn: CSSProperties = {
     fontSize: 12, padding: "5px 10px", borderRadius: 6, border: "1px solid #2A3648",
     background: "#16202E", color: "#E8ECF1", cursor: "pointer", flexShrink: 0,
   };
+  const btnDisabled: CSSProperties = { ...btn, opacity: 0.5, cursor: "default" };
   const btnDanger: CSSProperties = { ...btn, background: "#3A1620", borderColor: "#5B2430" };
 
   // ⌘S 不可用 → 提示语改口（否则用户会一直等一个永远不来的热键）。
@@ -148,10 +162,11 @@ export default function ScrollshotBarWindow() {
       <span style={hint}>{hintText}</span>
       {error && <span style={err} title={error}>{error}</span>}
       <span style={count}>{t("scrollshot.bar.frames", { n: frames ?? 0 })}</span>
-      {/* 完成按钮：⌘S 不可用时它是唯一出口 → 高亮提示 */}
+      {/* 完成按钮：⌘S 不可用时它是唯一出口 → 高亮提示；收尾在飞行中 → 禁用 */}
       <button
-        style={hotkeyOk ? btn : btnDanger}
+        style={finishing ? btnDisabled : hotkeyOk ? btn : btnDanger}
         onClick={finish}
+        disabled={finishing}
         title={hotkeyOk ? t("scrollshot.bar.finish") : t("scrollshot.bar.finishOnly")}
       >
         {t("scrollshot.bar.finish")}

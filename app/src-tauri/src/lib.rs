@@ -254,7 +254,10 @@ pub fn run() {
                             let app = app.clone();
                             std::thread::spawn(move || {
                                 if !scrollshot::scrollshot_active() {
-                                    panel::show_capture_error(&app, "长截图：没有进行中的长截图".into());
+                                    // **静默**（评审 Minor：托盘噪音）：没有进行中的
+                                    // 长截图时点「停止长截图」是**无害的空操作**
+                                    // → 不弹横幅（弹了只是噪音，用户什么都没做错）。
+                                    eprintln!("[hawksnap] 托盘「停止长截图」：没有进行中的长截图（静默忽略）");
                                     return;
                                 }
                                 if let Err(e) = scrollshot::scrollshot_stop(app.clone()) {
@@ -262,7 +265,11 @@ pub fn run() {
                                     // 横幅）→ 这里不重复弹横幅；但**必须清掉会话**
                                     // （托盘语义 = 停止；失败也不留僵尸会话）。
                                     eprintln!("[hawksnap] 托盘停止长截图失败（强制收尾）: {e}");
-                                    scrollshot::scrollshot_force_stop(&app);
+                                    // **并发收尾中**（第一次还在跑）→ 不要强制清会话
+                                    // （会把正在进行的收尾打断）。
+                                    if !scrollshot::scrollshot_stopping() {
+                                        scrollshot::scrollshot_force_stop(&app);
+                                    }
                                 }
                             });
                         }

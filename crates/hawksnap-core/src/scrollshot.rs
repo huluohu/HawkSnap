@@ -10,7 +10,7 @@
 //! 两边一起变，不会出现「产品改了、eval 还按老模型跑」的盲区（这正是上一轮
 //! 评审指出的问题：eval 从真值推间隔 → 产品侧的 I1 改动完全没被覆盖）。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 采集节奏参数（产品侧常量与 eval 场景参数喂给同一套规则）。
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +119,64 @@ impl StopOutcome {
     }
 }
 
+/// **停滞检测**（画布不再生长 → 匹配链已断 → 长图被静默截断）。
+///
+/// ## 判据（评审 Minor：动效页误报）
+///
+/// 三个条件**同时**成立才算停滞：
+/// 1. 画布**没长**（新帧没被接受）；
+/// 2. 页面**确实在动**（行谱变了 → 用户在滚）；
+/// 3. 内容**测不出**（匹配器给不出位移 —— 无特征 / 歧义 / 无重叠）。
+///
+/// 条件 3 是「内容**真的不可测量**」的判据：动效页（GIF 横幅、加载动画）上
+/// 主体内容仍可对齐（测得出位移）→ 不算停滞。
+///
+/// ## 为什么用**墙钟窗口**而不是帧数
+///
+/// 采集间隔是自适应的（200ms 加密 / 500ms 基准）→ 「连续 N 帧」对应的**真实
+/// 时长**随节奏漂移（10 帧 = 2s ~ 5s）→ 慢速滚动（每帧几 px、匹配器跟不上）
+/// 会被误判。墙钟窗口（≥3s）与节奏**无关** → 判据稳定。
+#[derive(Debug, Clone)]
+pub struct StallDetector {
+    /// 判定停滞所需的**连续不可测量时长**（墙钟）。
+    window: Duration,
+    /// 连续不可测量的**起点**（None = 当前不处于停滞窗口内）。
+    since: Option<Instant>,
+}
+
+impl StallDetector {
+    /// 构造检测器（窗口 = 连续多久「不可测量」才算停滞）。
+    pub fn new(window: Duration) -> Self {
+        Self { window, since: None }
+    }
+
+    /// 观察一次采集结果 → `true` = 判定停滞（调用方应停止采集并告知用户）。
+    ///
+    /// - `grew`：画布高度是否增长（新帧被接受）；
+    /// - `still`：内容是否**完全没动**（行谱逐字节相同 → 用户没滚）；
+    /// - `measured`：匹配器测出的位移（`None` = 测不出 = 内容不可测量）。
+    pub fn observe(
+        &mut self,
+        grew: bool,
+        still: bool,
+        measured: Option<i32>,
+        now: Instant,
+    ) -> bool {
+        // 画布长了 / 页面没动 / 内容仍可测量 → **不处于停滞状态** → 重置窗口。
+        if grew || still || measured.is_some() {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        now.duration_since(since) >= self.window
+    }
+
+    /// 当前是否处于「持续不可测量」的窗口内（诊断用）。
+    pub fn pending(&self) -> bool {
+        self.since.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +242,53 @@ mod tests {
         assert!(StopOutcome::Saved.closes_bar());
         assert!(StopOutcome::SaveFailed.consumes_session());
         assert!(StopOutcome::SaveFailed.closes_bar());
+    }
+
+    /// 停滞检测：**墙钟窗口**（≥3s）+ **内容确实不可测量**才判定（评审 Minor：
+    /// 动效页误报）。旧判据是「连续 10 帧画布没长」→ 加密节奏下 10 帧只有 2s
+    /// → 慢速滚动 / 动效页被误判为停滞。
+    #[test]
+    fn stall_needs_a_wall_clock_window_and_unmeasurable_content() {
+        let window = Duration::from_secs(3);
+        let t0 = Instant::now();
+        let mut d = StallDetector::new(window);
+
+        // ① 帧数很多但时间不够（10 帧 × 200ms = 2s < 3s）→ **不判定**停滞。
+        for i in 0..10 {
+            let now = t0 + Duration::from_millis(200 * i);
+            assert!(
+                !d.observe(false, false, None, now),
+                "墙钟窗口未满（{i} 帧 / {}ms）不得判定停滞",
+                200 * i
+            );
+        }
+        // ② 窗口满（≥3s 连续不可测量）→ 判定停滞。
+        assert!(d.observe(false, false, None, t0 + Duration::from_secs(3)));
+        assert!(d.pending(), "窗口内");
+
+        // ③ 画布长了 → 重置（不再是停滞）。
+        let mut d2 = StallDetector::new(window);
+        assert!(!d2.observe(false, false, None, t0));
+        assert!(!d2.observe(true, false, None, t0 + Duration::from_secs(1)));
+        assert!(!d2.pending(), "画布增长后窗口应重置");
+        assert!(!d2.observe(false, false, None, t0 + Duration::from_secs(5)));
+
+        // ④ 页面根本没动（用户没滚）→ 不算停滞（不得打扰用户）。
+        let mut d3 = StallDetector::new(window);
+        assert!(!d3.observe(false, true, None, t0));
+        assert!(!d3.observe(false, true, None, t0 + Duration::from_secs(10)));
+        assert!(!d3.pending(), "页面静止 → 无停滞窗口");
+
+        // ⑤ **动效页**：内容在动但匹配器**测得出**位移 → 不是「不可测量」→ 不判停滞
+        //    （这是评审点名的误报形态）。
+        let mut d4 = StallDetector::new(window);
+        for i in 0..30 {
+            let now = t0 + Duration::from_millis(200 * i);
+            assert!(
+                !d4.observe(false, false, Some(120), now),
+                "内容可测量（动效页）不得判停滞"
+            );
+        }
+        assert!(!d4.pending(), "可测量 → 无停滞窗口");
     }
 }
