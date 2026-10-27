@@ -102,7 +102,10 @@ describe("scrollshot bar window (N5)", () => {
     expect(screen.getByText(/拼接失败/)).toBeTruthy();
     // **条仍在**：Rust 侧失败不关条 → 前端不得自行卸载任何东西。
     // 「完成」按钮仍在（可重试），且多出「放弃」出口（用户有出路）。
-    expect(screen.getByRole("button", { name: "Finish" })).toBeTruthy();
+    const retryBtn = screen.getByRole("button", { name: "Finish" }) as HTMLButtonElement;
+    expect(retryBtn).toBeTruthy();
+    // 失败后按钮**恢复可点**（收尾在飞行中的禁用只持续到失败反馈为止）。
+    expect(retryBtn.disabled).toBe(false);
     const abortBtn = screen.getByRole("button", { name: "Discard" });
     expect(abortBtn).toBeTruthy();
     // 帧数仍在更新（条是活的，不是死壳）。
@@ -110,6 +113,58 @@ describe("scrollshot bar window (N5)", () => {
       getHandler.current?.({ payload: { session: 1, frames: 11 } });
     });
     expect(screen.getByText("11 frames")).toBeTruthy();
+  });
+
+  it("disables the Finish button while a stop is in flight (concurrent-finish guard)", async () => {
+    let resolveStop: ((v: string) => void) | null = null;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "scrollshot_status") {
+        return Promise.resolve({ session: 1, frames: 4, active: true });
+      }
+      if (cmd === "scrollshot_stop") {
+        // 模拟 Rust 侧秒级拼接：停在 pending 上，直到我们手动 resolve。
+        return new Promise<string>((res) => {
+          resolveStop = res;
+        });
+      }
+      return Promise.resolve(null);
+    });
+    render(<ScrollshotBarWindow />);
+    await act(async () => {});
+    const btn = screen.getByRole("button", { name: "Finish" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    // 收尾在飞行中 → 按钮禁用（连点不会打出第二个收尾请求）。
+    expect((screen.getByRole("button", { name: "Finish" }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      resolveStop?.("/tmp/out.png");
+    });
+    // 成功后 Rust 关条 → 前端不再需要恢复按钮状态（条已消失）。
+    expect(invokeMock).toHaveBeenCalledTimes(2); // scrollshot_status + scrollshot_stop
+  });
+
+  it("ellipsizes long error text instead of hard-cutting it", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "scrollshot_status") {
+        return Promise.resolve({ session: 1, frames: 4, active: true });
+      }
+      return Promise.resolve(null);
+    });
+    render(<ScrollshotBarWindow />);
+    await act(async () => {});
+    await act(async () => {
+      getErrorHandler.current?.({
+        payload: {
+          session: 1,
+          message: "未能识别滚动位移：画面内容没有明显变化，或内容重复导致匹配歧义",
+        },
+      });
+    });
+    const errEl = screen.getByText(/未能识别滚动位移/);
+    // nowrap + overflow:hidden 必须配 textOverflow:ellipsis，否则文案被硬切。
+    expect((errEl as HTMLElement).style.textOverflow).toBe("ellipsis");
   });
 
   it("renders the Rust-emitted failure event inline (does not rely on the invoke round trip)", async () => {

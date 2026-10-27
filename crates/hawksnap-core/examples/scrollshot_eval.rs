@@ -603,6 +603,10 @@ struct SceneResult {
     frames: (usize, usize),
     /// 是否为 F10 计入的标准场景（false = 专项局限场景）。
     is_standard: bool,
+    /// **迭代是否收敛**（步长 ← 实测节奏 ← 帧 ← 页面 ← 页高 ← 步长 的不动点）。
+    /// false = 该场景的 eval 模型本身不稳定 → **判失败**（不得静默按另一个页高
+    /// 重新渲染后当作「测过了」）。
+    converged: bool,
 }
 
 /// 内容对齐率：输出与原页面逐像素比较（跳过固定件覆盖区）。
@@ -780,29 +784,31 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
     let mut page = Canvas::new(fw, 0, [0, 0, 0, 255]);
     let mut chrome = Chrome::None;
     let mut page_h_used = 0u32;
+    let mut converged = false;
     for _ in 0..4 {
         let total: u32 = steps.iter().sum();
         page_h_used = fh + total;
         let (p, c) = render_page(scene, fw, page_h_used, band_anchor);
         let s = simulate_capture(scene, spec, &p, c, fw, fh);
-        let converged = s.steps == steps;
+        let is_fixed = s.steps == steps;
         page = p;
         chrome = c;
         sim = Some(s);
-        if converged {
+        if is_fixed {
+            converged = true;
             break;
         }
         steps = sim.as_ref().unwrap().steps.clone();
     }
     let sim = sim.expect("至少迭代一轮");
     let total: u32 = sim.steps.iter().sum();
+    // **未收敛**（评审 Minor：不得静默换个页高重渲染）：
+    // 步长 ← 实测节奏 ← 帧 ← 页面 ← 页高 ← 步长 构成循环，4 轮内没到稳定点 →
+    // 说明该场景的 eval 模型本身不稳定（基准页高与实际页高分离）→ **判失败**，
+    // 而不是「按最终步长重新渲染页面」后当作测过了（那样得到的高度差是
+    // 假象：比对基准被换掉了，缺口的来源被掩盖）。
     let expected_height = fh + total;
-    if page_h_used != expected_height {
-        // 未收敛（罕见）：按最终步长重新渲染页面用于比对（内容自上而下一致）。
-        let (p, c) = render_page(scene, fw, expected_height, band_anchor);
-        page = p;
-        chrome = c;
-    }
+    let reference_height = if converged { expected_height } else { page_h_used };
 
     match sim.out {
         None => SceneResult {
@@ -815,12 +821,20 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
             align: 0.0,
             frames: (sim.frames_in, 0),
             is_standard: scene.kind == "standard",
+            converged,
         },
         Some(out) => {
-            let drift = (out.height as i64 - expected_height as i64).abs();
+            let drift = (out.height as i64 - reference_height as i64).abs();
             let align = alignment(&out, &page, chrome, &sim.offsets);
             let mut problems: Vec<String> = Vec::new();
             let mut note = String::new();
+            // **未收敛 → 判失败**（评审 Minor）：eval 模型（步长 ↔ 页高的不动点）
+            // 没稳定 → 该场景的结论不可信 → 如实判失败，不静默换基准。
+            if !converged {
+                problems.push(format!(
+                    "eval 迭代未收敛（页高 {page_h_used}px 与实测步长推出的 {expected_height}px 分离）"
+                ));
+            }
             // F10 三项判据：无重影 / 输出 ≥20000px / 内容完整（无缺口）。
             if align < 0.95 {
                 problems.push(format!("内容错位（对齐率 {:.3}）", align));
@@ -841,7 +855,7 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
                     ));
                 }
                 // 内容完整：允许极小的漂移（1%），超出即判「有内容缺口」。
-                let drift_limit = (expected_height as f64 * 0.01).max(8.0) as i64;
+                let drift_limit = (reference_height as f64 * 0.01).max(8.0) as i64;
                 if drift > drift_limit {
                     problems.push(format!("内容缺口 {}px（漂移上限 {drift_limit}）", drift));
                 }
@@ -865,6 +879,7 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
                 align,
                 frames: (sim.frames_in, sim.frames_used),
                 is_standard: scene.kind == "standard",
+                converged,
             }
         }
     }
@@ -889,9 +904,10 @@ fn main() {
     for scene in &spec.scenes {
         let r = run_scene(scene, &spec, spec.frame_width, spec.frame_height);
         println!(
-            "[scrollshot-eval] {:<16} {:<16} {:>8} {:>9} {:>8.3}  {:>3}/{:<3}帧  {}",
+            "[scrollshot-eval] {:<16} {:<16} {:>8} {:>9} {:>8.3}  {:>3}/{:<3}帧  {}{}",
             r.id, r.layout, r.height, r.expected_height, r.align,
-            r.frames.1, r.frames.0, r.reason
+            r.frames.1, r.frames.0, r.reason,
+            if r.converged { "" } else { "  ⚠ eval 未收敛" }
         );
         results.push(r);
     }

@@ -772,13 +772,16 @@ impl Canvas {
         if stride == 0 {
             return;
         }
-        let cur_rows = self.px.len() / stride;
-        let mut r = cur_rows;
-        while r < rows {
-            r = (r + CANVAS_CHUNK_ROWS).min(rows);
+        // **按块推进**：`cur` 随每次扩容同步更新 → 每次只请求「本块需要」的量。
+        // （旧写法把 `cur_rows` 固定在入口处 → 第 2 块起**过度请求**（请求量
+        //  = 目标行数 - 入口行数，而容量已到上一块）→ 容量被推到 ≈2×逻辑量。）
+        let mut cur = self.px.len() / stride;
+        while cur < rows {
+            let r = (cur + CANVAS_CHUNK_ROWS).min(rows);
             // `reserve_exact`：**精确**扩容（不走摊还翻倍）→ 容量 ≈ 长度。
-            self.px.reserve_exact((r - cur_rows) * stride);
+            self.px.reserve_exact((r - cur) * stride);
             self.px.resize(r * stride, 0);
+            cur = r;
         }
     }
 
@@ -1419,27 +1422,43 @@ mod tests {
 
     /// 画布**分块增长**：分配量跟随逻辑量（评审 Minor：画布上界 ≠ 分配上界）。
     ///
-    /// `Vec::resize` 的摊还翻倍（`cap = max(2·cap, needed)`）会让**分配量**逼近
-    /// 逻辑量的 2 倍 → 按逻辑字节算的内存上界（`MAX_CANVAS_BYTES`）名存实亡。
-    /// 本例断言：画布长高之后，**容量 - 长度**的余量 ≤ 一块（而非 ~2 倍）。
+    /// 两条断言分别守**两类**回归：
+    /// - **分配量 ≤ 1.05 × 逻辑量** → 守「`Vec::resize` 摊还翻倍」（cap = max(2·cap,
+    ///   needed) → 实测比值 ≈ 2 → 必然超标）；
+    /// - **余量 ≤ 一块（256 行）** → 守「分块扩容**过度请求**」（请求量按入口行数算
+    ///   → 多块循环里容量被推到 ≈ len + 2~3 块 → 余量超标）。
+    ///
+    /// ## 为什么用 900 行的步长（评审 Minor：旧断言守不住回归）
+    ///
+    /// 旧断言的步长只有 10 行 → 每次扩容都**小于一块** → `grow_rows` 的多块循环
+    /// **根本没被走到** → 「过度请求」缺陷测不出来。900 行的步长（= 一个视口高度）
+    /// **跨越块边界** → 多块循环必然执行 → 缺陷版本必然失败。
+    /// **反向验证**（远程实跑）：把 `grow_rows` 注回缺陷版本 → 本测试 FAILED
+    /// （余量 196608B > 一块 65536B）；恢复修复版 → 1 passed。
     #[test]
     fn canvas_allocation_tracks_logical_size() {
-        let (w, h) = (64u32, 32u32);
+        let (w, h) = (64u32, 900u32);
         let stride = w as usize * 4;
         let mut canvas = Canvas::new(w as usize);
         let frame = solid_frame(w, h, 200);
-        // 逐帧下移合成 → 画布一路长高（末行 = 199*10 + 32 = 2022 行）。
-        for i in 0..200i32 {
-            canvas.compose(&frame, i * 10, None);
+        // 步长 = 900 行（一个视口）：每帧都跨越 256 行的块边界 → 多块循环。
+        for i in 0..20i32 {
+            canvas.compose(&frame, i * h as i32, None);
         }
         let len = canvas.px.len();
         assert_eq!(len, canvas.height() * stride, "长度 = 高度 × 行跨度");
-        let slack = canvas.px.capacity() - len;
+        let cap = canvas.px.capacity();
+        assert!(
+            cap * 100 <= len * 105,
+            "分配量应 ≤ 1.05×逻辑量（不得摊还翻倍），实测 cap={cap} len={len}（{:.3}×）",
+            cap as f64 / len as f64
+        );
+        // 余量本身也应 ≤ 一块（256 行）——分块 + 精确扩容的语义（过度请求守卫）。
+        let slack = cap - len;
         assert!(
             slack <= CANVAS_CHUNK_ROWS * stride,
-            "容量余量应 ≤ 一块（{}B），实测 {slack}B（len={len} cap={}）",
+            "容量余量应 ≤ 一块（{}B），实测 {slack}B（len={len} cap={cap}）",
             CANVAS_CHUNK_ROWS * stride,
-            canvas.px.capacity()
         );
     }
 

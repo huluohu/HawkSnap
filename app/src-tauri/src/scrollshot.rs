@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use hawksnap_core::geometry::Rect;
-use hawksnap_core::scrollshot::{resolve_shift, StopOutcome};
+use hawksnap_core::scrollshot::{resolve_shift, StallDetector, StopOutcome};
 use hawksnap_core::stitch::{Frame, Stitched, Stitcher};
 
 /// 采集间隔（plan 裁定：500ms）——**基准间隔**。
@@ -52,9 +52,15 @@ const FAST_SHIFT_RATIO: f64 = 0.4;
 const SLOW_SHIFT_RATIO: f64 = 0.2;
 /// 首帧延迟：给「隐藏覆盖层」留出时间（覆盖层是带遮罩的全屏窗——被拍进去就毁了）。
 const FIRST_FRAME_DELAY: Duration = Duration::from_millis(250);
-/// **停滞检测**阈值：连续多少帧「内容在动但画布没长」→ 判定链已断（评审 Minor：
-/// 无停滞检测 → 长图被静默截断，用户毫无察觉）。
-const STALL_LIMIT: usize = 10;
+/// **停滞检测**窗口（**墙钟**，评审 Minor：动效页 / 慢速滚动误报）。
+///
+/// 旧实现是「连续 10 帧画布没长」→ 采集间隔是**自适应**的（200ms 加密 /
+/// 500ms 基准）→ 10 帧对应 2s~5s → 慢速滚动（每帧几 px、匹配器跟不上）与
+/// 动效页会被误判为「匹配链已断」→ 弹出假告警并停止采集。
+/// 现改为**墙钟窗口**（≥3s，与节奏无关）+ 「内容**确实测不出**」才判定
+/// （规则本体在 core：[`hawksnap_core::scrollshot::StallDetector`]，可在
+/// Linux 上单测）。
+const STALL_WINDOW: Duration = Duration::from_secs(3);
 // 采集期**不留帧队列**（M5）：每帧采集后立即参与匹配与合成、随即释放。
 //
 // 内存构成 = 画布（= 最终产物，20000px×1600px ≈ 128MB，**这是本功能的内存
@@ -97,6 +103,10 @@ struct Session {
     hotkey_ok: AtomicBool,
     stop: AtomicBool,
     captured: AtomicU64,
+    /// **收尾在飞行中**（单飞守卫）：「完成」被连点 / ⌘S 与按钮同时触发时，
+    /// 只允许一个收尾在跑（评审 Minor：并发收尾 → 第二次拿到空画布 → 弹出
+    /// **虚假的**「保存失败」横幅，而第一次其实已经成功）。
+    finishing: AtomicBool,
 }
 
 impl Session {
@@ -168,9 +178,18 @@ impl Session {
     }
 
     /// 收尾：产出长图（并取出首帧缩略图）。
+    ///
+    /// **空画布 → `None`**（评审 Minor：并发「完成」）：
+    /// `Stitcher::finish` 会把画布 `mem::take` 走 → **第二次**收尾拿到的是
+    /// **空图**（0 高度）→ 旧实现会把它当成功落盘（0px PNG）或在编码处报错
+    /// → 弹出**虚假的**「保存失败」横幅（第一次其实已经成功）。空画布一律
+    /// 视为「没有可产出的内容」→ `None`（由调用方按失败路径处理）。
     fn finish(&self) -> Option<(Stitched, Option<(Vec<u8>, u32, u32)>)> {
         let mut guard = self.stitcher.lock().unwrap_or_else(|e| e.into_inner());
         let out = guard.as_mut()?.finish()?;
+        if out.height == 0 || out.rgba.is_empty() {
+            return None; // 空画布（并发收尾 / 无内容）→ 没有产物
+        }
         let thumb = self.thumb.lock().unwrap_or_else(|e| e.into_inner()).take();
         Some((out, thumb))
     }
@@ -193,6 +212,17 @@ fn lock_session() -> std::sync::MutexGuard<'static, Option<Arc<Session>>> {
 /// 是否有进行中的长截图（截图/录屏流程据此互斥拒绝）。
 pub fn scrollshot_active() -> bool {
     lock_session().is_some()
+}
+
+/// 是否有**收尾在飞行中**（[`scrollshot_stop`] 的单飞守卫状态）。
+///
+/// 托盘据此**不打断**正在进行的收尾（否则并发点击「停止长截图」会在第一个收尾
+/// 写到一半时把会话清掉）。
+pub fn scrollshot_stopping() -> bool {
+    lock_session()
+        .as_ref()
+        .map(|s| s.finishing.load(Ordering::SeqCst))
+        .unwrap_or(false)
 }
 
 /// 下一次采集的间隔（**滞回式自适应**）——规则本体在 core
@@ -317,6 +347,7 @@ pub fn scrollshot_start(app: AppHandle, req: ScrollshotReq) -> Result<(), String
         hotkey_ok: AtomicBool::new(true),
         stop: AtomicBool::new(false),
         captured: AtomicU64::new(0),
+        finishing: AtomicBool::new(false),
     });
     *lock_session() = Some(session.clone());
 
@@ -368,6 +399,15 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
     }
     .ok_or_else(|| "没有进行中的长截图".to_string())?;
 
+    // —— ⓪ 单飞守卫（评审 Minor：并发「完成」）——
+    //
+    // 「完成」被连点 / ⌘S 与按钮同时触发 → 两个收尾并发跑 → 后到的那个拿到
+    // **空画布**（画布已被取走）→ 旧实现弹出**虚假的**「保存失败」横幅（第一次
+    // 其实已经成功）。这里只允许**一个**收尾在飞行中；后来的直接安静返回。
+    if session.finishing.swap(true, Ordering::SeqCst) {
+        return Err("长截图正在结束中，请稍候".to_string());
+    }
+
     // —— ① 拼接（重活，秒级）——
     let Some((stitched, thumb)) = session.finish() else {
         let outcome = StopOutcome::StitchFailed;
@@ -375,6 +415,9 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
         if outcome.consumes_session() {
             consume_session(&app, &session);
         }
+        // 失败 → **放开单飞守卫**（会话留着 = 用户可重试；不放开的话重试会被
+        // 「正在结束中」永久挡下 → 用户只能放弃）。
+        session.finishing.store(false, Ordering::SeqCst);
         let msg = "未能识别滚动位移：画面内容没有明显变化，或内容重复导致匹配歧义";
         surface_failure(&app, &session, msg);
         eprintln!("[hawksnap] 长截图拼接失败（会话与提示条保留，可重试或放弃）: {msg}");
@@ -523,8 +566,9 @@ fn spawn_capture_thread(app: AppHandle, session: Arc<Session>) {
         let mut interval = CAPTURE_INTERVAL;
         // 上一帧的行亮度剖面——只用于判定「页面完全没动」（静止页面不该加密采集）。
         let mut last_profile: Option<Vec<f32>> = None;
-        // 停滞计数：连续「内容在动但画布没长」的帧数（链已断 → 长图被静默截断）。
-        let mut stall = 0usize;
+        // 停滞检测（规则本体在 core → 可在 Linux 上单测）：画布不再生长 +
+        // 内容**测不出** → 连续满一个**墙钟窗口**才判定链已断。
+        let mut stall = StallDetector::new(STALL_WINDOW);
         while !session.stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
             match hawksnap_platform_mac::windowcap::capture_global_rect(session.global) {
@@ -553,16 +597,19 @@ fn spawn_capture_thread(app: AppHandle, session: Arc<Session>) {
                         let measured = session.measured_shift();
                         let shift = resolve_shift(measured, still);
                         interval = pacing.next_interval(interval, shift, region_h);
-                        // 停滞检测（评审 Minor）：**内容在动**（行谱变了）但**画布没长**
-                        // （新帧没被接受 = 匹配链已断）→ 连续 N 帧即判定停滞：
-                        // 长图会被静默截断 → 必须告知用户（横幅）并停止采集。
+                        // 停滞检测（评审 Minor）：**内容在动**（行谱变了）但**画布
+                        // 没长**（新帧没被接受 = 匹配链已断）→ 连续满一个**墙钟
+                        // 窗口**（≥3s，与采集节奏无关）且内容**确实测不出**才判
+                        // 停滞 → 长图会被静默截断 → 必须告知用户（横幅）并停止
+                        // 采集。动效页（内容在变但主体仍可对齐 → 测得出位移）
+                        // 不再被误判。
                         let height_after = session.canvas_height();
-                        if height_after > height_before {
-                            stall = 0;
-                        } else if !still && height_after > 0 {
-                            stall += 1;
-                        }
-                        if stall >= STALL_LIMIT {
+                        let grew = height_after > height_before;
+                        // 画布还空（一个帧都没被接受）→ 不计停滞窗口（此时
+                        // 「拼接失败」的反馈路径已经覆盖了这种空转）。
+                        if height_after > 0
+                            && stall.observe(grew, still, measured, Instant::now())
+                        {
                             eprintln!("[hawksnap] 长截图匹配链停滞（画布停在 {height_after}px），停止采集");
                             crate::panel::show_capture_error(
                                 &app,
@@ -836,6 +883,7 @@ mod tests {
             hotkey_ok: AtomicBool::new(true),
             stop: AtomicBool::new(false),
             captured: AtomicU64::new(0),
+            finishing: AtomicBool::new(false),
         };
         for _ in 0..5 {
             s.push_frame(Frame { width: 4, height: 4, rgba: vec![7u8; 4 * 4 * 4] });
@@ -910,6 +958,7 @@ mod tests {
             hotkey_ok: AtomicBool::new(true),
             stop: AtomicBool::new(false),
             captured: AtomicU64::new(0),
+            finishing: AtomicBool::new(false),
         };
         for _ in 0..40 {
             s.push_frame(Frame { width: w, height: h, rgba: rgba.clone() });
@@ -951,6 +1000,49 @@ mod tests {
         assert_eq!(
             s,
             r#"{"session":7,"message":"未能识别滚动位移"}"#
+        );
+    }
+
+    /// **并发「完成」守卫**（评审 Minor）：
+    /// ① 同一会话只允许**一个**收尾在飞行中（第二次 `swap` 返回 true）；
+    /// ② **空画布 → `finish()` 返回 `None`**（画布已被前一次收尾取走 → 不得产出
+    ///    0px 图 / 虚假失败横幅）。
+    #[test]
+    fn concurrent_finish_is_single_flight_and_never_yields_an_empty_canvas() {
+        let mk = |stitcher: Option<Stitcher>| Session {
+            session: 0,
+            global: hawksnap_platform_mac::windowcap::GlobalRect::new(0.0, 0.0, 10.0, 10.0),
+            stitcher: Mutex::new(stitcher),
+            thumb: Mutex::new(None),
+            hotkey_ok: AtomicBool::new(true),
+            stop: AtomicBool::new(false),
+            captured: AtomicU64::new(0),
+            finishing: AtomicBool::new(false),
+        };
+
+        // ① 单飞守卫：第一次拿到 false（可以收尾），第二次拿到 true（已在飞行）。
+        let s = mk(None);
+        assert!(!s.finishing.swap(true, Ordering::SeqCst), "第一个收尾应放行");
+        assert!(s.finishing.swap(true, Ordering::SeqCst), "第二个收尾应被挡下");
+
+        // ② 空会话（一个帧都没有）→ 无产物。
+        assert!(mk(None).finish().is_none(), "没有帧 → 没有产物");
+
+        // ③ 单帧（不可拼接）→ 无产物。
+        let mut st = Stitcher::new(4);
+        st.push(Frame { width: 4, height: 4, rgba: vec![7u8; 4 * 4 * 4] });
+        assert!(mk(Some(st)).finish().is_none(), "单帧不可拼接 → 没有产物");
+
+        // ④ 两帧可拼 → **第一次**有产物；**第二次**（画布已被取走）→ None。
+        let mut st = Stitcher::with_estimator(4, |_a: &Frame, _b: &Frame| Some(4));
+        let f = || Frame { width: 4, height: 4, rgba: vec![9u8; 4 * 4 * 4] };
+        st.push(f());
+        st.push(f());
+        let s = mk(Some(st));
+        assert!(s.finish().is_some(), "两帧可拼接 → 有产物");
+        assert!(
+            s.finish().is_none(),
+            "第二次收尾拿到的是**空画布** → 必须返回 None（不得产出 0px 图）"
         );
     }
 }
