@@ -213,8 +213,10 @@ jobs:
       - name: npm ci
         working-directory: app
         run: npm ci
-      # --config 合入 src-tauri/tauri.release.conf.json（内容仅 bundle.createUpdaterArtifacts:
-      # true）。为何独立成覆盖文件而不写进 tauri.conf.json：该开关开启后 tauri CLI 在缺
+      # --config 合入 src-tauri/tauri.release.conf.json（bundle.createUpdaterArtifacts: true
+      # **且** bundle.externalBin 宿主——updater 归档与 dmg 同一次构建、完全同口径）。
+      # 为何 createUpdaterArtifacts 独立成覆盖文件而不写进 tauri.conf.json：该开关开启后
+      # tauri CLI 在缺
       # TAURI_SIGNING_PRIVATE_KEY 时硬失败（"A public key has been found, but no private
       # key"）——push 分支 / PR 的 keyless 构建（rust-test/size）会全红；只在 release job
       # 合入，配合上方 secrets 缺失即失败 = 未签名产物绝不发布（有意为之）。
@@ -294,13 +296,67 @@ jobs:
       # 没有产物），对**列出的**平台仍强制「恰好 1 份 + 签名齐全」（脏 feed 防线）。
       - name: Assemble latest.json (updater feed)
         run: node scripts/make-latest.mjs --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dist dist --out dist --platforms darwin-aarch64
-      - name: Create draft GitHub Release
+      # （run 40591912444 根因修复）原实现 `gh release create … dist/*` 把
+      # download-artifact 合并出的**目录**（dist/dmg、dist/macos）也当 asset 传给
+      # gh → "read dist/macos: is a directory"。且上次失败的 run 已留下同名草稿
+      # Release（含半成品 asset），重跑时 `gh release create` 会硬失败（已存在）
+      # → publish 永远红。故拆成两步：先幂等建草稿（存在即复用），再**显式列出
+      # 具体文件**上传；--clobber 覆盖上次失败遗留的同名半成品 asset。
+      - name: Create draft GitHub Release (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME 已存在（失败 run 留下的草稿）——复用；asset 由下一步 --clobber 覆盖。"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "HawkSnap $GITHUB_REF_NAME" \
+              --notes "Draft assembled by CI (plan D6). macOS-only binary release (0.3.0 policy; distribution stays macOS-only — the M4 cross-platform work made Linux/Windows *compile* (CI true-gate), but Windows/Linux packaging + signing + updater-feed policy is still undecided). The corresponding source archive (AGPL-3.0-or-later §6) is attached to this release. Controller: review artifacts, finalize release notes, then publish (plan D7)."
+          fi
+      # asset 名 = 文件 basename，必须与 make-latest.mjs 写进 feed 的下载 URL 文件名
+      # 一致（darwin-aarch64 → HawkSnap.app.tar.gz），否则 updater feed 指向 404。
+      # 任何一类文件缺失（如 .sig 没生成 = F2 回退）都在此处显式失败——绝不静默
+      # 上传不完整的 Release。
+      - name: Upload release assets (concrete files only, --clobber)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=()
+          add() {
+            local pattern="$1" m
+            local matches=($pattern)
+            if [ "${#matches[@]}" -eq 0 ]; then
+              echo "ERROR: no file matched $pattern" >&2
+              exit 1
+            fi
+            for m in "${matches[@]}"; do
+              if [ -d "$m" ]; then
+                # 注意 ${m} 必须加花括号：$m 后紧跟全角括号时 bash 会把多字节字符
+                # 吞进变量名（同 1061b84 的 var-boundary bug），set -u 下直接炸。
+                echo "ERROR: refusing to upload directory: ${m}（run 40591912444 根因）" >&2
+                exit 1
+              fi
+              if [ ! -f "$m" ]; then
+                echo "ERROR: not a regular file: $m" >&2
+                exit 1
+              fi
+              assets+=("$m")
+            done
+          }
+          # download-artifact(pattern: release-*, merge-multiple) 布局：
+          #   release-macos 的 LCA 是 target/release/bundle → dist/{macos,dmg}/…
+          #   release-source 平铺在 dist 根；latest.json 由 make-latest 写入 dist 根。
+          add "dist/dmg/*.dmg"
+          add "dist/macos/*.app.tar.gz"
+          add "dist/macos/*.app.tar.gz.sig"
+          add "dist/HawkSnap-*-source.tar.gz"
+          add "dist/latest.json"
+          echo "Uploading ${#assets[@]} asset(s):"
+          printf '  %s\n' "${assets[@]}"
+          gh release upload "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --draft \
-            --title "HawkSnap $GITHUB_REF_NAME" \
-            --notes "Draft assembled by CI (plan D6). macOS-only binary release (0.3.0 policy; distribution stays macOS-only — the M4 cross-platform work made Linux/Windows *compile* (CI true-gate), but Windows/Linux packaging + signing + updater-feed policy is still undecided). The corresponding source archive (AGPL-3.0-or-later §6) is attached to this release. Controller: review artifacts, finalize release notes, then publish (plan D7)." \
-            dist/*
+            --clobber "${assets[@]}"
