@@ -129,7 +129,7 @@ if [ -n "$INJECT_APP" ]; then
       || echo "⚠️  宿主二进制签名失败（继续）" >&2
     codesign --force --deep --sign "$SIGN_IDENTITY" "$INJECT_APP" \
       || echo "⚠️  .app 重签名失败——macOS 可能拒绝启动它（请手动 codesign）" >&2
-    echo "==> 已重签名: $INJECT_APP（identity=$SIGN_IDENTITY）"
+    echo "==> 已重签名: ${INJECT_APP}（identity=${SIGN_IDENTITY}）"
   else
     echo "⚠️  找不到 codesign —— 注入已破坏 .app 签名，macOS 会拒绝启动它！" >&2
     echo "    请手动执行: codesign --force --deep --sign <identity> \"$INJECT_APP\"" >&2
@@ -140,7 +140,7 @@ cat <<EOF
 
 完成。宿主二进制：
   构建产物: $BIN_SRC
-  暂存文件: $STAGED（tauri-bundler 的 externalBin 输入）
+  暂存文件: ${STAGED}（tauri-bundler 的 externalBin 输入）
 EOF
 if [ -z "$INJECT_APP" ]; then
   cat <<EOF
