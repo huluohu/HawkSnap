@@ -11,7 +11,9 @@ mod intent;
 // 公开 API 重导出：lib.rs 与 crate 内既有的 overlay::X 路径保持不变。
 pub use candidates::snap_candidates;
 pub use delay::{cancel_delayed_capture, countdown_remaining, start_delayed_capture};
-pub use flow::{cancel_capture, emit_capture_done, start_capture_flow};
+pub use flow::{
+    cancel_capture, emit_capture_done, start_capture_flow, start_scrollshot_selection_flow,
+};
 // reregister_from_settings / reregister_with 只在 hotkey.rs 内部链路使用（setup 经
 // register_hotkeys），不在此重导出（重导出无人引用会挂 unused_imports）。
 // HotkeyError 不在此重导出：crate 内无按名引用（lib.rs 经 if-let 接住、settings.rs 仅

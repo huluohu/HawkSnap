@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "scrollshot-bar",
+  "description": "Capability for the M3 long-screenshot hint bar window (label `scrollshot-bar`); covers event listen (hawk://scrollshot-tick) and command invoke (scrollshot_status / scrollshot_stop) used by the scrollshot-bar page",
+  "windows": ["scrollshot-bar"],
+  "permissions": [
+    "core:default"
+  ]
+}

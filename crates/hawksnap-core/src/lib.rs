@@ -2,6 +2,7 @@ pub mod capture;
 pub mod crop;
 pub mod geometry;
 pub mod naming;
+pub mod stitch;
 
 #[cfg(test)]
 mod smoke_tests {

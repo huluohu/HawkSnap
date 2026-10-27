@@ -282,6 +282,18 @@ pub(crate) fn captured_display_frames() -> Vec<DisplayFrame> {
         .collect()
 }
 
+/// 指定显示器的全局几何快照（长截图把 display 本地选区换算成全局 Quartz 坐标用）。
+///
+/// 与 [`captured_display_frames`] 同源（CAPTURES 几何条目），区别只在于按
+/// display_id 精确取一份而非全部。释放整帧（release_captures）后几何仍在——
+/// 长截图启动时覆盖层尚未收口，正是要读它。
+pub(crate) fn captured_display_geometry(display_id: u64) -> Option<DisplayFrame> {
+    let captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
+    captures.get(&display_id).map(|m| DisplayFrame {
+        x: m.x as f64, y: m.y as f64, w: m.width as f64, h: m.height as f64,
+    })
+}
+
 /// 主显示器快照（bench_mode 确认链用）：display_id 与全帧几何取**同一条目**、一次锁内
 /// 产出——bench 要向 finish_capture 传该显示器的 id 与其内部 rect，二者必须同源。
 /// DisplayFrame 刻意不含 display_id（hover 的相等性断言依赖纯几何，见结构体与 hover

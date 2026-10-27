@@ -10,3 +10,9 @@ workspace = true
 image.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+
+# dev 依赖：eval 跑批器（examples/scrollshot_eval.rs）读场景定义 JSON。
+# serde_json 已在应用依赖树（app/src-tauri 同版本），不引入新解析。
+[dev-dependencies]
+serde_json = "1"
+

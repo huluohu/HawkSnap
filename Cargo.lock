@@ -1885,6 +1885,7 @@ version = "0.2.0"
 dependencies = [
  "image 0.25.10",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

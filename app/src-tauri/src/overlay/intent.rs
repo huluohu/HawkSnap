@@ -22,6 +22,8 @@ pub enum CaptureIntent {
     Capture,
     /// 录制选区流程（F6 统一进入：拖选=区域、Enter/双击=全屏快捷确认、Esc=取消）。
     Record,
+    /// 长截图选区流程（N5：托盘「长截图」进入；确认后进入滚动采集会话）。
+    Scrollshot,
 }
 
 impl CaptureIntent {
@@ -31,6 +33,7 @@ impl CaptureIntent {
         match self {
             Self::Capture => "capture",
             Self::Record => "record",
+            Self::Scrollshot => "scrollshot",
         }
     }
 }
@@ -105,6 +108,10 @@ mod tests {
         // 拒绝，此处是槽位层面的兜底语义）。
         set(CaptureIntent::Record);
         assert_eq!(current(), Some(CaptureIntent::Record));
+        // N5：长截图用途同槽写入（三种用途互斥，同一时刻至多一轮流程）。
+        set(CaptureIntent::Scrollshot);
+        assert_eq!(current(), Some(CaptureIntent::Scrollshot));
+        set(CaptureIntent::Record);
         assert_eq!(current(), Some(CaptureIntent::Record));
         clear();
         assert_eq!(current(), None);
@@ -116,6 +123,8 @@ mod tests {
     fn intent_payload_str_is_lowercase_single_word() {
         assert_eq!(CaptureIntent::Capture.as_payload_str(), "capture");
         assert_eq!(CaptureIntent::Record.as_payload_str(), "record");
+        // N5：长截图用途的载荷值。
+        assert_eq!(CaptureIntent::Scrollshot.as_payload_str(), "scrollshot");
     }
 
     /// F6 路由矩阵（N1 裁定 + M2 守卫复用）：
