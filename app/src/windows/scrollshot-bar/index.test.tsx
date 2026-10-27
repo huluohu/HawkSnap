@@ -1,15 +1,22 @@
 // N5 长截图提示条：hawk://scrollshot-tick 事件 → 帧数渲染；mount 时经
 // scrollshot_status 拉一次补显（push 早于 listen 必丢）。
 // 另覆盖 listen 被 ACL 拒绝的分支：必须 catch（不留 unhandled rejection）且不崩。
+//
+// **失败必须看得见**（I4 残留，评审必修）：Rust 侧 `scrollshot_stop` 改成
+// **先拼接、成功后才收尾**（关条 + 注销热键 + 消费会话）→ 拼接失败时提示条
+// **仍然活着**。本文件锁定前端这一侧的可观察行为：失败 → 行内错误可见 +
+// 条仍在（完成按钮还在）+ 多出「放弃」出口；Rust 直发的失败事件同样落到
+// 行内错误槽（不依赖 invoke 回流）。
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ScrollshotBarWindow from "./index";
 import { setLanguage } from "../../lib/i18n";
 
-type Handler = (e: { payload: { session: number; frames: number } }) => void;
+type Handler = (e: { payload: any }) => void;
 
-const { getHandler, listenMock, invokeMock, errorSpy } = vi.hoisted(() => ({
+const { getHandler, getErrorHandler, listenMock, invokeMock, errorSpy } = vi.hoisted(() => ({
   getHandler: { current: null as Handler | null },
+  getErrorHandler: { current: null as Handler | null },
   listenMock: vi.fn(),
   invokeMock: vi.fn(),
   errorSpy: vi.fn(),
@@ -25,14 +32,23 @@ vi.mock("@tauri-apps/api/event", () => ({
 beforeEach(() => {
   setLanguage("en-US");
   getHandler.current = null;
+  getErrorHandler.current = null;
   listenMock.mockReset();
   invokeMock.mockReset();
   errorSpy.mockReset();
   vi.spyOn(console, "error").mockImplementation(errorSpy);
-  listenMock.mockImplementation((_event: string, handler: Handler) => {
-    getHandler.current = handler;
+  listenMock.mockImplementation((event: string, handler: Handler) => {
+    if (event === "hawk://scrollshot-error") {
+      getErrorHandler.current = handler;
+    } else {
+      getHandler.current = handler;
+    }
     return Promise.resolve(() => {
-      getHandler.current = null;
+      if (event === "hawk://scrollshot-error") {
+        getErrorHandler.current = null;
+      } else {
+        getHandler.current = null;
+      }
     });
   });
   invokeMock.mockImplementation((cmd: string) => {
@@ -66,7 +82,7 @@ describe("scrollshot bar window (N5)", () => {
     expect(screen.getByText("Scroll the page… press ⌘S to finish")).toBeTruthy();
   });
 
-  it("finish button invokes scrollshot_stop and shows the error inline on failure (I4)", async () => {
+  it("keeps the bar alive and shows the error inline when finishing fails (I4 residual)", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "scrollshot_status") {
         return Promise.resolve({ session: 1, frames: 4, active: true });
@@ -84,6 +100,45 @@ describe("scrollshot bar window (N5)", () => {
     expect(invokeMock).toHaveBeenCalledWith("scrollshot_stop");
     // 失败 → 行内错误可见（不再是死代码的错误槽）
     expect(screen.getByText(/拼接失败/)).toBeTruthy();
+    // **条仍在**：Rust 侧失败不关条 → 前端不得自行卸载任何东西。
+    // 「完成」按钮仍在（可重试），且多出「放弃」出口（用户有出路）。
+    expect(screen.getByRole("button", { name: "Finish" })).toBeTruthy();
+    const abortBtn = screen.getByRole("button", { name: "Discard" });
+    expect(abortBtn).toBeTruthy();
+    // 帧数仍在更新（条是活的，不是死壳）。
+    await act(async () => {
+      getHandler.current?.({ payload: { session: 1, frames: 11 } });
+    });
+    expect(screen.getByText("11 frames")).toBeTruthy();
+  });
+
+  it("renders the Rust-emitted failure event inline (does not rely on the invoke round trip)", async () => {
+    render(<ScrollshotBarWindow />);
+    await act(async () => {});
+    expect(screen.queryByText(/未能识别滚动位移/)).toBeNull();
+    await act(async () => {
+      getErrorHandler.current?.({
+        payload: { session: 1, message: "未能识别滚动位移：画面内容没有明显变化" },
+      });
+    });
+    expect(screen.getByText(/未能识别滚动位移/)).toBeTruthy();
+    // 条仍在 + 「放弃」出口出现。
+    expect(screen.getByRole("button", { name: "Finish" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeTruthy();
+  });
+
+  it("discards the session through scrollshot_abort", async () => {
+    render(<ScrollshotBarWindow />);
+    await act(async () => {});
+    await act(async () => {
+      getErrorHandler.current?.({
+        payload: { session: 1, message: "未能识别滚动位移" },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    });
+    expect(invokeMock).toHaveBeenCalledWith("scrollshot_abort");
   });
 
   it("switches the hint when the ⌘S hotkey is unavailable (pull channel, I4)", async () => {
@@ -109,7 +164,7 @@ describe("scrollshot bar window (N5)", () => {
     listenMock.mockImplementation(() => Promise.reject(new Error("not allowed by ACL")));
     render(<ScrollshotBarWindow />);
     await act(async () => {});
-    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledTimes(2);
     expect(String(errorSpy.mock.calls[0][0])).toContain("listen");
   });
 });

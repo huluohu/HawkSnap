@@ -112,6 +112,7 @@ pub fn run() {
             recording::record_stop, recording::record_status, recording::record_start_region,
             recording::pip_update,
             scrollshot::scrollshot_start, scrollshot::scrollshot_stop, scrollshot::scrollshot_status,
+            scrollshot::scrollshot_abort,
             keycast::keycast_set,
             updater::check_for_updates, updater::install_update, updater::restart_app
         ])
@@ -246,12 +247,22 @@ pub fn run() {
                                 }
                             });
                         }
-                        // N5：停止长截图（托盘出口——⌘S 注册失败时的兜底）。
+                        // N5：停止长截图（托盘出口——⌘S 注册失败时的兜底；也是
+                        // **强制停止**路径：必须能把卡住的会话清掉，否则僵尸会话
+                        // 挡住后续截图/录屏）。
                         "scrollshot-stop" => {
                             let app = app.clone();
                             std::thread::spawn(move || {
+                                if !scrollshot::scrollshot_active() {
+                                    panel::show_capture_error(&app, "长截图：没有进行中的长截图".into());
+                                    return;
+                                }
                                 if let Err(e) = scrollshot::scrollshot_stop(app.clone()) {
-                                    panel::show_capture_error(&app, e);
+                                    // 失败**已由 scrollshot_stop 自行投递**（提示条行内 +
+                                    // 横幅）→ 这里不重复弹横幅；但**必须清掉会话**
+                                    // （托盘语义 = 停止；失败也不留僵尸会话）。
+                                    eprintln!("[hawksnap] 托盘停止长截图失败（强制收尾）: {e}");
+                                    scrollshot::scrollshot_force_stop(&app);
                                 }
                             });
                         }
