@@ -119,5 +119,6 @@
   "scrollshot.bar.frames": "{n} 帧",
   "scrollshot.bar.finish": "完成",
   "scrollshot.bar.finishOnly": "完成（⌘S 不可用）",
-  "scrollshot.bar.hintNoHotkey": "滚动页面…完成后点「完成」"
+  "scrollshot.bar.hintNoHotkey": "滚动页面…完成后点「完成」",
+  "scrollshot.bar.abort": "放弃"
 }

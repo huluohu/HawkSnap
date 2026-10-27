@@ -13,10 +13,18 @@
 //!
 //! 1. 按 layout 合成一张**长页面**（正文/图片/表格/代码/聊天/固定头部/粘性侧栏/
 //!    深色…各场景形态不同）；
-//! 2. 按场景的滚动步长序列切出一串**视口帧**（模拟用户滚动 → 每帧 = 一次抓取）；
-//! 3. 走**生产同一条**拼接路径（[`hawksnap_core::stitch::stitch`]）；
+//! 2. **模拟一次采集会话**：逐帧切视口 → 喂进**生产同一个**流式拼接器 → 用
+//!    拼接器的**实测位移**决定下一拍间隔（与产品 `scrollshot.rs` 同款：测不出
+//!    就拍密、静止守卫只在测不出时兜底）→ 收尾出图；
+//! 3. 走**生产同一条**拼接路径（[`hawksnap_core::stitch::Stitcher`]）；
 //! 4. 判定：输出高度是否等于期望（偏移链无漂移）、是否 ≥ 20000px、内容是否与
 //!    原页面逐像素对齐（**无重影**的判定面）。
+//!
+//! ## 节奏模型与产品同源（评审 Minor）
+//!
+//! 旧版 eval 从**真值速度**推采集间隔 → 产品侧的 I1 改动（测量优先 / 测不出
+//! 就拍密）**完全没有被覆盖**。现在间隔由**实测位移**决定（与产品同一个
+//! 匹配器），产品改节奏 → eval 立刻跟着变。
 //!
 //! 报告：逐场景一行 + 总成功率 + 高度统计；退出码非 0 = 成功率未达 90%（18/20）。
 //!
@@ -27,9 +35,11 @@
 //! 800 次配对匹配，覆盖固定头部/侧栏/重复表格/深色等形态。合成像素可控、
 //! 可复现、能给出**逐像素**的 ground truth（真浏览器截图做不到）。
 
-use hawksnap_core::stitch::Frame;
+use hawksnap_core::scrollshot::{resolve_shift, Pacing};
+use hawksnap_core::stitch::{Frame, Stitched, Stitcher};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // 场景定义（JSON）
@@ -355,7 +365,7 @@ enum Chrome {
     StickySidebar(u32),
 }
 
-fn render_page(scene: &Scene, w: u32, h: u32) -> (Canvas, Chrome) {
+fn render_page(scene: &Scene, w: u32, h: u32, band_top: Option<u32>) -> (Canvas, Chrome) {
     let dark = scene.layout == "dark";
     let bg = if dark { [20, 23, 28, 255] } else { [255, 255, 255, 255] };
     let ink: [u8; 3] = if dark { [216, 222, 233] } else { [29, 36, 48] };
@@ -495,7 +505,11 @@ fn render_page(scene: &Scene, w: u32, h: u32) -> (Canvas, Chrome) {
             // 页面**中段**留一大段空白（纯白、无任何特征，长度 ≈ 2.5 屏）→
             // 完全落在带内的帧「无特征」→ 与邻居匹配失败 → 偏移链必须在中途
             // 跳帧后**重新基准**（C1 的端到端形态）。
-            let band_top = h / 2;
+            //
+            // `band_top` 由调用方给定（**跨迭代固定**）：页面高度会随「实测节奏」
+            // 迭代变化，若空白带跟着高度漂移 → 场景本身在迭代中变形 → 固定点
+            // 求解不稳。`None` = 兜底用 h/2。
+            let band_top = band_top.unwrap_or(h / 2);
             draw_paragraphs_until(&mut c, y, x0, x1, &mut rng, ink, 11, 14, 3, 6, band_top);
             let band_h = (h / 9).min(1000);
             for yy in band_top..(band_top + band_h).min(h) {
@@ -629,20 +643,117 @@ fn alignment(out: &hawksnap_core::stitch::Stitched, page: &Canvas, chrome: Chrom
     same as f64 / total as f64
 }
 
-fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult {
-    let min_output_height = spec.min_output_height;
-    // 滚动步长序列（确定性）：恒定速度 × 自适应采集间隔（复刻产品规则）。
+/// 采集节奏参数（产品与 eval **共用 core 的同一份规则** → 不会各改各的）。
+///
+/// 评审 Minor：旧 eval 从**真值**推间隔 → 产品侧的 I1 改动（测量优先 / 测不出
+/// 就拍密）**完全没被覆盖**。现在间隔由**实测位移**决定（与产品同一个匹配器
+/// —— [`Stitcher::measured_shift`]），且规则本体与产品同源。
+fn pacing_from_spec(spec: &ScenesFile) -> Pacing {
+    Pacing::new(
+        Duration::from_millis(spec.capture_interval_ms),
+        Duration::from_millis(spec.capture_interval_fast_ms),
+        spec.fast_shift_ratio,
+        spec.slow_shift_ratio,
+    )
+}
+
+/// 一次「模拟采集 + 拼接」的结果。
+struct Simulation {
+    /// 步长序列（每步 = 用户在一拍间隔内滚过的距离）。
+    steps: Vec<u32>,
+    /// 每帧的页面偏移（真值，用于对齐率比对）。
+    offsets: Vec<usize>,
+    /// 拼接产物（`None` = 拼接失败：无可靠匹配）。
+    out: Option<Stitched>,
+    /// 输入帧数（= steps.len() + 1）。
+    frames_in: usize,
+    /// 进入偏移链的帧数。
+    frames_used: usize,
+    /// 触到画布上界被截断。
+    truncated: bool,
+}
+
+/// **模拟一次采集会话**（与产品同款节奏）：逐帧切视口 → 喂进**同一个**流式
+/// 拼接器 → 用拼接器的**实测位移**决定下一拍间隔 → 最后收尾出图。
+///
+/// 与产品 `spawn_capture_thread` 的逐步同构：
+/// 1. 抓帧 → 推入拼接器；
+/// 2. 读 `measured_shift()`（当前待决帧相对上一张**被接受**帧的估计）；
+/// 3. 按滞回规则定下一拍间隔（测不出 → 拍密 200ms）；
+/// 4. 用户在下一拍间隔里滚过 `速度 × 间隔`（带抖动）→ 下一帧。
+fn simulate_capture(
+    scene: &Scene,
+    spec: &ScenesFile,
+    page: &Canvas,
+    chrome: Chrome,
+    fw: u32,
+    fh: u32,
+) -> Simulation {
+    let mut rng = Rng(scene.seed.wrapping_mul(6364136223846793005).wrapping_add(1));
+    let jitter = |r: &mut Rng| -> f64 { 0.85 + r.range(0, 30) as f64 / 100.0 };
+    let pacing = pacing_from_spec(spec);
+    let mut st = Stitcher::new(fw as usize);
+    let mut steps: Vec<u32> = Vec::with_capacity(scene.scroll.count as usize);
+    let mut offsets: Vec<usize> = Vec::with_capacity(scene.scroll.count as usize + 1);
+    // 上一帧的行亮度剖面（产品侧同款：判定「页面完全没动」）。
+    let mut last_profile: Option<Vec<f32>>;
+    let mut off = 0usize;
+    let mut interval = pacing.base;
+
+    // 首帧（offset 0）→ 入链 → 测不出位移 → **拍密**（与产品同款）。
+    let first = viewport(page, off, fh, chrome);
+    last_profile = Some(first.row_profile());
+    st.push(first);
+    offsets.push(off);
+    interval = pacing.next_interval(interval, resolve_shift(st.measured_shift(), false), fh);
+
+    for i in 0..scene.scroll.count as usize {
+        let step = (scene.scroll.velocity as f64 * interval.as_millis() as f64 / 1000.0
+            * jitter(&mut rng))
+            .round()
+            .max(1.0) as u32;
+        off += step as usize;
+        let mut frame = viewport(page, off, fh, chrome);
+        // 注入「中段作废帧」（C1 回归场景）：某一帧拍成无特征白屏 → 匹配失败 →
+        // 偏移链必须跳帧并对上一张被接受的帧**重新基准**（否则尾部整段重叠 → 重影）。
+        if scene.flash_at == Some(i + 1) {
+            frame = Frame {
+                width: fw,
+                height: fh,
+                rgba: vec![247u8; (fw as usize) * (fh as usize) * 4],
+            };
+        }
+        let profile = frame.row_profile();
+        let still = last_profile.as_ref().map(|p| *p == profile).unwrap_or(false);
+        last_profile = Some(profile);
+        st.push(frame);
+        offsets.push(off);
+        steps.push(step);
+        // 节奏自适应：读**当前帧**的实测位移（与链上同一个匹配器）。
+        let shift = resolve_shift(st.measured_shift(), still);
+        interval = pacing.next_interval(interval, shift, fh);
+    }
+
+    let frames_in = steps.len() + 1;
+    let truncated = st.truncated();
+    let out = st.finish();
+    // `frames_used` 必须在 `finish()` **之后**读（收尾帧也进链）。
+    let frames_used = st.frames_used();
+    Simulation { steps, offsets, out, frames_in, frames_used, truncated }
+}
+
+/// 旧模型（**真值**速度推间隔）算出的步长序列——只作为**不动点迭代的初值**
+/// （页面的初始高度依赖它）。
+fn ground_truth_steps(scene: &Scene, spec: &ScenesFile, fh: u32) -> Vec<u32> {
     let mut rng = Rng(scene.seed.wrapping_mul(6364136223846793005).wrapping_add(1));
     let jitter = |r: &mut Rng| -> f64 { 0.85 + r.range(0, 30) as f64 / 100.0 };
     let mut steps: Vec<u32> = Vec::with_capacity(scene.scroll.count as usize);
     let mut interval_ms = spec.capture_interval_ms;
     for _ in 0..scene.scroll.count {
-        let step = (scene.scroll.velocity as f64 * interval_ms as f64 / 1000.0
-            * jitter(&mut rng))
+        let step = (scene.scroll.velocity as f64 * interval_ms as f64 / 1000.0 * jitter(&mut rng))
             .round()
             .max(1.0) as u32;
         steps.push(step);
-        // 滞回规则：位移 > 0.4h → 加密；< 0.2h → 回到基准；中间保持。
         let ratio = step as f64 / fh as f64;
         interval_ms = if ratio > spec.fast_shift_ratio {
             spec.capture_interval_fast_ms
@@ -652,36 +763,48 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
             interval_ms
         };
     }
-    let total: u32 = steps.iter().sum();
-    let page_h = fh + total;
-    let (page, chrome) = render_page(scene, fw, page_h);
+    steps
+}
 
-    // 视口帧序列（首帧在顶部，之后按步长滚动）。
-    let mut frames: Vec<Frame> = Vec::with_capacity(steps.len() + 1);
-    let mut offsets: Vec<usize> = Vec::with_capacity(steps.len() + 1);
-    let mut off = 0usize;
-    frames.push(viewport(&page, off, fh, chrome));
-    offsets.push(off);
-    for step in steps {
-        off += step as usize;
-        frames.push(viewport(&page, off, fh, chrome));
-        offsets.push(off);
-    }
-    let expected_height = page_h;
-
-    // 注入「中段作废帧」（C1 回归场景）：某一帧拍成无特征白屏 → 匹配失败 →
-    // 偏移链必须跳帧并对上一张被接受的帧**重新基准**（否则尾部整段重叠 → 重影）。
-    if let Some(k) = scene.flash_at {
-        if k < frames.len() {
-            frames[k] = Frame {
-                width: fw,
-                height: fh,
-                rgba: vec![247u8; (fw as usize) * (fh as usize) * 4],
-            };
+fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult {
+    let min_output_height = spec.min_output_height;
+    // —— 不动点迭代：步长 ← 实测节奏 ← 帧 ← 页面 ← 页面高度 ← 步长 ——
+    //
+    // 页面的**内容**自上而下绘制 → 同样的高度区间内容一致；但**页面高度**本身
+    // 由步长总和决定 → 「实测节奏」反过来改页面高度 → 迭代到稳定为止
+    // （通常 2 轮：第 1 轮用旧步长渲染页面，第 2 轮用实测步长渲染 → 稳定）。
+    let mut steps = ground_truth_steps(scene, spec, fh);
+    // 空白带位置**跨迭代固定**（否则场景在迭代中变形 → 固定点不稳）。
+    let band_anchor: Option<u32> = Some((fh + steps.iter().sum::<u32>()) / 2);
+    let mut sim: Option<Simulation> = None;
+    let mut page = Canvas::new(fw, 0, [0, 0, 0, 255]);
+    let mut chrome = Chrome::None;
+    let mut page_h_used = 0u32;
+    for _ in 0..4 {
+        let total: u32 = steps.iter().sum();
+        page_h_used = fh + total;
+        let (p, c) = render_page(scene, fw, page_h_used, band_anchor);
+        let s = simulate_capture(scene, spec, &p, c, fw, fh);
+        let converged = s.steps == steps;
+        page = p;
+        chrome = c;
+        sim = Some(s);
+        if converged {
+            break;
         }
+        steps = sim.as_ref().unwrap().steps.clone();
+    }
+    let sim = sim.expect("至少迭代一轮");
+    let total: u32 = sim.steps.iter().sum();
+    let expected_height = fh + total;
+    if page_h_used != expected_height {
+        // 未收敛（罕见）：按最终步长重新渲染页面用于比对（内容自上而下一致）。
+        let (p, c) = render_page(scene, fw, expected_height, band_anchor);
+        page = p;
+        chrome = c;
     }
 
-    match hawksnap_core::stitch::stitch_with_stats(&frames) {
+    match sim.out {
         None => SceneResult {
             id: scene.id.clone(),
             layout: scene.layout.clone(),
@@ -690,12 +813,12 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
             height: 0,
             expected_height,
             align: 0.0,
-            frames: (frames.len(), 0),
+            frames: (sim.frames_in, 0),
             is_standard: scene.kind == "standard",
         },
-        Some((out, stats)) => {
+        Some(out) => {
             let drift = (out.height as i64 - expected_height as i64).abs();
-            let align = alignment(&out, &page, chrome, &offsets);
+            let align = alignment(&out, &page, chrome, &sim.offsets);
             let mut problems: Vec<String> = Vec::new();
             let mut note = String::new();
             // F10 三项判据：无重影 / 输出 ≥20000px / 内容完整（无缺口）。
@@ -723,7 +846,7 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
                     problems.push(format!("内容缺口 {}px（漂移上限 {drift_limit}）", drift));
                 }
             }
-            if stats.truncated {
+            if sim.truncated {
                 problems.push("触到画布内存上界被截断".into());
             }
             SceneResult {
@@ -740,7 +863,7 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
                 height: out.height,
                 expected_height,
                 align,
-                frames: (stats.frames_in, stats.frames_used),
+                frames: (sim.frames_in, sim.frames_used),
                 is_standard: scene.kind == "standard",
             }
         }

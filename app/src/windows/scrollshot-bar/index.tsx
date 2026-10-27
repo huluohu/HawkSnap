@@ -12,6 +12,13 @@ import { t } from "../../lib/i18n";
 // 帧进度语义单源在 Rust：hawk://scrollshot-tick {session, frames, hotkey?} 每
 // 抓一帧广播一次；本页 mount 时经 scrollshot_status 拉一次补显（push 早于
 // listen 必丢，与 recording-bar / countdown 同款问题形态）。
+//
+// **失败必须看得见**（I4 残留，评审必修）：Rust 侧 `scrollshot_stop` 改成
+// **先拼接、成功后才收尾**（关条 + 注销热键 + 消费会话）→ 拼接失败时提示条
+// **仍然活着**，本行内错误槽才有地方渲染。两个错误来源都渲染到这里：
+// ① invoke 失败（Rust 返回 Err）；② Rust 直发 `hawk://scrollshot-error`
+// （不依赖 invoke 回流是否完好）。出现错误后条上多一枚「放弃」按钮 → 用户
+// 有出路（Rust 的 `scrollshot_abort` 强制丢弃会话）。
 export default function ScrollshotBarWindow() {
   const [frames, setFrames] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -22,6 +29,7 @@ export default function ScrollshotBarWindow() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenErr: (() => void) | undefined;
     let disposed = false;
     // pull 补显 + push 订阅（窗口常驻复用：监听与页面同寿命）。
     void invoke<{ session: number; frames: number; hotkey?: boolean } | null>(
@@ -59,16 +67,46 @@ export default function ScrollshotBarWindow() {
           e,
         );
       });
+    // Rust 直发的失败事件（拼接失败）→ 行内错误槽。**不依赖** invoke 回流：
+    // 即使 invoke 通道异常，用户也能看到失败原因（提示条此时不会被关闭）。
+    listen<{ session: number; message: string }>("hawk://scrollshot-error", (e) => {
+      // 只认当前会话的错误（旧会话的残留不该出现在新会话的条上）。
+      if (
+        lastSessionRef.current !== null &&
+        lastSessionRef.current !== e.payload.session
+      ) {
+        return;
+      }
+      lastSessionRef.current = e.payload.session;
+      setError(e.payload.message);
+    })
+      .then((un) => {
+        if (disposed) un();
+        else unlistenErr = un;
+      })
+      .catch((e) => {
+        console.error(
+          "[scrollshot-bar] listen(hawk://scrollshot-error) 失败（窗口 capability 缺失？）",
+          e,
+        );
+      });
     return () => {
       disposed = true;
       unlisten?.();
+      unlistenErr?.();
     };
   }, []);
 
-  // 完成：invoke scrollshot_stop（Rust 侧拼接 + 落盘 + 入库）。失败 → 行内错误
-  // （条保持可见，用户可重试或用 ⌘S）。
+  // 完成：invoke scrollshot_stop（Rust 侧拼接 + 落盘 + 入库）。失败 → 行内错误。
+  // **条不会因此消失**：Rust 改成「先拼接、成功后才关条」→ 失败时提示条仍活着，
+  // 错误渲染在行内（用户可重试，或点「放弃」丢弃）。
   const finish = () => {
     void invoke<string>("scrollshot_stop").catch((e) => setError(String(e)));
+  };
+
+  // 放弃：强制丢弃会话（Rust 清槽位 + 停采集 + 注销热键 + 关条）。
+  const abort = () => {
+    void invoke<void>("scrollshot_abort").catch((e) => setError(String(e)));
   };
 
   const bar: CSSProperties = {
@@ -108,7 +146,7 @@ export default function ScrollshotBarWindow() {
       <style>{`@keyframes hawksnap-ss-pulse { 50% { opacity: 0.35; } }`}</style>
       <span style={dot} aria-hidden="true" />
       <span style={hint}>{hintText}</span>
-      {error && <span style={err}>{error}</span>}
+      {error && <span style={err} title={error}>{error}</span>}
       <span style={count}>{t("scrollshot.bar.frames", { n: frames ?? 0 })}</span>
       {/* 完成按钮：⌘S 不可用时它是唯一出口 → 高亮提示 */}
       <button
@@ -118,6 +156,12 @@ export default function ScrollshotBarWindow() {
       >
         {t("scrollshot.bar.finish")}
       </button>
+      {/* 失败后才有「放弃」：Rust 的强制丢弃出口（失败后条仍在 → 用户有出路） */}
+      {error && (
+        <button style={btnDanger} onClick={abort} title={t("scrollshot.bar.abort")}>
+          {t("scrollshot.bar.abort")}
+        </button>
+      )}
     </div>
   );
 }

@@ -28,6 +28,9 @@
 //!   期间的意图就是结束长截图。
 //!   **注册失败必须让用户看见**（I4）：热键失败时走横幅通道告知，并保证提示条
 //!   上的「完成」按钮始终可点（提示条不再点击穿透）；托盘另有「停止长截图」入口。
+//! - **失败必须可达**（I4 残留，评审必修）：`scrollshot_stop` **先拼接、成功后
+//!   才收尾**（关条 + 注销热键 + 消费会话）。拼接失败 → 会话与提示条**都留着**
+//!   → 错误双通道可见（提示条行内 + 横幅），用户可重试或点「放弃」强制收尾。
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,11 +39,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use hawksnap_core::geometry::Rect;
+use hawksnap_core::scrollshot::{resolve_shift, StopOutcome};
 use hawksnap_core::stitch::{Frame, Stitched, Stitcher};
 
 /// 采集间隔（plan 裁定：500ms）——**基准间隔**。
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(500);
-/// 快速滚动时的加密采集间隔（见 [`next_interval`] 的滞回规则）。
+/// 快速滚动时的加密采集间隔（见 [`pacing_params`] → core `Pacing` 的滞回规则）。
 const CAPTURE_INTERVAL_FAST: Duration = Duration::from_millis(200);
 /// 判定「滚得快」的位移阈值（相对选区高度）。
 const FAST_SHIFT_RATIO: f64 = 0.4;
@@ -48,6 +52,9 @@ const FAST_SHIFT_RATIO: f64 = 0.4;
 const SLOW_SHIFT_RATIO: f64 = 0.2;
 /// 首帧延迟：给「隐藏覆盖层」留出时间（覆盖层是带遮罩的全屏窗——被拍进去就毁了）。
 const FIRST_FRAME_DELAY: Duration = Duration::from_millis(250);
+/// **停滞检测**阈值：连续多少帧「内容在动但画布没长」→ 判定链已断（评审 Minor：
+/// 无停滞检测 → 长图被静默截断，用户毫无察觉）。
+const STALL_LIMIT: usize = 10;
 // 采集期**不留帧队列**（M5）：每帧采集后立即参与匹配与合成、随即释放。
 //
 // 内存构成 = 画布（= 最终产物，20000px×1600px ≈ 128MB，**这是本功能的内存
@@ -138,6 +145,18 @@ impl Session {
             .unwrap_or(false)
     }
 
+    /// **当前画布高度**（像素）——已合成进去的内容高度。
+    ///
+    /// 停滞检测的依据：高度不再增长 = 新帧没被接受（匹配失败）→ 链已断。
+    fn canvas_height(&self) -> usize {
+        self.stitcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|st| st.canvas_height())
+            .unwrap_or(0)
+    }
+
     /// 本会话可产出的最大长图高度（像素）。
     fn max_height(&self) -> usize {
         self.stitcher
@@ -176,43 +195,20 @@ pub fn scrollshot_active() -> bool {
     lock_session().is_some()
 }
 
-/// 下一次采集的间隔（**滞回式自适应**）。
-///
-/// 动因：选区高度 h、采集间隔 T ⇒ 用户滚动 v px/s 时，每帧位移 ≈ v·T。两帧的
-/// 重叠 = h − v·T；位移逼近 h 时重叠趋零 → **模板匹配无重叠可配**（eval 实测：
-/// 900px 视口下每帧滚 800px+ 的场景整段失配）。
-///
-/// 规则（带滞回，避免在两档之间抖动）：
-/// - 上次位移 > 0.4h → 加密到 200ms（滚得快 → 多拍几帧）；
-/// - 上次位移 < 0.2h → 回到 500ms（滚得慢 → 省资源）；
-/// - 介于两者之间 → 保持当前间隔；
-/// - **测不出位移（None）→ 加密到 200ms**（见下）。
-///
-/// ## 为什么「测不出」要加密而不是保持（I1）
-///
-/// 测不出有三种成因：位移太大（**无重叠**）、内容歧义、内容无特征。三者里
-/// 只有第一种是致命的——它会让后续帧**继续失配**（重叠永远追不回来）。
-/// 代价不对称：拍密一点只是多几帧（几百 ms 的 CPU）；拍疏了会丢掉重叠 →
-/// 内容断档。故**不确定就拍密**。
+/// 下一次采集的间隔（**滞回式自适应**）——规则本体在 core
+/// （[`hawksnap_core::scrollshot::Pacing`]）：产品侧与 eval 跑批器**共用同一份
+/// 实现** → 规则改了两边一起变（不会出现「产品改了、eval 还按老模型跑」的盲区）。
 ///
 /// 位移来源 = 拼接器刚做的测量（[`hawksnap_core::stitch::Stitcher::measured_shift`]，
 /// 与链上用的是**同一个**三层匹配器）——不再单独跑 1D 行谱（1D 在准周期内容上
 /// 会咬住假峰：实测真解 678px 被 524px 假峰盖过 → 节奏按假位移调 → 步长失控）。
-fn next_interval(current: Duration, shift: Option<i32>, region_h: u32) -> Duration {
-    let Some(s) = shift else {
-        return CAPTURE_INTERVAL_FAST; // 不确定 → 拍密（保住重叠）
-    };
-    if region_h == 0 {
-        return current;
-    }
-    let ratio = s as f64 / region_h as f64;
-    if ratio > FAST_SHIFT_RATIO {
-        CAPTURE_INTERVAL_FAST
-    } else if ratio < SLOW_SHIFT_RATIO {
-        CAPTURE_INTERVAL
-    } else {
-        current
-    }
+fn pacing_params() -> hawksnap_core::scrollshot::Pacing {
+    hawksnap_core::scrollshot::Pacing::new(
+        CAPTURE_INTERVAL,
+        CAPTURE_INTERVAL_FAST,
+        FAST_SHIFT_RATIO,
+        SLOW_SHIFT_RATIO,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +240,22 @@ pub struct ScrollshotStatus {
     /// 「按 ⌘S 结束」，即使热键注册失败。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hotkey: Option<bool>,
+}
+
+/// 拼接失败事件载荷（提示条行内错误槽）。
+///
+/// **为什么单独一个事件**（评审 I4 残留必修）：失败反馈必须**可达**——
+/// ① Rust 直发本事件 → 提示条 `setError`（不依赖 invoke 回流是否完好）；
+/// ② 同时走横幅通道 `panel::show_capture_error`（提示条 webview 不健康时
+/// 用户仍看得见）。旧实现是「先关条再拼接」→ 错误渲染进虚空 → 用户只见
+/// 提示条凭空消失，零反馈。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollshotError {
+    /// 会话号（前端据此忽略**别的**会话的残留错误）。
+    pub session: u64,
+    /// 失败原因（可直接显示的中文文案）。
+    pub message: String,
 }
 
 /// 启动请求（覆盖层选区确认载荷）。
@@ -335,42 +347,88 @@ pub fn scrollshot_start(app: AppHandle, req: ScrollshotReq) -> Result<(), String
 
 /// 结束长截图：拼接 → 存 PNG → 缩略图 + 历史入库（kind="scrollshot"）。
 ///
-/// 返回产物路径。失败（无有效匹配 / 写盘失败）→ Err（提示条行内显示）。
+/// ## 顺序契约（评审 I4 残留必修）
+///
+/// **先拼接、成功后才收尾**（关提示条 + 注销热键 + 消费会话）。旧实现反过来
+/// （先注销热键 + 关条，再拼接）→ 拼接失败时错误回传到**正在销毁**的 webview
+/// → 前端 `setError` 渲染进虚空；会话已被 `lock_session().take()` 消费；托盘
+/// 兜底只答「没有进行中的长截图」；⌘S 已注销 → **主出口彻底死路，零反馈**。
+///
+/// 现在：
+/// - **拼接失败** → 会话与提示条**都留着** → 错误双通道可见（行内 + 横幅），
+///   用户可重试或点「放弃」强制收尾；
+/// - **落盘失败** → 画布已被取出（不可重试）→ 消费会话 + 横幅告知（不静默）；
+/// - **成功** → 消费会话（关条 + 注销热键）→ 返回产物路径。
 #[tauri::command(async)]
 pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
+    // 取会话但**不消费**（失败时还要留着提示错误/重试）。
     let session = {
-        let mut guard = lock_session();
-        guard.take()
+        let guard = lock_session();
+        guard.as_ref().cloned()
     }
     .ok_or_else(|| "没有进行中的长截图".to_string())?;
-    session.stop.store(true, Ordering::SeqCst);
-    unregister_finish_hotkey(&app);
-    close_scrollshot_bar(&app);
 
-    let (stitched, thumb) = session.finish().ok_or_else(|| {
-        "未能识别滚动位移：画面内容没有明显变化，或内容重复导致匹配歧义".to_string()
-    })?;
+    // —— ① 拼接（重活，秒级）——
+    let Some((stitched, thumb)) = session.finish() else {
+        let outcome = StopOutcome::StitchFailed;
+        // 契约：**失败不关条、不消费会话**（否则错误无处可显 → 用户零反馈）。
+        if outcome.consumes_session() {
+            consume_session(&app, &session);
+        }
+        let msg = "未能识别滚动位移：画面内容没有明显变化，或内容重复导致匹配歧义";
+        surface_failure(&app, &session, msg);
+        eprintln!("[hawksnap] 长截图拼接失败（会话与提示条保留，可重试或放弃）: {msg}");
+        return Err(msg.to_string());
+    };
 
+    // —— ② 落盘（画布已取出 → 失败不可重试）——
     let settings = crate::settings::Settings::load(&app);
-    let dir = crate::commands::resolve_save_dir(&settings).ok_or("no picture dir")?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = crate::commands::save_path_for(&dir, "HawkSnap", "png");
-    // **零拷贝编码**：`rgba_to_png` 会把整幅长图 `to_vec()` 复制一份（长图可达
-    // 128MB → 峰值翻倍）；`rgba_to_png_borrowed` 直接把切片交给编码器。
-    let png = hawksnap_core::crop::rgba_to_png_borrowed(&stitched.rgba, stitched.width, stitched.height)
+    let save = (|| -> Result<(std::path::PathBuf, String), String> {
+        let dir = crate::commands::resolve_save_dir(&settings).ok_or("no picture dir")?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = crate::commands::save_path_for(&dir, "HawkSnap", "png");
+        // **零拷贝编码**：`rgba_to_png` 会把整幅长图 `to_vec()` 复制一份（长图可达
+        // 128MB → 峰值翻倍）；`rgba_to_png_borrowed` 直接把切片交给编码器。
+        let png = hawksnap_core::crop::rgba_to_png_borrowed(
+            &stitched.rgba,
+            stitched.width,
+            stitched.height,
+        )
         .map_err(|e| e.to_string())?;
-    std::fs::write(&path, &png).map_err(|e| format!("保存失败: {e}"))?;
+        std::fs::write(&path, &png).map_err(|e| format!("保存失败: {e}"))?;
+        // 缩略图 = **首帧**（plan 契约：thumb 取首帧——它是长图顶部，网格里一眼能认出）。
+        // **旁路语义**：缩略图失败**不影响**主产物（长图已落盘）——记日志、缩略图
+        // 留空（前端有占位块分支），绝不因缩略图把整次长截图判为失败。
+        let thumb_path = match write_thumbnail(&dir, &path, thumb) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => {
+                eprintln!("[hawksnap] 长截图缩略图生成失败（不影响长图）: {e}");
+                String::new()
+            }
+        };
+        Ok((path, thumb_path))
+    })();
 
-    // 缩略图 = **首帧**（plan 契约：thumb 取首帧——它是长图顶部，网格里一眼能认出）。
-    // **旁路语义**：缩略图失败**不影响**主产物（长图已落盘）——记日志、缩略图
-    // 留空（前端有占位块分支），绝不因缩略图把整次长截图判为失败。
-    let thumb_path = match write_thumbnail(&dir, &path, thumb) {
-        Ok(p) => p.to_string_lossy().into_owned(),
+    let (path, thumb_path) = match save {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("[hawksnap] 长截图缩略图生成失败（不影响长图）: {e}");
-            String::new()
+            // 落盘失败：画布已取出（不可重试）→ 消费会话 + **横幅**告知（不静默）。
+            let outcome = StopOutcome::SaveFailed;
+            if outcome.consumes_session() {
+                consume_session(&app, &session);
+            }
+            crate::panel::show_capture_error(&app, format!("长截图：保存失败（{e}）"));
+            eprintln!("[hawksnap] 长截图保存失败: {e}");
+            return Err(format!("保存失败: {e}"));
         }
     };
+
+    // —— ③ 成功：消费会话（关条 + 注销热键 + 清槽位）——
+    let outcome = StopOutcome::Saved;
+    if outcome.consumes_session() {
+        consume_session(&app, &session);
+    }
+
     // 历史入库（旁路语义：失败仅记录，不影响产物返回）。
     if let Err(e) = crate::history::record(
         &app,
@@ -385,6 +443,58 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
         eprintln!("[hawksnap] 长截图历史入库失败: {e}");
     }
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// 失败反馈的**双通道**投递（评审 I4 残留必修——失败必须看得见）。
+///
+/// ① 提示条行内错误槽：Rust 直发 `hawk://scrollshot-error` → 前端 `setError`
+///    （**不依赖** invoke 回流是否完好，也不依赖前端是否还活着）；
+/// ② 横幅通道 `panel::show_capture_error`：提示条 webview 不健康 / 已崩时，
+///    用户仍能从主面板看到失败原因（spec §9「不静默」）。
+///
+/// 调用前提：**提示条未关**（失败路径不关条——否则错误无处可显）。
+fn surface_failure(app: &AppHandle, session: &Session, msg: &str) {
+    let _ = app.emit(
+        "hawk://scrollshot-error",
+        ScrollshotError {
+            session: session.session,
+            message: msg.to_string(),
+        },
+    );
+    crate::panel::show_capture_error(app, format!("长截图：{msg}"));
+}
+
+/// 消费会话：停采集 + 注销热键 + 关提示条 + 清槽位（**仅在成功/不可重试时**）。
+fn consume_session(app: &AppHandle, session: &Session) {
+    session.stop.store(true, Ordering::SeqCst);
+    unregister_finish_hotkey(app);
+    close_scrollshot_bar(app);
+    let mut guard = lock_session();
+    // 只清**本会话**（避免误清后来建立的会话）。
+    if guard.as_ref().map(|s| s.session) == Some(session.session) {
+        *guard = None;
+    }
+}
+
+/// 强制放弃长截图（丢弃已采集内容）：清会话 + 停采集 + 注销热键 + 关提示条。
+///
+/// 「完成」失败后提示条上的出口（用户明确表示「不要了」）。托盘的「停止长截图」
+/// 也是**强制停止**路径——它必须能把卡住的会话清掉（否则僵尸会话挡住后续
+/// 截图/录屏）。
+pub fn scrollshot_force_stop(app: &AppHandle) {
+    let session = { lock_session().take() };
+    if let Some(session) = session {
+        session.stop.store(true, Ordering::SeqCst);
+    }
+    unregister_finish_hotkey(app);
+    close_scrollshot_bar(app);
+}
+
+/// 放弃长截图（前端「放弃」按钮）。
+#[tauri::command(async)]
+pub fn scrollshot_abort(app: AppHandle) -> Result<(), String> {
+    scrollshot_force_stop(&app);
+    Ok(())
 }
 
 /// 提示条 pull 通道（帧数补显）。
@@ -408,9 +518,13 @@ fn spawn_capture_thread(app: AppHandle, session: Arc<Session>) {
     std::thread::spawn(move || {
         // 首帧延迟：覆盖层 hide 是投递给主线程的异步消息，留出时间避免拍到遮罩。
         std::thread::sleep(FIRST_FRAME_DELAY);
+        // 节奏规则来自 core（产品与 eval 共用同一份实现）。
+        let pacing = pacing_params();
         let mut interval = CAPTURE_INTERVAL;
         // 上一帧的行亮度剖面——只用于判定「页面完全没动」（静止页面不该加密采集）。
         let mut last_profile: Option<Vec<f32>> = None;
+        // 停滞计数：连续「内容在动但画布没长」的帧数（链已断 → 长图被静默截断）。
+        let mut stall = 0usize;
         while !session.stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
             match hawksnap_platform_mac::windowcap::capture_global_rect(session.global) {
@@ -423,14 +537,41 @@ fn spawn_capture_thread(app: AppHandle, session: Arc<Session>) {
                         let profile = frame.row_profile();
                         let still = last_profile.as_ref().map(|p| *p == profile).unwrap_or(false);
                         last_profile = Some(profile);
+                        let height_before = session.canvas_height();
                         // 喂给流式拼接器（内部即生产同款三层匹配 `estimate_frame_shift`
                         // ——**不再单独跑一遍 1D 行谱**：1D 在准周期内容上会咬住假峰
                         // （实测真解 678px 被 524px 假峰盖过）或直接返 None → 间隔
                         // 永不调整 → 步长越滚越大 → 重叠耗尽 → 配对失配）。
                         session.push_frame(frame);
                         // 节奏自适应：取**当前帧**的测量位移（与拼接链同一个匹配器）。
-                        let shift = if still { Some(0) } else { session.measured_shift() };
-                        interval = next_interval(interval, shift, region_h);
+                        //
+                        // **测量值优先**（评审 Minor）：静止守卫只在**测不出**时兜底。
+                        // 旧写法 `if still { Some(0) } else { measured }` 会让「静止守卫」
+                        // 覆盖**真实测量**——准周期页面滚过**恰好一个周期**时行谱与上一
+                        // 帧逐字节相同 → 被判「静止」→ 位移强行归零 → 节奏退到 500ms
+                        // → 重叠被吃掉 → 配对失配。
+                        let measured = session.measured_shift();
+                        let shift = resolve_shift(measured, still);
+                        interval = pacing.next_interval(interval, shift, region_h);
+                        // 停滞检测（评审 Minor）：**内容在动**（行谱变了）但**画布没长**
+                        // （新帧没被接受 = 匹配链已断）→ 连续 N 帧即判定停滞：
+                        // 长图会被静默截断 → 必须告知用户（横幅）并停止采集。
+                        let height_after = session.canvas_height();
+                        if height_after > height_before {
+                            stall = 0;
+                        } else if !still && height_after > 0 {
+                            stall += 1;
+                        }
+                        if stall >= STALL_LIMIT {
+                            eprintln!("[hawksnap] 长截图匹配链停滞（画布停在 {height_after}px），停止采集");
+                            crate::panel::show_capture_error(
+                                &app,
+                                format!(
+                                    "长截图：匹配已停滞（页面在动但无法对齐，画布停在 {height_after}px）——已停止采集，可点「完成」保存当前长图"
+                                ),
+                            );
+                            break;
+                        }
                     }
                 }
                 Err(e) => eprintln!("[hawksnap] 长截图抓帧失败: {e}"),
@@ -487,8 +628,15 @@ fn register_finish_hotkey(app: &AppHandle) -> bool {
         let app = handle.clone();
         // 拼接是重活（秒级）→ 绝不占主线程（热键回调在主线程）。
         std::thread::spawn(move || {
+            if !scrollshot_active() {
+                // 竞态兜底：会话已被消费（热键应已注销）→ 明确告知，不静默。
+                crate::panel::show_capture_error(&app, "长截图：没有进行中的长截图".into());
+                return;
+            }
+            // 失败**已由 scrollshot_stop 自行投递**（提示条行内 + 横幅）→ 这里只记
+            // 日志，不重复弹横幅（同一错误弹两次 = 噪音）。
             if let Err(e) = scrollshot_stop(app.clone()) {
-                crate::panel::show_capture_error(&app, e);
+                eprintln!("[hawksnap] ⌘S 结束长截图失败: {e}");
             }
         });
     }) {
@@ -700,26 +848,22 @@ mod tests {
         );
     }
 
-    /// 自适应采集间隔（滞回规则，纯函数）：
-    /// - 位移 > 0.4h → 加密到 200ms（滚得快）；
-    /// - 位移 < 0.2h → 回到 500ms（滚得慢）；
-    /// - 中间区间 → 保持当前间隔（不抖动）。
+    /// 自适应采集间隔（滞回规则）：规则本体在 core
+    /// （`hawksnap_core::scrollshot::Pacing`）→ **可在 Linux 上单测**
+    /// （core 的 `next_interval_adapts_with_hysteresis`）。此处只锁定「产品侧
+    /// 用的就是 core 那份参数」。
     #[test]
-    fn next_interval_adapts_with_hysteresis() {
-        let h = 900u32;
-        // 800/900 = 0.89 > 0.4 → 加密
-        assert_eq!(next_interval(CAPTURE_INTERVAL, Some(800), h), CAPTURE_INTERVAL_FAST);
-        // 400/900 = 0.44 > 0.4 → 仍算快 → 加密
-        assert_eq!(next_interval(CAPTURE_INTERVAL, Some(400), h), CAPTURE_INTERVAL_FAST);
-        // 300/900 = 0.33 落在滞回带内 → 保持当前间隔
-        assert_eq!(next_interval(CAPTURE_INTERVAL, Some(300), h), CAPTURE_INTERVAL);
-        // 100/900 = 0.11 < 0.2 → 滚得慢 → 回到基准间隔
-        assert_eq!(next_interval(CAPTURE_INTERVAL_FAST, Some(100), h), CAPTURE_INTERVAL);
-        // 滞回带内保持加密（不来回抖动）
-        assert_eq!(next_interval(CAPTURE_INTERVAL_FAST, Some(250), h), CAPTURE_INTERVAL_FAST);
-        // 位移测不出（None）→ **加密**（不确定就拍密：拍疏了会丢掉重叠 → 断档）。
-        assert_eq!(next_interval(CAPTURE_INTERVAL_FAST, None, h), CAPTURE_INTERVAL_FAST);
-        assert_eq!(next_interval(CAPTURE_INTERVAL, None, h), CAPTURE_INTERVAL_FAST);
+    fn product_pacing_uses_core_rule_with_product_constants() {
+        let p = pacing_params();
+        assert_eq!(p.base, CAPTURE_INTERVAL);
+        assert_eq!(p.fast, CAPTURE_INTERVAL_FAST);
+        assert_eq!(p.fast_ratio, FAST_SHIFT_RATIO);
+        assert_eq!(p.slow_ratio, SLOW_SHIFT_RATIO);
+        // 冒烟：一条典型用例（滚得快 → 加密）。
+        assert_eq!(
+            p.next_interval(CAPTURE_INTERVAL, Some(800), 900),
+            CAPTURE_INTERVAL_FAST
+        );
     }
 
     /// 内存模型（M5 的量化依据）：**不留帧队列** → 帧数与内存无关 → 20000px
@@ -780,5 +924,33 @@ mod tests {
         if idle {
             assert!(!scrollshot_active());
         }
+    }
+
+    /// **顺序契约**（评审 I4 残留必修）：拼接失败**不得**消费会话、**不得**关提示条
+    /// ——否则错误回传到正在销毁的 webview（渲染进虚空）+ 会话已被消费 → 用户零反馈。
+    ///
+    /// 规则本体在 core（`hawksnap_core::scrollshot::StopOutcome`）→ **可在 Linux
+    /// 上单测**（core 的 `stitch_failure_keeps_session_and_bar`）。此处锁定
+    /// 「app crate 用的就是 core 那份枚举」。
+    #[test]
+    fn product_stop_outcome_is_the_core_contract() {
+        assert!(!StopOutcome::StitchFailed.consumes_session());
+        assert!(!StopOutcome::StitchFailed.closes_bar());
+        assert!(StopOutcome::Saved.consumes_session());
+        assert!(StopOutcome::Saved.closes_bar());
+    }
+
+    /// 失败事件载荷（前端行内错误槽）：字段名 camelCase + 会话号可辨。
+    #[test]
+    fn scrollshot_error_payload_serializes_camel_case() {
+        let s = serde_json::to_string(&ScrollshotError {
+            session: 7,
+            message: "未能识别滚动位移".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            s,
+            r#"{"session":7,"message":"未能识别滚动位移"}"#
+        );
     }
 }

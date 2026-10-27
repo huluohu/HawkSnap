@@ -78,6 +78,9 @@ const MIN_PATCH_STDDEV: f64 = 4.0;
 pub const MAX_CANVAS_BYTES: usize = 256 * 1024 * 1024;
 /// 画布的**高度上界**（像素）：兜底——防止极窄选区把字节上界换算成超高画布。
 pub const MAX_OUTPUT_HEIGHT: usize = 40_000;
+/// 画布**分块增长**的块高（行）：分配量跟随逻辑量增长，避免 `Vec` 摊还翻倍
+/// 造成的「分配上界 = 2 × 逻辑上界」（见 [`Canvas::grow_rows`]）。
+pub const CANVAS_CHUNK_ROWS: usize = 256;
 
 // ---------------------------------------------------------------------------
 // 数据结构
@@ -751,6 +754,34 @@ impl Canvas {
         self.height
     }
 
+    /// 按**固定块**（行）把画布扩到 `rows` 行。
+    ///
+    /// ## 为什么不用 `Vec::resize` 直接扩容（评审 Minor：画布上界 ≠ 分配上界）
+    ///
+    /// `Vec::resize` 走 `reserve` 的**摊还翻倍**（`cap = max(2·cap, needed)`）：
+    /// 逻辑 124MB 的画布，**分配量**可能逼近 2 倍（实测 capacity 147MB / len
+    /// 124MB）。而画布高度上界是按**逻辑字节**算的（[`MAX_CANVAS_BYTES`]）
+    /// → **上界名存实亡**：真实 RSS 可以是上界的近 2 倍。
+    ///
+    /// 改为**分块 + 精确扩容**（`reserve_exact`）：每块 [`CANVAS_CHUNK_ROWS`]
+    /// 行，分配量始终 ≈ 逻辑量（容量与长度同步），内存上界才是真的上界。
+    ///
+    /// 残余代价：连续缓冲在**重分配拷贝**的瞬间仍是「旧 + 新」并存（这是连续
+    /// 布局的固有代价；最终 PNG 物化同样是这个量级）。
+    fn grow_rows(&mut self, rows: usize, stride: usize) {
+        if stride == 0 {
+            return;
+        }
+        let cur_rows = self.px.len() / stride;
+        let mut r = cur_rows;
+        while r < rows {
+            r = (r + CANVAS_CHUNK_ROWS).min(rows);
+            // `reserve_exact`：**精确**扩容（不走摊还翻倍）→ 容量 ≈ 长度。
+            self.px.reserve_exact((r - cur_rows) * stride);
+            self.px.resize(r * stride, 0);
+        }
+    }
+
     /// 把一帧合成到画布的 `y` 偏移处。
     ///
     /// `prev_bottom` = 此前已覆盖内容的底边（`None` = 这是第一帧）。重叠区 =
@@ -767,11 +798,11 @@ impl Canvas {
             return; // 尺寸不一致的帧不参与合成
         }
         let need = (y as usize) + fh;
-        if self.px.len() < need * self.width * 4 {
-            self.px.resize(need * self.width * 4, 0);
+        let stride = self.width * 4;
+        if self.px.len() < need * stride {
+            self.grow_rows(need, stride);
             self.height = need;
         }
-        let stride = self.width * 4;
         let frame_bottom = y + fh as i32;
         let seam = prev_bottom.filter(|b| *b > y);
         match seam {
@@ -1049,6 +1080,14 @@ impl Stitcher {
         self.max_height
     }
 
+    /// **当前画布高度**（像素）——已合成进去的内容高度。
+    ///
+    /// 调用方据此判断「链是否还在长」：高度不再增长 = 新帧没被接受（匹配失败）
+    /// → 可用于**停滞检测**（评审 Minor：无停滞检测 → 长图被静默截断）。
+    pub fn canvas_height(&self) -> usize {
+        self.canvas.height()
+    }
+
     /// 最近一次**测量**到的帧间位移（当前待决帧相对上一张被接受帧的估计）。
     ///
     /// 采集节奏的自适应依据：它比 [`Stitcher::last_shift`]（上一张被接受帧的
@@ -1123,9 +1162,11 @@ pub fn stitch_with_stats(frames: &[Frame]) -> Option<(Stitched, StitchStats)> {
     for f in frames {
         st.push(f.clone());
     }
-    let used = st.frames_used();
     let truncated = st.truncated();
     let out = st.finish()?;
+    // `frames_used` 必须在 `finish()` **之后**读：`finish()` 会把最后一帧待决帧
+    // 收进链（`used += 1`）——提前读会少算一帧（评审 Minor：off by one）。
+    let used = st.frames_used();
     let stats = StitchStats {
         frames_in: frames.len(),
         frames_used: used,
@@ -1375,6 +1416,54 @@ mod tests {
         let a = page_frame(64, 64, 5, 0);
         assert_eq!(stitch(&[a]), None, "单帧无拼接内容");
     }
+
+    /// 画布**分块增长**：分配量跟随逻辑量（评审 Minor：画布上界 ≠ 分配上界）。
+    ///
+    /// `Vec::resize` 的摊还翻倍（`cap = max(2·cap, needed)`）会让**分配量**逼近
+    /// 逻辑量的 2 倍 → 按逻辑字节算的内存上界（`MAX_CANVAS_BYTES`）名存实亡。
+    /// 本例断言：画布长高之后，**容量 - 长度**的余量 ≤ 一块（而非 ~2 倍）。
+    #[test]
+    fn canvas_allocation_tracks_logical_size() {
+        let (w, h) = (64u32, 32u32);
+        let stride = w as usize * 4;
+        let mut canvas = Canvas::new(w as usize);
+        let frame = solid_frame(w, h, 200);
+        // 逐帧下移合成 → 画布一路长高（末行 = 199*10 + 32 = 2022 行）。
+        for i in 0..200i32 {
+            canvas.compose(&frame, i * 10, None);
+        }
+        let len = canvas.px.len();
+        assert_eq!(len, canvas.height() * stride, "长度 = 高度 × 行跨度");
+        let slack = canvas.px.capacity() - len;
+        assert!(
+            slack <= CANVAS_CHUNK_ROWS * stride,
+            "容量余量应 ≤ 一块（{}B），实测 {slack}B（len={len} cap={}）",
+            CANVAS_CHUNK_ROWS * stride,
+            canvas.px.capacity()
+        );
+    }
+
+    /// `frames_used` 必须在 `finish()` **之后**读：收尾时待决帧也进链（off by one）。
+    #[test]
+    fn frames_used_counts_the_final_pending_frame() {
+        let page = page_frame(120, 240, 77, 0);
+        let frames = vec![viewport(&page, 0, 100), viewport(&page, 50, 100)];
+        let mut st = Stitcher::new(120);
+        st.push(frames[0].clone());
+        st.push(frames[1].clone());
+        assert_eq!(st.frames_used(), 1, "第二帧此刻还是待决帧");
+        let out = st.finish().expect("两帧应能出图");
+        assert_eq!(
+            st.frames_used(),
+            2,
+            "finish() 把待决帧收进链 → used 变为 2（提前读会少算一帧）"
+        );
+        assert!(out.height > 0);
+        // 批量接口同口径：stats.frames_used 也必须含收尾帧。
+        let (_out, stats) = stitch_with_stats(&frames).expect("应能出图");
+        assert_eq!(stats.frames_used, 2, "stitch_with_stats 的 frames_used 不得少算");
+    }
+
 
     /// **C1 回归测试**：中途跳帧后，后续帧必须对「上一张被接受的帧」**重新估计**。
     ///

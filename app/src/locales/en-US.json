@@ -119,5 +119,6 @@
   "scrollshot.bar.frames": "{n} frames",
   "scrollshot.bar.finish": "Finish",
   "scrollshot.bar.finishOnly": "Finish (⌘S unavailable)",
-  "scrollshot.bar.hintNoHotkey": "Scroll the page… click Finish to finish"
+  "scrollshot.bar.hintNoHotkey": "Scroll the page… click Finish to finish",
+  "scrollshot.bar.abort": "Discard"
 }
