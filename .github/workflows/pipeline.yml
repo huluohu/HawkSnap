@@ -189,14 +189,15 @@ jobs:
     # "failed to decode secret key"），本 job 红 = 未签名产物绝不发布（有意为之）。
     # 注意：pubkey 已随 0.1.0 填入（8123f6c）；若 pubkey 缺失/被回退为占位，同样
     # 硬失败（无法 base64 解码）——pubkey 与 secrets 必须始终配对且先于 tag。
+    # 签名策略（1.0）：macOS dmg 为 adhoc 签名——自签证书的 CI 信任链与
+    # tauri-bundler 独立钥匙串的集成未通（run 40588810887），README 已知限制有述。
+    # 用户本地构建：scripts/sign-local.sh 重签可持久化 TCC 授权。
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       # macOS 产物用 HawkSnapCodesign 自签证书签名：TCC 授权按证书锚定，用户升级后
       # 屏幕录制/辅助功能授权持久（adhoc 签名每次构建失配）。bundler 检测到
       # APPLE_CERTIFICATE 即自动签名；secrets 未配置时仅 macOS 产物退回 adhoc（有告警）。
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
     steps:
       # fetch-depth: 0 —— 「对应源码包」（AGPL §6）用 `git archive <tag>` 生成，
       # 必须能取到 tag 对象；浅克隆（默认 depth=1）没有 tag 引用。
@@ -230,13 +231,6 @@ jobs:
       # 暂存路径 app/src-tauri/binaries/hawksnap-host-<triple> 不入库（.gitignore）。
       # （评审修复轮 P1：tauri v2 的 externalBin 是**文件名后缀**语义——
       #  bundler 找的是 binaries/hawksnap-host-<triple>，不是 binaries/<triple>/…。）
-      - name: Import and trust codesign certificate
-        run: |
-          echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > /tmp/cert.p12
-          security import /tmp/cert.p12 -k ~/Library/Keychains/login.keychain-db -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
-          openssl pkcs12 -in /tmp/cert.p12 -passin "pass:${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" -nokeys -out /tmp/cert.pem
-          sudo security add-trusted-cert -d -r trustRoot /tmp/cert.pem
-          security find-identity -v -p codesigning
       - name: "Stage native messaging host (M4 P1)"
         run: scripts/package-native-host.sh
       - name: "tauri build (macOS: app + dmg)"
