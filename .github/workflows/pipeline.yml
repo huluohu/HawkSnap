@@ -230,13 +230,6 @@ jobs:
       # 暂存路径 app/src-tauri/binaries/hawksnap-host-<triple> 不入库（.gitignore）。
       # （评审修复轮 P1：tauri v2 的 externalBin 是**文件名后缀**语义——
       #  bundler 找的是 binaries/hawksnap-host-<triple>，不是 binaries/<triple>/…。）
-            - name: Import and trust codesign certificate
-        run: |
-          echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > /tmp/cert.p12
-          security import /tmp/cert.p12 -k ~/Library/Keychains/login.keychain-db -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
-          openssl pkcs12 -in /tmp/cert.p12 -passin "pass:${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" -nokeys -out /tmp/cert.pem
-          sudo security add-trusted-cert -d -r trustRoot /tmp/cert.pem
-          security find-identity -v -p codesigning
       - name: Import and trust codesign certificate
         run: |
           echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > /tmp/cert.p12
