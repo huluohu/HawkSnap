@@ -35,5 +35,5 @@ fi
 
 SIZE_MB=$(du -m "$DMG" | cut -f1)
 echo "dmg = ${SIZE_MB}MB ($DMG)"
-echo "宿主 = $HOST_BIN（$(du -m "$HOST_BIN" | cut -f1)MB，已计入上面的 dmg）"
+echo "宿主 = ${HOST_BIN}（$(du -m "$HOST_BIN" | cut -f1)MB，已计入上面的 dmg）"
 [ "$SIZE_MB" -le 15 ] || { echo "超过 15MB 预算"; exit 1; }
