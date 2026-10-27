@@ -27,7 +27,7 @@
 //! 800 次配对匹配，覆盖固定头部/侧栏/重复表格/深色等形态。合成像素可控、
 //! 可复现、能给出**逐像素**的 ground truth（真浏览器截图做不到）。
 
-use hawksnap_core::stitch::{stitch, Frame};
+use hawksnap_core::stitch::Frame;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -56,6 +56,23 @@ struct Scene {
     layout: String,
     seed: u64,
     scroll: ScrollSpec,
+    /// "standard" = F10 计入的 20 个标准场景；"limit" = 已知局限的专项场景
+    /// （不计入成功率，只断言「无重影」——它测的是**边界**，不是合格线）。
+    #[serde(default = "default_kind")]
+    kind: String,
+    /// **中途作废帧**的下标：该帧被替换成「无特征白屏」（渲染闪烁 / 弹窗 /
+    /// 加载占位）→ 匹配失败 → 偏移链必须跳帧并**对上一张被接受的帧重新基准**
+    /// （C1 的端到端形态：若沿用旧基准，之后每帧都少一个滚动步长 → 尾部整段
+    /// 重叠 → **重影**）。`None` = 不注入（默认）。
+    ///
+    /// 这是「中段歧义/不可用帧」的真实形态：不是页面本身有洞，而是**某一帧**
+    /// 拍废了——后续帧仍与最后一张好帧有重叠，链必须能恢复。
+    #[serde(default)]
+    flash_at: Option<usize>,
+}
+
+fn default_kind() -> String {
+    "standard".into()
 }
 
 /// 滚动模型：**恒定滚动速度**（px/s）+ 产品的自适应采集间隔。
@@ -175,7 +192,7 @@ fn draw_text_row(c: &mut Canvas, y: u32, x0: u32, x1: u32, rng: &mut Rng, ink: [
 /// 段落块：若干行 + 行间距。返回结束 y。
 fn draw_paragraphs(
     c: &mut Canvas,
-    mut y: u32,
+    y: u32,
     x0: u32,
     x1: u32,
     rng: &mut Rng,
@@ -185,10 +202,29 @@ fn draw_paragraphs(
     min_lines: u32,
     max_lines: u32,
 ) -> u32 {
-    while y + line_h < c.h {
+    draw_paragraphs_until(c, y, x0, x1, rng, ink, line_h, gap, min_lines, max_lines, c.h)
+}
+
+/// 同 [`draw_paragraphs`]，但在 `limit`（画布行）处停笔（留白用）。
+fn draw_paragraphs_until(
+    c: &mut Canvas,
+    y: u32,
+    x0: u32,
+    x1: u32,
+    rng: &mut Rng,
+    ink: [u8; 3],
+    line_h: u32,
+    gap: u32,
+    min_lines: u32,
+    max_lines: u32,
+    limit: u32,
+) -> u32 {
+    let limit = limit.min(c.h);
+    let mut y = y;
+    while y + line_h < limit {
         let lines = rng.range(min_lines as u64, max_lines as u64) as u32;
         for _ in 0..lines {
-            if y + line_h >= c.h {
+            if y + line_h >= limit {
                 break;
             }
             draw_text_row(c, y, x0 + rng.range(0, 26) as u32, x1, rng, ink, line_h);
@@ -452,6 +488,27 @@ fn render_page(scene: &Scene, w: u32, h: u32) -> (Canvas, Chrome) {
                 y += 200;
             }
         }
+        // N5 回归场景：中段一大片空白（无特征）→ 跨越它的帧对匹配失败/歧义 →
+        // 偏移链必须在中途跳帧后**重新基准**（C1 的端到端形态：跳帧后若沿用
+        // 旧基准，后续每帧都少一个滚动步长 → 尾部整段重叠 → 重影）。
+        "blank-band" => {
+            // 页面**中段**留一大段空白（纯白、无任何特征，长度 ≈ 2.5 屏）→
+            // 完全落在带内的帧「无特征」→ 与邻居匹配失败 → 偏移链必须在中途
+            // 跳帧后**重新基准**（C1 的端到端形态）。
+            let band_top = h / 2;
+            draw_paragraphs_until(&mut c, y, x0, x1, &mut rng, ink, 11, 14, 3, 6, band_top);
+            let band_h = (h / 9).min(1000);
+            for yy in band_top..(band_top + band_h).min(h) {
+                for xx in x0..x1 {
+                    let i = ((yy * w + xx) * 4) as usize;
+                    c.px[i] = 255;
+                    c.px[i + 1] = 255;
+                    c.px[i + 2] = 255;
+                    c.px[i + 3] = 255;
+                }
+            }
+            draw_paragraphs(&mut c, band_top + band_h, x0, x1, &mut rng, ink, 11, 14, 3, 6);
+        }
         "mixed" | _ => {
             while y < h {
                 y = draw_paragraphs(&mut c, y, x0, x1, &mut rng, ink, 11, 14, 2, 5);
@@ -528,6 +585,10 @@ struct SceneResult {
     height: u32,
     expected_height: u32,
     align: f64,
+    /// 输入帧数 / 实际进入偏移链的帧数（后者 < 前者 = 中途跳帧 → 触发 C1 重基准）。
+    frames: (usize, usize),
+    /// 是否为 F10 计入的标准场景（false = 专项局限场景）。
+    is_standard: bool,
 }
 
 /// 内容对齐率：输出与原页面逐像素比较（跳过固定件覆盖区）。
@@ -608,7 +669,19 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
     }
     let expected_height = page_h;
 
-    match stitch(&frames) {
+    // 注入「中段作废帧」（C1 回归场景）：某一帧拍成无特征白屏 → 匹配失败 →
+    // 偏移链必须跳帧并对上一张被接受的帧**重新基准**（否则尾部整段重叠 → 重影）。
+    if let Some(k) = scene.flash_at {
+        if k < frames.len() {
+            frames[k] = Frame {
+                width: fw,
+                height: fh,
+                rgba: vec![247u8; (fw as usize) * (fh as usize) * 4],
+            };
+        }
+    }
+
+    match hawksnap_core::stitch::stitch_with_stats(&frames) {
         None => SceneResult {
             id: scene.id.clone(),
             layout: scene.layout.clone(),
@@ -617,35 +690,58 @@ fn run_scene(scene: &Scene, spec: &ScenesFile, fw: u32, fh: u32) -> SceneResult 
             height: 0,
             expected_height,
             align: 0.0,
+            frames: (frames.len(), 0),
+            is_standard: scene.kind == "standard",
         },
-        Some(out) => {
+        Some((out, stats)) => {
             let drift = (out.height as i64 - expected_height as i64).abs();
             let align = alignment(&out, &page, chrome, &offsets);
             let mut problems: Vec<String> = Vec::new();
+            let mut note = String::new();
             // F10 三项判据：无重影 / 输出 ≥20000px / 内容完整（无缺口）。
             if align < 0.95 {
                 problems.push(format!("内容错位（对齐率 {:.3}）", align));
             }
-            if out.height < min_output_height {
-                problems.push(format!("输出高度不足（{} < {}）", out.height, min_output_height));
+            if scene.kind == "limit" {
+                // 专项局限场景：只断言「无重影」（它测的是**边界**，不是合格线）。
+                // 内容被截断是**预期结果**（空白带内无任何可匹配特征 → 链无法
+                // 跨越——这是所有匹配方案共有的固有限制，ORB 亦然），故不判失败，
+                // 只在结论里如实记一句。
+                if drift > 0 {
+                    note = format!("内容截断 {}px（预期：空白带不可跨越）", drift);
+                }
+            } else {
+                if out.height < min_output_height {
+                    problems.push(format!(
+                        "输出高度不足（{} < {}）",
+                        out.height, min_output_height
+                    ));
+                }
+                // 内容完整：允许极小的漂移（1%），超出即判「有内容缺口」。
+                let drift_limit = (expected_height as f64 * 0.01).max(8.0) as i64;
+                if drift > drift_limit {
+                    problems.push(format!("内容缺口 {}px（漂移上限 {drift_limit}）", drift));
+                }
             }
-            // 内容完整：允许极小的漂移（1%），超出即判「有内容缺口」。
-            let drift_limit = (expected_height as f64 * 0.01).max(8.0) as i64;
-            if drift > drift_limit {
-                problems.push(format!("内容缺口 {}px（漂移上限 {drift_limit}）", drift));
+            if stats.truncated {
+                problems.push("触到画布内存上界被截断".into());
             }
             SceneResult {
                 id: scene.id.clone(),
                 layout: scene.layout.clone(),
                 ok: problems.is_empty(),
-                reason: if problems.is_empty() {
+                reason: if !problems.is_empty() {
+                    problems.join("；")
+                } else if note.is_empty() {
                     "OK".into()
                 } else {
-                    problems.join("；")
+                    format!("OK（{note}）")
                 },
                 height: out.height,
                 expected_height,
                 align,
+                frames: (stats.frames_in, stats.frames_used),
+                is_standard: scene.kind == "standard",
             }
         }
     }
@@ -670,26 +766,30 @@ fn main() {
     for scene in &spec.scenes {
         let r = run_scene(scene, &spec, spec.frame_width, spec.frame_height);
         println!(
-            "[scrollshot-eval] {:<16} {:<16} {:>8} {:>9} {:>8.3}  {}",
-            r.id, r.layout, r.height, r.expected_height, r.align, r.reason
+            "[scrollshot-eval] {:<16} {:<16} {:>8} {:>9} {:>8.3}  {:>3}/{:<3}帧  {}",
+            r.id, r.layout, r.height, r.expected_height, r.align,
+            r.frames.1, r.frames.0, r.reason
         );
         results.push(r);
     }
 
-    let total = results.len();
-    let passed = results.iter().filter(|r| r.ok).count();
+    let standard: Vec<&SceneResult> = results.iter().filter(|r| r.is_standard).collect();
+    let limit: Vec<&SceneResult> = results.iter().filter(|r| !r.is_standard).collect();
+    let total = standard.len();
+    let passed = standard.iter().filter(|r| r.ok).count();
     // F10 字面判据：无重影（对齐率 ≥0.95）且输出 ≥20000px。
-    let no_ghost = results.iter().filter(|r| r.align >= 0.95).count();
-    let long_ok = results
+    let no_ghost = standard.iter().filter(|r| r.align >= 0.95).count();
+    let long_ok = standard
         .iter()
         .filter(|r| r.height >= spec.min_output_height)
         .count();
-    let f10_ok = results
+    let f10_ok = standard
         .iter()
         .filter(|r| r.align >= 0.95 && r.height >= spec.min_output_height)
         .count();
     let rate = passed as f64 / total.max(1) as f64;
-    let heights: Vec<u32> = results.iter().map(|r| r.height).collect();
+    // 高度统计只看标准场景（专项局限场景按设计会被截断）。
+    let heights: Vec<u32> = standard.iter().map(|r| r.height).collect();
     let min_h = heights.iter().copied().min().unwrap_or(0);
     let max_h = heights.iter().copied().max().unwrap_or(0);
 
@@ -697,11 +797,23 @@ fn main() {
     println!("[scrollshot-eval] 成功率 {passed}/{total} = {:.1}%（严格判据：无重影 + 输出≥{}px + 无内容缺口；门槛 ≥90%）", rate * 100.0, spec.min_output_height);
     println!("[scrollshot-eval] F10 字面判据（无重影 {no_ghost}/{total}，输出≥{}px {long_ok}/{total}）：{f10_ok}/{total} = {:.1}%", spec.min_output_height, f10_ok as f64 / total.max(1) as f64 * 100.0);
     println!("[scrollshot-eval] 输出高度：最小 {min_h}px · 最大 {max_h}px");
-    println!("[scrollshot-eval] 逐场景：");
-    for r in &results {
+    if !limit.is_empty() {
         println!(
-            "  {:<16} {:<16} {:>8}px  对齐 {:.3}  {}",
-            r.id, r.layout, r.height, r.align, r.reason
+            "[scrollshot-eval] 专项局限场景 {} 个（不计入成功率，只断言无重影）：",
+            limit.len()
+        );
+        for r in &limit {
+            println!(
+                "  {:<16} {:<16} {:>8}px  对齐 {:.3}  用帧 {}/{}  {}",
+                r.id, r.layout, r.height, r.align, r.frames.1, r.frames.0, r.reason
+            );
+        }
+    }
+    println!("[scrollshot-eval] 逐场景：");
+    for r in &standard {
+        println!(
+            "  {:<16} {:<16} {:>8}px  对齐 {:.3}  用帧 {}/{}  {}",
+            r.id, r.layout, r.height, r.align, r.frames.1, r.frames.0, r.reason
         );
     }
 
