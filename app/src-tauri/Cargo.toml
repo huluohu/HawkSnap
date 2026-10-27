@@ -4,9 +4,22 @@ version = "0.2.0"
 description = "HawkSnap — 像鹰一样准，一按就截"
 authors = ["guxiaolong"]
 edition.workspace = true
+# Tauri CLI 的主二进制解析：包内存在多个 bin 目标时（主程序 + 探针），CLI 按
+# default-run 定位「主程序」——缺失即报 "failed to find main binary" 且**在 cargo
+# 运行前**中止（tauri build / tauri dev / CI size+release 三平台全断）。
+# 显式指定 → 确定性恢复（M3 N4 评审修复）。
+default-run = "hawksnap"
+# bin 目标全部显式声明（src/main.rs 主程序 + 探针）——避免 src/bin/ 下的探针被
+# 自动发现成第二个「主程序候选」，也便于给探针挂 required-features。
+autobins = false
 
 [lints]
 workspace = true
+
+# 探针等开发期工具的 feature 门（不进生产构建）：`probe-util` 开启后才编译
+# keycast-focus-probe 探针 bin（及其 #[ignore] 集成测试）。
+[features]
+probe-util = []
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -72,3 +85,17 @@ block2 = "0.6"
 # 迭代；两 crate 均已在依赖树（tauri/wry），大版本与 Cargo.lock 一致，不引入新解析。
 core-graphics = "0.25"
 core-foundation = "0.10"
+
+# —— bin 目标（显式声明，autobins=false）——
+# 主程序：tauri CLI 的主二进制（default-run 亦指向它）。
+[[bin]]
+name = "hawksnap"
+path = "src/main.rs"
+
+# N4 keycast 焦点实证探针（评审修复 Important 的证据载体）：macOS NSWindow 焦点
+# 语义探针——仅在 `--features probe-util` 时编译，生产构建不含（且不参与主程序
+# 解析：default-run 已定）。
+[[bin]]
+name = "keycast-focus-probe"
+path = "src/bin/keycast-focus-probe.rs"
+required-features = ["probe-util"]

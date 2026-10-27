@@ -13,7 +13,10 @@
 //! focusable 覆写它），与「本进程能否被激活」无关——未打包的 CLI 探针的激活受
 //! 系统限制，故不能靠观测 is_focused 判定。
 //!
-//! 运行：`cargo test -p hawksnap --test real_keycast_focus -- --ignored`
+//! 运行（探针 bin 挂 `required-features = ["probe-util"]`，不进生产构建）：
+//! `cargo test -p hawksnap --features probe-util --test real_keycast_focus -- --ignored`
+//! （无该 feature 时本文件整体不编译——`CARGO_BIN_EXE_keycast-focus-probe` 未定义）。
+#![cfg(feature = "probe-util")]
 
 #[test]
 #[ignore = "需要 macOS GUI 环境（真实 NSWindow + 事件循环）；-- --ignored 运行（子进程建窗实测）"]
