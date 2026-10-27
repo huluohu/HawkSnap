@@ -116,5 +116,8 @@
   "banner.recordError": "录屏失败：{message}",
   "scrollshot.hint": "拖选要长截图的区域",
   "scrollshot.bar.hint": "滚动页面…完成按 ⌘S",
-  "scrollshot.bar.frames": "{n} 帧"
+  "scrollshot.bar.frames": "{n} 帧",
+  "scrollshot.bar.finish": "完成",
+  "scrollshot.bar.finishOnly": "完成（⌘S 不可用）",
+  "scrollshot.bar.hintNoHotkey": "滚动页面…完成后点「完成」"
 }

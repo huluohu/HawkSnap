@@ -116,5 +116,8 @@
   "banner.recordError": "Recording failed: {message}",
   "scrollshot.hint": "Drag to select the area for the long screenshot",
   "scrollshot.bar.hint": "Scroll the page… press ⌘S to finish",
-  "scrollshot.bar.frames": "{n} frames"
+  "scrollshot.bar.frames": "{n} frames",
+  "scrollshot.bar.finish": "Finish",
+  "scrollshot.bar.finishOnly": "Finish (⌘S unavailable)",
+  "scrollshot.bar.hintNoHotkey": "Scroll the page… click Finish to finish"
 }

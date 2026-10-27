@@ -70,6 +70,15 @@ const REFINE_GAIN: f64 = 0.6;
 /// patch 的最小标准差（亮度单位）：低于此值 = 无纹理 → 相关度无意义。
 const MIN_PATCH_STDDEV: f64 = 4.0;
 
+/// 画布（= 最终产物）的**字节上界**（G2：内存绝不无界增长）。
+///
+/// 流式拼接后内存不再随帧数增长，但画布本身随输出高度线性增长——必须封顶。
+/// 256MB 的含义：1600px 宽的选区可产出 40000px 长图（128MB @20000px）；
+/// 3024px 宽（Retina 全屏宽）可产出 22172px——**均 ≥ 20000px 验收目标**。
+pub const MAX_CANVAS_BYTES: usize = 256 * 1024 * 1024;
+/// 画布的**高度上界**（像素）：兜底——防止极窄选区把字节上界换算成超高画布。
+pub const MAX_OUTPUT_HEIGHT: usize = 40_000;
+
 // ---------------------------------------------------------------------------
 // 数据结构
 // ---------------------------------------------------------------------------
@@ -487,7 +496,7 @@ fn luma(rgb: &[u8]) -> f64 {
     0.299 * rgb[0] as f64 + 0.587 * rgb[1] as f64 + 0.114 * rgb[2] as f64
 }
 
-/// 2D 精修：在 1D 估计的 ±2 px 邻域内，用 patch 的 SSD 选出更精确的位移。
+/// 2D 精修：在 1D 估计的 **±6 px** 邻域内，用 patch 的 SSD 选出更精确的位移。
 ///
 /// 1D 剖面在**行方向聚合**了整幅列的信息，理论上已是整数像素级精确；2D 精修
 /// 是**验证 + 兜底**：它在真实二维像素上比较，选出残差最小的位移（对 1D 因聚合
@@ -635,25 +644,26 @@ pub fn estimate_frame_shift(prev: &Frame, next: &Frame) -> Option<i32> {
     let mut sorted: Vec<i32> = votes.iter().map(|(d, _)| *d).collect();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2];
-    // 一致性：过半列块落在中位数 ±2 px 内，否则判为不可靠。
+    // 一致性：**严格多数**列块落在中位数 ±2 px 内，否则判为不可靠。
+    // （50/50 平票不算多数——平票意味着两派证据相当，任一选择都可能错。）
     //
     // 例外：若某个列块的二维相关**接近 1**（≥ 0.97 = 纹理区几乎逐像素吻合），
     // 则该块的位移有极强证据 → 直接采信它（列块间不一致往往源于某几块的 patch
     // 落在纯色区、其二维分虚高/虚低，而非真解有争议）。
     let agree = votes.iter().filter(|(d, _)| (*d - median).abs() <= 2).count();
-    if agree * 2 < votes.len() {
+    if agree * 2 <= votes.len() {
         let &(d_strong, _s_strong) = votes
             .iter()
             .filter(|(_, s)| *s >= S2_STRONG)
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
         return Some(refine_2d(prev, next, d_strong).unwrap_or(d_strong));
     }
-    // 2D 精修（±2 px 内的残差最小者）。
+    // 2D 精修（±6 px 内的残差最小者）。
     Some(refine_2d(prev, next, median).unwrap_or(median))
 }
 
 // ---------------------------------------------------------------------------
-// 拼接
+// 拼接：偏移链 + 画布合成
 // ---------------------------------------------------------------------------
 
 /// 中值滤波（**离群剔除语义**）：逐对位移与**邻域中位数**比较，明显离群者标脏。
@@ -665,7 +675,7 @@ pub fn estimate_frame_shift(prev: &Frame, next: &Frame) -> Option<i32> {
 /// 故本实现只**标记离群对**（`|d - 邻域中位数| > max(32, 2×邻域中位数)`），
 /// 由调用方跳过该帧（而不是塞进一个错位移）——错位移会让整图错位，跳过一帧
 /// 只是丢一段内容。
-fn outlier_flags(est: &[Option<i32>]) -> Vec<bool> {
+pub fn outlier_flags(est: &[Option<i32>]) -> Vec<bool> {
     let mut out = vec![false; est.len()];
     for i in 0..est.len() {
         let Some(d) = est[i] else { continue };
@@ -693,164 +703,139 @@ fn outlier_flags(est: &[Option<i32>]) -> Vec<bool> {
     out
 }
 
-/// 拼接一组帧为一张长图。
+/// 离群判定（3 抽头中值语义）：位移 `d` 与邻域中位数比较，明显离群者标脏。
 ///
-/// 语义：
-/// - 逐对估计相邻帧的纵向位移 → **偏移链**（`y[i] = y[i-1] + d`）；
-/// - 位移序列过 **3 抽头中值滤波**（去单对尖峰）；
-/// - 重叠区末端做 **BLEND_BAND 像素线性 alpha 融合**（抑制 1px 错位重影）；
-/// - 画布高度 = 内容总跨度，宽度 = 首帧宽度。
-///
-/// 失败（`None`）：**没有任何一对帧匹配成功**（纯色画面 / 重复内容歧义 /
-/// 重叠不足）——宁可不产出，绝不产出错拼的重影图。单帧输入同样返回 `None`
-/// （无可拼接内容，由调用方给出「未滚动」类提示）。
-pub fn stitch(frames: &[Frame]) -> Option<Stitched> {
-    if frames.len() < 2 {
-        return None;
+/// 邻域 = `{上一对的估计, d, 下一对的估计}`；邻域不足 3 个时**不判**
+/// （首/尾对无从判定——与批处理版 `outlier_flags` 同口径）。
+fn is_outlier(d: i32, prev: Option<i32>, next: Option<i32>) -> bool {
+    let mut neigh: Vec<i32> = Vec::with_capacity(3);
+    if let Some(p) = prev {
+        neigh.push(p);
     }
-    let w = frames[0].width as usize;
-    let h = frames[0].height as usize;
-    if w == 0 || h == 0 {
-        return None;
+    neigh.push(d);
+    if let Some(n) = next {
+        neigh.push(n);
     }
-    // —— 第一遍：逐对估计（相邻两帧）——
-    let mut est: Vec<Option<i32>> = vec![None; frames.len()];
-    for i in 1..frames.len() {
-        if frames[i].width != frames[0].width || frames[i].height != frames[0].height {
-            continue; // 尺寸不一致的帧无法参与拼接
-        }
-        est[i] = estimate_frame_shift(&frames[i - 1], &frames[i]);
+    if neigh.len() < 3 {
+        return false;
     }
-    // —— 中值滤波：标出离群对（跳帧而非塞错位移）——
-    let rejected = outlier_flags(&est);
-    // —— 偏移链 ——
-    // 中间帧不可用（匹配失败 / 离群）时**跳过该帧**，并让下一帧与「上一张被接受
-    // 的帧」比对——这样单帧失败不必截断整条链（代价：滚动超过一屏时该段内容
-    // 丢失，链自然终止）。
-    let mut chain: Vec<(usize, i32)> = vec![(0, 0)]; // (帧下标, 画布 y 偏移)
-    let mut shifts: Vec<i32> = Vec::new(); // 相邻被接受帧之间的位移
-    let mut last_idx = 0usize;
-    let mut last_y = 0i32;
-    for i in 1..frames.len() {
-        let direct = match est[i] {
-            Some(d) if !rejected[i] => Some(d),
-            _ => None,
-        };
-        // 直邻估计不可用 → 试「跨过被跳过的帧」再估一次（内容可能仍在重叠区）。
-        let d = match direct {
-            Some(d) => Some(d),
-            None => {
-                if last_idx + 1 == i {
-                    None // 就是相邻帧且估不出来 → 确实无重叠
-                } else {
-                    estimate_frame_shift(&frames[last_idx], &frames[i])
-                }
-            }
-        };
-        let Some(d) = d else { continue };
-        let d = d.max(0); // 只支持向下滚动（内容上移）
-        shifts.push(d);
-        last_y += d;
-        chain.push((i, last_y));
-        last_idx = i;
-    }
-    if shifts.is_empty() {
-        return None; // 无任何可靠匹配 → 拒绝拼接
-    }
-    // —— 偏移链（滤波后的位移重新累加）——
-    let mut offsets: Vec<(usize, i32)> = Vec::with_capacity(chain.len());
-    let mut y = 0i32;
-    offsets.push((chain[0].0, 0));
-    for (k, (idx, _)) in chain.iter().enumerate().skip(1) {
-        y += shifts[k - 1];
-        offsets.push((*idx, y));
-    }
-    debug_assert_eq!(offsets.len(), shifts.len() + 1);
-    // —— 画布：覆盖全部帧的纵向并集 ——
-    let origin = offsets.iter().map(|(_, y)| *y).min().unwrap_or(0);
-    let bottom = offsets
-        .iter()
-        .map(|(_, y)| y + h as i32)
-        .max()
-        .unwrap_or(h as i32);
-    let canvas_h = (bottom - origin).max(1) as usize;
-    let mut canvas = vec![0u8; w * canvas_h * 4];
-    // —— 合成：逐帧写入，重叠区末端做线性 alpha 融合 ——
-    let mut covered_top = offsets[0].1;
-    let mut covered_bottom = offsets[0].1 + h as i32;
-    copy_rows(
-        &mut canvas,
-        w,
-        canvas_h,
-        origin,
-        &frames[offsets[0].0],
-        offsets[0].1,
-        0,
-        h as i32,
-    );
-    for (idx, fy) in offsets.iter().skip(1).copied() {
-        let frame = &frames[idx];
-        let frame_top = fy;
-        let frame_bottom = fy + h as i32;
-        // 接缝位置：向下滚动 → 上一内容的底边；向上 → 顶边（本实现只向下）。
-        let seam = covered_bottom;
-        let band_lo = (seam - BLEND_BAND).max(frame_top);
-        let band_hi = seam.min(frame_bottom);
-        if band_hi > band_lo {
-            let n = band_hi - band_lo;
-            for row in band_lo..band_hi {
-                let alpha = (row - band_lo + 1) as f32 / n as f32;
-                blend_row(
-                    &mut canvas,
-                    w,
-                    canvas_h,
-                    origin,
-                    row,
-                    frame,
-                    (row - frame_top) as usize,
-                    alpha,
-                );
-            }
-        }
-        // 新内容区（接缝之下）直接写入。
-        let copy_from = band_hi.max(frame_top);
-        if frame_bottom > copy_from {
-            copy_rows(
-                &mut canvas,
-                w,
-                canvas_h,
-                origin,
-                frame,
-                frame_top,
-                (copy_from - frame_top) as usize,
-                (frame_bottom - copy_from) as i32,
-            );
-        }
-        covered_top = covered_top.min(frame_top);
-        covered_bottom = covered_bottom.max(frame_bottom);
-    }
-    Some(Stitched {
-        width: w as u32,
-        height: canvas_h as u32,
-        rgba: canvas,
-    })
+    neigh.sort_unstable();
+    let local = neigh[neigh.len() / 2];
+    (d - local).abs() > 32.max(2 * local.abs())
 }
 
-/// 把帧的 `count` 行（从帧内第 `src_row` 起）复制到画布（帧顶落在画布 `frame_top`）。
+/// 纵向可增长的画布（长图合成目标）。
+///
+/// 逐帧 `compose` 进来；重叠区末端做线性 alpha 融合（抑制 1px 错位重影）。
+/// 画布高度随内容增长（只向下滚动 → 顶边固定为 0）。
+pub struct Canvas {
+    width: usize,
+    height: usize,
+    px: Vec<u8>,
+}
+
+impl Default for Canvas {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl Canvas {
+    /// 新建空画布（宽度 = 首帧宽度）。
+    pub fn new(width: usize) -> Self {
+        Self { width, height: 0, px: Vec::new() }
+    }
+
+    /// 当前画布高度（像素）。
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// 把一帧合成到画布的 `y` 偏移处。
+    ///
+    /// `prev_bottom` = 此前已覆盖内容的底边（`None` = 这是第一帧）。重叠区 =
+    /// `[y, prev_bottom)`；其末端 `BLEND_BAND` 像素做线性 alpha 融合，重叠区
+    /// 其余部分**保留旧内容**（不覆盖）——融合带以上是「两帧都覆盖」的老内容，
+    /// 以下是本帧的新内容。
+    pub fn compose(&mut self, frame: &Frame, y: i32, prev_bottom: Option<i32>) {
+        if y < 0 {
+            return; // 只支持向下滚动
+        }
+        let fw = frame.width as usize;
+        let fh = frame.height as usize;
+        if fw != self.width || fh == 0 {
+            return; // 尺寸不一致的帧不参与合成
+        }
+        let need = (y as usize) + fh;
+        if self.px.len() < need * self.width * 4 {
+            self.px.resize(need * self.width * 4, 0);
+            self.height = need;
+        }
+        let stride = self.width * 4;
+        let frame_bottom = y + fh as i32;
+        let seam = prev_bottom.filter(|b| *b > y);
+        match seam {
+            None => {
+                copy_rows(&mut self.px, stride, self.height, frame, y, 0, fh as i32);
+            }
+            Some(b) => {
+                let band_lo = (b - BLEND_BAND).max(y);
+                let band_hi = b.min(frame_bottom);
+                if band_hi > band_lo {
+                    let n = band_hi - band_lo;
+                    for row in band_lo..band_hi {
+                        let alpha = (row - band_lo + 1) as f32 / n as f32;
+                        blend_row(
+                            &mut self.px,
+                            stride,
+                            self.height,
+                            frame,
+                            row,
+                            (row - y) as usize,
+                            alpha,
+                        );
+                    }
+                }
+                // 接缝之下 = 本帧的新内容 → 直接写入。
+                let copy_from = band_hi.max(y);
+                if frame_bottom > copy_from {
+                    copy_rows(
+                        &mut self.px,
+                        stride,
+                        self.height,
+                        frame,
+                        y,
+                        (copy_from - y) as usize,
+                        frame_bottom - copy_from,
+                    );
+                }
+            }
+        }
+    }
+
+    /// 画布 → 拼接产物。
+    pub fn into_stitched(self) -> Stitched {
+        Stitched {
+            width: self.width as u32,
+            height: self.height as u32,
+            rgba: self.px,
+        }
+    }
+}
+
+/// 把帧的 `count` 行（从帧内第 `src_row` 起）复制到画布（帧顶落在画布 `y`）。
 #[allow(clippy::too_many_arguments)]
 fn copy_rows(
     canvas: &mut [u8],
-    w: usize,
+    stride: usize,
     canvas_h: usize,
-    origin: i32,
     frame: &Frame,
-    frame_top: i32,
+    y: i32,
     src_row: usize,
     count: i32,
 ) {
-    let stride = w * 4;
     for i in 0..count.max(0) as usize {
-        let dst = (origin + frame_top + src_row as i32 + i as i32) as usize;
+        let dst = y as usize + src_row + i;
         if dst >= canvas_h {
             break;
         }
@@ -867,16 +852,17 @@ fn copy_rows(
 #[allow(clippy::too_many_arguments)]
 fn blend_row(
     canvas: &mut [u8],
-    w: usize,
+    stride: usize,
     canvas_h: usize,
-    origin: i32,
-    row: i32,
     frame: &Frame,
+    row: i32,
     src_row: usize,
     alpha: f32,
 ) {
-    let stride = w * 4;
-    let dst = (origin + row) as usize;
+    if row < 0 {
+        return;
+    }
+    let dst = row as usize;
     if dst >= canvas_h {
         return;
     }
@@ -890,6 +876,282 @@ fn blend_row(
         let new = frame.rgba[s + i] as f32;
         canvas[d + i] = (old + (new - old) * alpha).round().clamp(0.0, 255.0) as u8;
     }
+}
+
+/// **流式拼接器**：逐帧喂入（边采集边合成），内部维护偏移链与画布。
+///
+/// ## 为什么是流式（内存，M5 评审必修）
+///
+/// 批处理方案必须把整批帧**同时**留在内存里才能建链：原始 RGBA（1600×1200 =
+/// 7.7MB/帧）在 384MB 预算下只能存 8 帧 → 每帧滚动步长 ~280px → **8 帧到不了
+/// 20000px** 的验收目标。即便改成 PNG 压缩（页面正文 ~4.3x、Adaptive 滤波
+/// ~4.4x）也只能存 37~38 帧 → 同样到不了 20000px。
+///
+/// 流式方案**不留帧队列**：每帧采集后立即参与匹配与合成，随即释放。内存只剩
+/// 「画布（= 最终产物）+ 2 帧（上一张被接受的帧 + 待决帧）」→ **20000px 可达**
+/// 且帧数无上限。
+///
+/// ## 判定延迟一拍
+///
+/// 离群判定需要「下一对的估计」作邻域，故每帧**延迟一拍**再处置（待决帧挂在
+/// `pending`）。这与批处理版语义一致（批处理版对第 i 对用 `est[i-1]/est[i]/
+/// est[i+1]` 三元组）。
+///
+/// ## 基准一致性（C1，评审必修）
+///
+/// 待决帧若被判不可用（估不出 / 离群）→ 被**跳过**，此时新帧的位移**必须**
+/// 相对「上一张**被接受**的帧」**重新估计**（`last`）——直接沿用「待决帧 → 新帧」
+/// 的直接估计，其基准是那个**被跳过的**帧，会让之后每一帧都少一个滚动步长 →
+/// 尾部整段重叠 → **重影**（F10 禁止）。
+///
+/// 位移估计器（生产用 [`estimate_frame_shift`]；测试可注入可控实现）。
+type ShiftEstimator = Box<dyn Fn(&Frame, &Frame) -> Option<i32> + Send + Sync>;
+
+pub struct Stitcher {
+    width: usize,
+    canvas: Canvas,
+    /// 画布高度上界（像素）——**内存上界**（G2）。超过即停止接受新帧。
+    max_height: usize,
+    /// 因触到画布上界而**截断**（true = 长图未覆盖到底）。
+    truncated: bool,
+    /// 上一张**被接受**的帧及其画布 y（跳帧后重新估计的基准）。
+    last: Option<(Frame, i32)>,
+    /// 接受 `last` 时用的位移估计（离群判定的邻域）。
+    last_est: Option<i32>,
+    /// 待决帧 + 它相对基准的位移估计（等下一帧的估计来做离群判定）。
+    pending: Option<(Frame, Option<i32>)>,
+    /// 已覆盖内容的底边（接缝融合用）。
+    bottom: i32,
+    /// 进入偏移链的帧数。
+    used: usize,
+    /// 每个被接受帧的画布 y（诊断/契约测试用：验证跳帧后的偏移基准）。
+    positions: Vec<i32>,
+    /// 位移估计器（生产：`estimate_frame_shift`；测试：注入可控实现）。
+    estimate: ShiftEstimator,
+}
+
+impl Stitcher {
+    /// 生产用（估计器 = 三层匹配 `estimate_frame_shift`）。
+    pub fn new(width: usize) -> Self {
+        Self::with_estimator(width, estimate_frame_shift)
+    }
+
+    /// 注入估计器（测试用：把位移估计替换成可控实现，锁定基准契约）。
+    pub fn with_estimator(
+        width: usize,
+        f: impl Fn(&Frame, &Frame) -> Option<i32> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            width,
+            canvas: Canvas::new(width),
+            max_height: default_max_height(width),
+            truncated: false,
+            last: None,
+            last_est: None,
+            pending: None,
+            bottom: 0,
+            used: 0,
+            positions: Vec::new(),
+            estimate: Box::new(f),
+        }
+    }
+
+    /// 设置画布高度上界（像素）——**内存上界**（G2）。
+    ///
+    /// 默认 = [`default_max_height`]（字节上界 [`MAX_CANVAS_BYTES`] 与高度上界
+    /// [`MAX_OUTPUT_HEIGHT`] 取小）。测试可调小以验证截断行为。
+    pub fn with_max_height(mut self, max_height: usize) -> Self {
+        self.max_height = max_height.max(1);
+        self
+    }
+
+    /// 喂入一帧。返回 `true` = 该帧被接受并合成进画布。
+    pub fn push(&mut self, frame: Frame) -> bool {
+        if frame.width as usize != self.width || frame.height == 0 {
+            return false; // 尺寸不一致 → 不参与拼接
+        }
+        if self.last.is_none() {
+            // 首帧：画布基准（y=0）。
+            if !self.accept(&frame, 0) {
+                return false;
+            }
+            self.last = Some((frame, 0));
+            self.last_est = None;
+            return true;
+        }
+        let Some((pend_frame, pend_est)) = self.pending.take() else {
+            // 第二帧：先估（待决），处置推迟到下一帧（离群判定需要右邻域）。
+            let est = (self.estimate)(&self.last.as_ref().unwrap().0, &frame);
+            self.pending = Some((frame, est));
+            return false;
+        };
+        // 待决帧 vs 新帧的直接估计（离群判定的右邻域）。
+        let est_next = (self.estimate)(&pend_frame, &frame);
+        let rejected = match pend_est {
+            Some(d) => is_outlier(d, self.last_est, est_next),
+            None => true, // 估不出 → 该帧不可用
+        };
+        if rejected {
+            // 待决帧被跳过 → 新帧必须相对「上一张被接受的帧」**重新估计**（C1）。
+            let est_new = match &self.last {
+                Some((bf, _)) => (self.estimate)(bf, &frame),
+                None => None,
+            };
+            self.pending = Some((frame, est_new));
+            return false;
+        }
+        // 待决帧被接受：y = 基准 y + 位移。
+        let d = pend_est.unwrap_or(0);
+        let base_y = self.last.as_ref().map(|(_, y)| *y).unwrap_or(0);
+        let y = base_y + d;
+        if !self.accept(&pend_frame, y) {
+            // 触到画布上界 → 截断（内存有界，G2）。后续帧一律不再接受。
+            self.pending = Some((frame, est_next));
+            return false;
+        }
+        self.last = Some((pend_frame, y));
+        self.last_est = Some(d);
+        self.pending = Some((frame, est_next));
+        true
+    }
+
+    /// 收尾：处置最后一帧（无下一帧 → 不做离群判定）并产出长图。
+    ///
+    /// 少于两帧进入链 → `None`（无可拼接内容）。取走画布（`&mut self` 借用，
+    /// 便于调用方在收尾后仍可读诊断信息，如 `positions()`）。
+    pub fn finish(&mut self) -> Option<Stitched> {
+        if let Some((frame, Some(d))) = self.pending.take() {
+            let base_y = self.last.as_ref().map(|(_, y)| *y).unwrap_or(0);
+            let y = base_y + d;
+            // 触到画布上界 → 截断（该帧不进画布）。
+            let _ = self.accept(&frame, y);
+        }
+        if self.used < 2 {
+            return None;
+        }
+        Some(std::mem::take(&mut self.canvas).into_stitched())
+    }
+
+    /// 已进入偏移链的帧数（诊断用：< 喂入帧数 = 中途有帧被跳过）。
+    pub fn frames_used(&self) -> usize {
+        self.used
+    }
+
+    /// 因触到画布高度上界而**截断**（true = 长图没到底，内存已达上界）。
+    ///
+    /// 调用方据此停止采集并告知用户（而不是静默丢内容）。
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// 画布高度上界（像素）——本会话可产出的最大长图高度。
+    pub fn max_height(&self) -> usize {
+        self.max_height
+    }
+
+    /// 最近一次**测量**到的帧间位移（当前待决帧相对上一张被接受帧的估计）。
+    ///
+    /// 采集节奏的自适应依据：它比 [`Stitcher::last_shift`]（上一张被接受帧的
+    /// 位移）**新鲜**——后者滞后一拍，且在匹配失败时会停在旧值上（拿旧位移去
+    /// 决定下一拍间隔 → 越滚越快 → 重叠耗尽 → 配对失配）。
+    ///
+    /// `None` = 这次没测出位移（无重叠 / 歧义 / 无特征）——调用方应按「不确定
+    /// → 拍密一点」处理（宁可多拍几帧，也不要丢掉重叠）。
+    pub fn measured_shift(&self) -> Option<i32> {
+        self.pending.as_ref().and_then(|(_, e)| *e)
+    }
+
+    /// 每个被接受帧的画布 y（契约测试用：验证跳帧后的偏移基准是否正确）。
+    pub fn positions(&self) -> &[i32] {
+        &self.positions
+    }
+
+    /// 最近一次用于接受帧的位移估计（采集节奏的自适应依据）。
+    pub fn last_shift(&self) -> Option<i32> {
+        self.last_est
+    }
+
+    /// 接受一帧：合成进画布 + 记录位置 + 推进「已覆盖内容底边」。
+    ///
+    /// 返回 `false` = 触到画布高度上界 → 该帧**不**接受（内存有界，G2），
+    /// 拼接器转入「截断」状态。
+    fn accept(&mut self, frame: &Frame, y: i32) -> bool {
+        let fh = frame.height as i32;
+        if (y + fh) as usize > self.max_height {
+            self.truncated = true;
+            return false;
+        }
+        self.canvas.compose(frame, y, if self.used == 0 { None } else { Some(self.bottom) });
+        self.bottom = self.bottom.max(y + fh);
+        self.positions.push(y);
+        self.used += 1;
+        true
+    }
+}
+
+/// 画布高度上界的默认值：字节上界 [`MAX_CANVAS_BYTES`] 与高度上界
+/// [`MAX_OUTPUT_HEIGHT`] 取小（宽 × 高 × 4 字节 ≤ 字节上界）。
+pub fn default_max_height(width: usize) -> usize {
+    let by_bytes = if width == 0 {
+        MAX_OUTPUT_HEIGHT
+    } else {
+        MAX_CANVAS_BYTES / (width * 4).max(1)
+    };
+    by_bytes.clamp(1, MAX_OUTPUT_HEIGHT)
+}
+
+/// 拼接统计（供 eval / 诊断观测「跳帧」是否真的发生）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StitchStats {
+    /// 输入帧数。
+    pub frames_in: usize,
+    /// 实际进入偏移链的帧数（< 输入 → 中途有帧被跳过/判离群）。
+    pub frames_used: usize,
+    /// 输出高度（像素）。
+    pub height: u32,
+    /// 因触到画布上界而截断（true = 长图未覆盖到底）。
+    pub truncated: bool,
+}
+
+/// 拼接一组帧为一张长图 + 统计（见 [`StitchStats`]）。
+pub fn stitch_with_stats(frames: &[Frame]) -> Option<(Stitched, StitchStats)> {
+    let w = frames.first()?.width as usize;
+    if w == 0 {
+        return None;
+    }
+    let mut st = Stitcher::new(w);
+    for f in frames {
+        st.push(f.clone());
+    }
+    let used = st.frames_used();
+    let truncated = st.truncated();
+    let out = st.finish()?;
+    let stats = StitchStats {
+        frames_in: frames.len(),
+        frames_used: used,
+        height: out.height,
+        truncated,
+    };
+    Some((out, stats))
+}
+
+/// 拼接一组帧为一张长图（便捷包装：帧已在内存里时用）。
+///
+/// 语义与 [`Stitcher`] 一致（逐帧流式匹配 + 合成）；本函数只是把整批帧依次喂进
+/// 流式拼接器。生产路径（边采集边合成）直接用 [`Stitcher`]——帧不必同时驻留内存。
+///
+/// 失败（`None`）：进入链的帧少于 2 帧（纯色画面 / 重复内容歧义 / 重叠不足）
+/// ——宁可不产出，绝不产出错拼的重影图。
+pub fn stitch(frames: &[Frame]) -> Option<Stitched> {
+    let w = frames.first()?.width as usize;
+    if w == 0 {
+        return None;
+    }
+    let mut st = Stitcher::new(w);
+    for f in frames {
+        st.push(f.clone());
+    }
+    st.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,10 +1376,147 @@ mod tests {
         assert_eq!(stitch(&[a]), None, "单帧无拼接内容");
     }
 
+    /// **C1 回归测试**：中途跳帧后，后续帧必须对「上一张被接受的帧」**重新估计**。
+    ///
+    /// 复现的缺陷：直接估计（帧 i-1 → 帧 i）的基准是帧 i-1；若帧 i-1 被跳过
+    /// （匹配失败 / 判离群），沿用直接估计会让之后**每一帧都少一个滚动步长**
+    /// → 尾部整段重叠 → **重影**（F10 禁止的失败形态）。
+    ///
+    /// 用**注入式估计器**精确锁定契约：真实帧无法稳定复现该路径（估计器的歧义
+    /// 拒绝是对称的——一对失配的两侧都会失配），而本测试在缺陷版本上**必然失败**
+    /// （被接受帧的 y 会是 200/300 而不是 300/400）。
+    #[test]
+    fn chain_rebases_onto_last_accepted_frame_after_skip() {
+        // 5 帧，首像素的 R 值即帧号（估计器据此识别「哪一对」）。
+        let frame = |i: u8| -> Frame {
+            let mut rgba = vec![0u8; 4 * 4 * 4];
+            rgba[0] = i;
+            Frame { width: 4, height: 4, rgba }
+        };
+        let est = |a: &Frame, b: &Frame| -> Option<i32> {
+            match (a.rgba[0], b.rgba[0]) {
+                (0, 1) => Some(100), // 帧 0→1：正常
+                (1, 2) => None,     // 帧 1→2：匹配失败 → 帧 2 被跳过
+                (2, 3) => Some(100), // 直接估计（**基准是被跳过的帧 2** → C1 的陷阱）
+                (1, 3) => Some(200), // 重基准估计（真相）：帧 1→3 跨过被跳过的帧
+                (3, 4) => Some(100),
+                _ => None,
+            }
+        };
+        let mut st = Stitcher::with_estimator(4, est);
+        for i in 0..5u8 {
+            st.push(frame(i));
+        }
+        let _ = st.finish();
+        // 被接受的是帧 0/1/3/4（帧 2 被跳过）；y 必须分别是 0/100/300/400。
+        assert_eq!(
+            st.positions(),
+            &[0, 100, 300, 400],
+            "跳帧后必须对上一张被接受的帧重新估计（否则尾部整段重叠 → 重影）"
+        );
+        assert_eq!(st.frames_used(), 4, "帧 2 应被跳过");
+    }
+
+    /// C1 的端到端形态：真实帧序列中途有一帧无特征（匹配失败）→ 后续帧仍须
+    /// 落在正确的画布位置（不重叠、不重影）。
+    #[test]
+    fn stitch_with_unusable_middle_frame_keeps_offsets_correct() {
+        // 页面 2000 行高，帧高 400，滚动步长 100 → 帧 0..4 在 0/100/200/300/400。
+        let page = page_frame(160, 2000, 77, 0);
+        let ok = |off: usize| viewport(&page, off, 400);
+        // 中间那帧内容与上下文毫无关系（近乎纯色）→ 与邻居都匹配不上。
+        let blank = Frame {
+            width: 160,
+            height: 400,
+            rgba: vec![247u8; 160 * 400 * 4],
+        };
+        let frames = vec![ok(0), ok(100), blank, ok(300), ok(400)];
+        let out = stitch(&frames).expect("前后帧可配对应拼接成功");
+        // 帧 2 被跳过 → 帧 3 必须落在 y=300（对帧 1 重估 200），帧 4 落在 400。
+        assert_eq!(out.height, 800, "跳帧后偏移仍须正确（不得少一个滚动步长）");
+        // 内容对齐：画布行 r ↔ 页面行 r（首帧在顶部、步长 100）。
+        let mut exact = 0usize;
+        let mut total = 0usize;
+        for y in 0..out.height as usize {
+            let d = y * out.width as usize * 4;
+            let s = y * page.width as usize * 4;
+            total += 1;
+            if out.rgba[d..d + out.width as usize * 4] == page.rgba[s..s + page.width as usize * 4] {
+                exact += 1;
+            }
+        }
+        let ratio = exact as f64 / total as f64;
+        assert!(ratio > 0.95, "跳帧后内容仍须对齐（逐字节一致行占比 {ratio}）");
+    }
+
     #[test]
     fn frame_validates_buffer_length() {
         assert!(Frame::new(2, 2, vec![0; 16]).is_some());
         assert!(Frame::new(2, 2, vec![0; 15]).is_none());
+    }
+
+    /// **M5 回归**：画布高度有上界（内存有界，G2）→ 触顶即截断，不再接受新帧。
+    #[test]
+    fn canvas_height_is_capped_and_marks_truncation() {
+        let page = page_frame(80, 2000, 13, 0);
+        let ok = |off: usize| viewport(&page, off, 100);
+        // 上界 300px：步长 50、帧高 100 → 底边 100/150/200/250/300 均可接受，
+        // 第 6 帧底边 350 > 300 → 截断。
+        let mut st = Stitcher::with_estimator(80, |a: &Frame, b: &Frame| {
+            // 合成页面的位移 = 两帧首像素行差（本测试帧首像素编码了 offset）。
+            Some(b.rgba[0] as i32 - a.rgba[0] as i32)
+        })
+        .with_max_height(300);
+        // 手工给帧打上 offset 标记（首像素的 R 值；注意 u8 → offset ≤ 255）。
+        let tagged = |off: u32| -> Frame {
+            let mut f = ok(off as usize);
+            f.rgba[0] = off as u8;
+            f
+        };
+        for off in [0u32, 50, 100, 150, 200, 250] {
+            st.push(tagged(off));
+        }
+        let out = st.finish().expect("已有 5 帧进链 → 可出图");
+        assert!(st.truncated(), "触到画布上界必须标记截断");
+        assert_eq!(st.frames_used(), 5, "第 6 帧（底边 350 > 300）不得进链");
+        assert_eq!(out.height, 300, "画布高度被上界截在 300px");
+        assert_eq!(st.max_height(), 300);
+    }
+
+    /// 默认上界：字节上界与高度上界取小 → 宽画布按字节封顶、窄画布按高度封顶。
+    #[test]
+    fn default_max_height_is_bounded() {
+        // 1600px 宽：256MB / (1600*4) = 41943 → 取高度上界 40000。
+        assert_eq!(default_max_height(1600), MAX_OUTPUT_HEIGHT);
+        // 超宽画布（8192px）：256MB/(8192*4) = 8192 → 字节上界先生效。
+        assert_eq!(default_max_height(8192), MAX_CANVAS_BYTES / (8192 * 4));
+        // 极窄画布：高度上界生效。
+        assert_eq!(default_max_height(8), MAX_OUTPUT_HEIGHT);
+        assert!(default_max_height(0) > 0);
+    }
+
+    /// **I1 回归**：节奏依据必须是「当前帧」的测量值（[`Stitcher::measured_shift`]），
+    /// 而不是上一张被接受帧的滞后值（[`Stitcher::last_shift`]）。
+    #[test]
+    fn measured_shift_is_fresh_and_last_shift_lags() {
+        let mut st = Stitcher::with_estimator(4, |a: &Frame, b: &Frame| {
+            Some(b.rgba[0] as i32 - a.rgba[0] as i32)
+        });
+        let frame = |i: u8| -> Frame {
+            let mut rgba = vec![0u8; 4 * 4 * 4];
+            rgba[0] = i;
+            Frame { width: 4, height: 4, rgba }
+        };
+        st.push(frame(0));
+        assert_eq!(st.measured_shift(), None, "首帧还没有可测的位移");
+        st.push(frame(100));
+        // 第二帧进入 pending → measured_shift = 100（当前帧的测量值）。
+        assert_eq!(st.measured_shift(), Some(100));
+        // last_shift 仍是 None（还没接受任何一帧位移）→ 二者不同源、不可混用。
+        assert_eq!(st.last_shift(), None);
+        st.push(frame(250));
+        // 第三帧入 pending → measured_shift = 250-100 = 150（相对上一张被接受帧）。
+        assert_eq!(st.measured_shift(), Some(150));
     }
 
     #[test]

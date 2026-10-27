@@ -14,7 +14,8 @@
       "scroll": {
         "count": 81,
         "velocity": 565
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "02-text-dense",
@@ -23,7 +24,8 @@
       "scroll": {
         "count": 89,
         "velocity": 510
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "03-images",
@@ -32,7 +34,8 @@
       "scroll": {
         "count": 72,
         "velocity": 640
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "04-tables",
@@ -41,7 +44,8 @@
       "scroll": {
         "count": 77,
         "velocity": 590
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "05-code",
@@ -50,7 +54,8 @@
       "scroll": {
         "count": 84,
         "velocity": 540
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "06-chat",
@@ -59,7 +64,8 @@
       "scroll": {
         "count": 71,
         "velocity": 645
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "07-fixed-header",
@@ -68,7 +74,8 @@
       "scroll": {
         "count": 81,
         "velocity": 565
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "08-sticky-side",
@@ -77,7 +84,8 @@
       "scroll": {
         "count": 79,
         "velocity": 580
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "09-dark",
@@ -86,7 +94,8 @@
       "scroll": {
         "count": 86,
         "velocity": 530
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "10-doc",
@@ -95,7 +104,8 @@
       "scroll": {
         "count": 79,
         "velocity": 580
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "11-gallery",
@@ -104,7 +114,8 @@
       "scroll": {
         "count": 67,
         "velocity": 690
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "12-blog",
@@ -113,7 +124,8 @@
       "scroll": {
         "count": 71,
         "velocity": 645
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "13-wiki",
@@ -122,7 +134,8 @@
       "scroll": {
         "count": 77,
         "velocity": 590
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "14-form",
@@ -131,7 +144,8 @@
       "scroll": {
         "count": 71,
         "velocity": 645
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "15-news",
@@ -140,7 +154,8 @@
       "scroll": {
         "count": 77,
         "velocity": 590
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "16-forum",
@@ -149,7 +164,8 @@
       "scroll": {
         "count": 71,
         "velocity": 645
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "17-pdf-toolbar",
@@ -158,7 +174,8 @@
       "scroll": {
         "count": 81,
         "velocity": 565
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "18-spreadsheet",
@@ -167,7 +184,8 @@
       "scroll": {
         "count": 71,
         "velocity": 645
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "19-slides",
@@ -176,7 +194,8 @@
       "scroll": {
         "count": 67,
         "velocity": 690
-      }
+      },
+      "kind": "standard"
     },
     {
       "id": "20-mixed",
@@ -185,7 +204,29 @@
       "scroll": {
         "count": 77,
         "velocity": 590
-      }
+      },
+      "kind": "standard"
+    },
+    {
+      "id": "21-flash-frame",
+      "layout": "text",
+      "seed": 121,
+      "scroll": {
+        "count": 81,
+        "velocity": 565
+      },
+      "kind": "standard",
+      "flash_at": 41
+    },
+    {
+      "id": "22-blank-band",
+      "layout": "blank-band",
+      "seed": 122,
+      "scroll": {
+        "count": 140,
+        "velocity": 300
+      },
+      "kind": "limit"
     }
   ]
 }

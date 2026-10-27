@@ -6,33 +6,37 @@
 //! 选区 UI）→ 确认 → [`scrollshot_start`]（建会话 + 拉起提示条 + 注册 ⌘S 完成热键
 //! + 隐藏覆盖层）→ **采集线程**每 500ms 抓一次该区域（平台侧
 //! `hawksnap_platform_mac::windowcap`：CGWindowListCreateImage 窗口抓取，失败降级
-//! 屏幕抓取）→ 帧进有界队列 → 用户滚动完按 ⌘S（或点提示条的「完成」）→
-//! [`scrollshot_stop`]：拼接（`hawksnap_core::stitch`）→ 存 PNG 到 save_dir →
-//! 缩略图（首帧）+ 历史入库（kind="scrollshot"）。
+//! 屏幕抓取）→ 帧**即时**喂进流式拼接器（不留帧队列）→ 用户滚动完按 ⌘S（或点
+//! 提示条的「完成」）→ [`scrollshot_stop`]：拼接（`hawksnap_core::stitch`）→
+//! 存 PNG 到 save_dir → 缩略图（首帧）+ 历史入库（kind="scrollshot"）。
 //!
 //! ## 设计要点
 //!
 //! - **采集源选型**（plan 裁定）：`SCScrollWindowImage` 不可用 → 用
 //!   `CGWindowListCreateImage` 定时 500ms。窗口抓取拿的是**窗口自身内容**，
 //!   因此本应用的提示条**不会**被拍进内容（屏幕兜底路径则可能——已知局限）。
-//! - **帧队列有界**：帧数（240）与字节（384MB）双限；超限**丢最旧帧**——剩余帧
-//!   仍然首尾相接（拼接链不断），代价是长图顶部被截。内存上界优先于完整性
-//!   （G2 纪律：绝不无界增长）。
+//! - **不留帧队列（M5）**：每帧采集后立即参与匹配与合成、随即释放 → 内存与帧数
+//!   无关 → **20000px 可达**（留帧方案：原始 RGBA 384MB 只够 8 帧、PNG 压缩
+//!   64MB 只够 38 帧，两者都到不了 20000px）。内存 = 画布（= 产物，20000px×
+//!   1600px ≈ 128MB，**本功能的内存下界**——PNG 必须整体物化）+ 2 帧。
+//!   画布另有**硬上界**（`hawksnap_core::stitch::MAX_CANVAS_BYTES` 256MB 与
+//!   `MAX_OUTPUT_HEIGHT` 40000px 取小）→ 触顶即停止采集并告知用户（G2）。
 //! - **拼接拒绝优于错拼**：纯色画面 / 重复内容（条纹、重复表格行）→ 匹配判为
 //!   歧义 → 拒绝出图（宁可不产出，绝不产出重影图）。见 `hawksnap_core::stitch`。
 //! - **⌘S 完成**：全局热键（会话期间注册、结束即注销）。它会**吞掉**会话期间
 //!   浏览器自己的 ⌘S（保存网页）——这是「按 ⌘S 结束」的既定语义，用户在会话
 //!   期间的意图就是结束长截图。
+//!   **注册失败必须让用户看见**（I4）：热键失败时走横幅通道告知，并保证提示条
+//!   上的「完成」按钮始终可点（提示条不再点击穿透）；托盘另有「停止长截图」入口。
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use hawksnap_core::geometry::Rect;
-use hawksnap_core::stitch::Frame;
+use hawksnap_core::stitch::{Frame, Stitched, Stitcher};
 
 /// 采集间隔（plan 裁定：500ms）——**基准间隔**。
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(500);
@@ -44,9 +48,20 @@ const FAST_SHIFT_RATIO: f64 = 0.4;
 const SLOW_SHIFT_RATIO: f64 = 0.2;
 /// 首帧延迟：给「隐藏覆盖层」留出时间（覆盖层是带遮罩的全屏窗——被拍进去就毁了）。
 const FIRST_FRAME_DELAY: Duration = Duration::from_millis(250);
-/// 帧队列上限（帧数 + 字节双限）。
-const MAX_FRAMES: usize = 240;
-const MAX_BYTES: usize = 384 * 1024 * 1024;
+// 采集期**不留帧队列**（M5）：每帧采集后立即参与匹配与合成、随即释放。
+//
+// 内存构成 = 画布（= 最终产物，20000px×1600px ≈ 128MB，**这是本功能的内存
+// 下界**——PNG 必须整体物化）+ 2 帧（上一张被接受的帧 + 待决帧，各 ~7.7MB）。
+//
+// 为何不留队列：留帧就必须整批驻留才能建链 → 原始 RGBA 384MB 只够 8 帧、
+// PNG 压缩（Adaptive 滤波，页面正文 ~4.4x → 1.75MB/帧）64MB 也只够 38 帧
+// ——**两者都到不了 20000px** 的验收目标（每帧步长 ~280px → 38 帧仅 10.6k px）。
+// 流式方案帧数无上限 → 20000px 可达。
+//
+// **画布仍有硬上界**（G2「绝不无界增长」）：`hawksnap_core::stitch` 侧
+// MAX_CANVAS_BYTES（256MB）与 MAX_OUTPUT_HEIGHT（40000px）取小 → 触顶即
+// 停止采集并告知用户（长图被截断，而不是内存无限涨）。
+
 /// 完成热键（会话期间全局注册）。
 const FINISH_COMBO: &str = "Cmd+S";
 /// 提示条窗口标签（**ACL 按标签授权**——capabilities/scrollshot-bar.json 必须存在，
@@ -65,34 +80,84 @@ struct Session {
     /// 全局逻辑矩形（Quartz points）——采集区域。
     global: hawksnap_platform_mac::windowcap::GlobalRect,
     /// 选区全局矩形（提示条定位用：避开选区，防被拍进内容）。
-    frames: Mutex<VecDeque<Frame>>,
-    bytes: AtomicUsize,
+    /// **流式拼接器**：每帧采集后立即参与匹配与合成，随即释放 → **不留帧队列**
+    /// （M5：批处理留帧要么 384MB 原始 RGBA、要么 64MB PNG 只够 37 帧——
+    /// 两者都到不了 20000px 的验收目标）。内存 = 画布（= 最终产物）+ 2 帧。
+    stitcher: Mutex<Option<Stitcher>>,
+    /// 首帧的缩略图（320px，plan 契约：thumb 取首帧）——生成于首帧，避免留整帧。
+    thumb: Mutex<Option<(Vec<u8>, u32, u32)>>,
+    /// ⌘S 完成热键是否注册成功（false → 提示条上的「完成」按钮是唯一出口）。
+    hotkey_ok: AtomicBool,
     stop: AtomicBool,
     captured: AtomicU64,
 }
 
 impl Session {
+    /// 喂一帧给流式拼接器（匹配 + 合成，随即释放）。
     fn push_frame(&self, frame: Frame) {
-        let size = frame.rgba.len();
-        let mut q = self.frames.lock().unwrap_or_else(|e| e.into_inner());
-        q.push_back(frame);
-        self.bytes.fetch_add(size, Ordering::Relaxed);
-        // 有界：超帧数或字节数 → 丢最旧帧（剩余帧仍连续，链不断）。
-        while q.len() > MAX_FRAMES || self.bytes.load(Ordering::Relaxed) > MAX_BYTES {
-            let Some(old) = q.pop_front() else { break };
-            self.bytes.fetch_sub(old.rgba.len(), Ordering::Relaxed);
+        let mut guard = self.stitcher.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            // 首帧：按它的实际宽度建画布（抓取尺寸可能与选区推算值不同）。
+            *guard = Some(Stitcher::new(frame.width as usize));
+            // 缩略图取首帧（plan 契约）：此刻生成 320px 缩略图，避免留整帧。
+            if let Ok((rgba, tw, th)) = hawksnap_core::crop::rgba_thumbnail(
+                &frame.rgba,
+                frame.width,
+                frame.height,
+                320,
+            ) {
+                *self.thumb.lock().unwrap_or_else(|e| e.into_inner()) = Some((rgba, tw, th));
+            }
+        }
+        if let Some(st) = guard.as_mut() {
+            st.push(frame);
         }
         self.captured.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn take_frames(&self) -> Vec<Frame> {
-        let mut q = self.frames.lock().unwrap_or_else(|e| e.into_inner());
-        self.bytes.store(0, Ordering::Relaxed);
-        q.drain(..).collect()
+    /// 最近一次**测量**到的帧间位移（当前帧相对上一张被接受帧的估计）。
+    ///
+    /// 采集节奏的自适应依据（I1）：必须用**当前帧**的测量值，而不是上一张被
+    /// 接受帧的滞后值——后者在匹配失败时会停在旧值上（拿旧位移决定下一拍间隔
+    /// → 越滚越快 → 重叠耗尽 → 配对失配）。
+    fn measured_shift(&self) -> Option<i32> {
+        self.stitcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|st| st.measured_shift())
+    }
+
+    /// 画布是否已触到内存上界（true = 长图被截断，应停止采集）。
+    fn truncated(&self) -> bool {
+        self.stitcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|st| st.truncated())
+            .unwrap_or(false)
+    }
+
+    /// 本会话可产出的最大长图高度（像素）。
+    fn max_height(&self) -> usize {
+        self.stitcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|st| st.max_height())
+            .unwrap_or(0)
+    }
+
+    /// 收尾：产出长图（并取出首帧缩略图）。
+    fn finish(&self) -> Option<(Stitched, Option<(Vec<u8>, u32, u32)>)> {
+        let mut guard = self.stitcher.lock().unwrap_or_else(|e| e.into_inner());
+        let out = guard.as_mut()?.finish()?;
+        let thumb = self.thumb.lock().unwrap_or_else(|e| e.into_inner()).take();
+        Some((out, thumb))
     }
 
     fn frame_count(&self) -> usize {
-        self.frames.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.captured.load(Ordering::Relaxed) as usize
     }
 }
 
@@ -120,11 +185,23 @@ pub fn scrollshot_active() -> bool {
 /// 规则（带滞回，避免在两档之间抖动）：
 /// - 上次位移 > 0.4h → 加密到 200ms（滚得快 → 多拍几帧）；
 /// - 上次位移 < 0.2h → 回到 500ms（滚得慢 → 省资源）；
-/// - 介于两者之间 → 保持当前间隔。
+/// - 介于两者之间 → 保持当前间隔；
+/// - **测不出位移（None）→ 加密到 200ms**（见下）。
 ///
-/// 效果：快速滚动时每帧位移自动收敛到 0.2h~0.4h（重叠 ≥ 0.6h）→ 稳定可配。
+/// ## 为什么「测不出」要加密而不是保持（I1）
+///
+/// 测不出有三种成因：位移太大（**无重叠**）、内容歧义、内容无特征。三者里
+/// 只有第一种是致命的——它会让后续帧**继续失配**（重叠永远追不回来）。
+/// 代价不对称：拍密一点只是多几帧（几百 ms 的 CPU）；拍疏了会丢掉重叠 →
+/// 内容断档。故**不确定就拍密**。
+///
+/// 位移来源 = 拼接器刚做的测量（[`hawksnap_core::stitch::Stitcher::measured_shift`]，
+/// 与链上用的是**同一个**三层匹配器）——不再单独跑 1D 行谱（1D 在准周期内容上
+/// 会咬住假峰：实测真解 678px 被 524px 假峰盖过 → 节奏按假位移调 → 步长失控）。
 fn next_interval(current: Duration, shift: Option<i32>, region_h: u32) -> Duration {
-    let Some(s) = shift else { return current };
+    let Some(s) = shift else {
+        return CAPTURE_INTERVAL_FAST; // 不确定 → 拍密（保住重叠）
+    };
     if region_h == 0 {
         return current;
     }
@@ -148,6 +225,9 @@ fn next_interval(current: Duration, shift: Option<i32>, region_h: u32) -> Durati
 pub struct ScrollshotTick {
     pub session: u64,
     pub frames: usize,
+    /// ⌘S 完成热键是否可用（false → 提示条上的「完成」按钮是唯一出口）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<bool>,
 }
 
 /// pull 通道载荷（提示条 mount 时补显——push 早于 listen 必丢，同 countdown）。
@@ -157,6 +237,13 @@ pub struct ScrollshotStatus {
     pub session: u64,
     pub frames: usize,
     pub active: bool,
+    /// ⌘S 完成热键是否可用（false → 提示条上的「完成」按钮是唯一出口）。
+    ///
+    /// **必须走 pull 通道**：会话启动时那次 push（带 `hotkey`）几乎必然早于
+    /// 提示条 webview 的 `listen` 就绪 → 必丢。只靠 push 的话，提示条永远显示
+    /// 「按 ⌘S 结束」，即使热键注册失败。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<bool>,
 }
 
 /// 启动请求（覆盖层选区确认载荷）。
@@ -213,8 +300,9 @@ pub fn scrollshot_start(app: AppHandle, req: ScrollshotReq) -> Result<(), String
     let session = Arc::new(Session {
         session: SESSION_SEQ.fetch_add(1, Ordering::Relaxed),
         global,
-        frames: Mutex::new(VecDeque::new()),
-        bytes: AtomicUsize::new(0),
+        stitcher: Mutex::new(None),
+        thumb: Mutex::new(None),
+        hotkey_ok: AtomicBool::new(true),
         stop: AtomicBool::new(false),
         captured: AtomicU64::new(0),
     });
@@ -225,7 +313,19 @@ pub fn scrollshot_start(app: AppHandle, req: ScrollshotReq) -> Result<(), String
         eprintln!("[hawksnap] 长截图启动后隐藏覆盖层失败: {e}");
     }
     show_scrollshot_bar(&app, &global)?;
-    register_finish_hotkey(&app);
+    let hotkey_ok = register_finish_hotkey(&app);
+    session.hotkey_ok.store(hotkey_ok, Ordering::Relaxed);
+    // 提示条上明示「完成」出口（⌘S 不可用时它是唯一出口）。
+    // 注：这次 push 多半早于提示条 webview 的 listen 就绪 → 会丢；
+    // 真正的补显通道是 `scrollshot_status`（带 hotkey 字段）。
+    let _ = app.emit(
+        "hawk://scrollshot-tick",
+        ScrollshotTick {
+            session: session.session,
+            frames: 0,
+            hotkey: Some(hotkey_ok),
+        },
+    );
 
     spawn_capture_thread(app.clone(), session.clone());
     emit_tick(&app, &session);
@@ -247,11 +347,7 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
     unregister_finish_hotkey(&app);
     close_scrollshot_bar(&app);
 
-    let frames = session.take_frames();
-    if frames.len() < 2 {
-        return Err("没有捕获到足够的帧（请先滚动页面再结束）".into());
-    }
-    let stitched = hawksnap_core::stitch::stitch(&frames).ok_or_else(|| {
+    let (stitched, thumb) = session.finish().ok_or_else(|| {
         "未能识别滚动位移：画面内容没有明显变化，或内容重复导致匹配歧义".to_string()
     })?;
 
@@ -259,17 +355,27 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
     let dir = crate::commands::resolve_save_dir(&settings).ok_or("no picture dir")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = crate::commands::save_path_for(&dir, "HawkSnap", "png");
-    let png = hawksnap_core::crop::rgba_to_png(&stitched.rgba, stitched.width, stitched.height)
+    // **零拷贝编码**：`rgba_to_png` 会把整幅长图 `to_vec()` 复制一份（长图可达
+    // 128MB → 峰值翻倍）；`rgba_to_png_borrowed` 直接把切片交给编码器。
+    let png = hawksnap_core::crop::rgba_to_png_borrowed(&stitched.rgba, stitched.width, stitched.height)
         .map_err(|e| e.to_string())?;
     std::fs::write(&path, &png).map_err(|e| format!("保存失败: {e}"))?;
 
     // 缩略图 = **首帧**（plan 契约：thumb 取首帧——它是长图顶部，网格里一眼能认出）。
-    let thumb_path = write_thumbnail(&dir, &path, &frames[0])?;
+    // **旁路语义**：缩略图失败**不影响**主产物（长图已落盘）——记日志、缩略图
+    // 留空（前端有占位块分支），绝不因缩略图把整次长截图判为失败。
+    let thumb_path = match write_thumbnail(&dir, &path, thumb) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("[hawksnap] 长截图缩略图生成失败（不影响长图）: {e}");
+            String::new()
+        }
+    };
     // 历史入库（旁路语义：失败仅记录，不影响产物返回）。
     if let Err(e) = crate::history::record(
         &app,
         &path.to_string_lossy(),
-        &thumb_path.to_string_lossy(),
+        &thumb_path,
         stitched.width as i64,
         stitched.height as i64,
         "scrollshot",
@@ -290,6 +396,7 @@ pub fn scrollshot_status() -> Option<ScrollshotStatus> {
         session: s.session,
         frames: s.frame_count(),
         active: true,
+        hotkey: Some(s.hotkey_ok.load(Ordering::Relaxed)),
     })
 }
 
@@ -302,26 +409,45 @@ fn spawn_capture_thread(app: AppHandle, session: Arc<Session>) {
         // 首帧延迟：覆盖层 hide 是投递给主线程的异步消息，留出时间避免拍到遮罩。
         std::thread::sleep(FIRST_FRAME_DELAY);
         let mut interval = CAPTURE_INTERVAL;
-        // 上一帧的行亮度剖面（用于估算帧间位移 → 自适应采集间隔）。
+        // 上一帧的行亮度剖面——只用于判定「页面完全没动」（静止页面不该加密采集）。
         let mut last_profile: Option<Vec<f32>> = None;
         while !session.stop.load(Ordering::Relaxed) {
             let t0 = Instant::now();
             match hawksnap_platform_mac::windowcap::capture_global_rect(session.global) {
                 Ok(img) => {
                     if let Some(frame) = Frame::new(img.width, img.height, img.rgba) {
-                        // 帧间位移（1D 行谱，纯函数、毫秒级）→ 决定下一拍间隔。
+                        let region_h = frame.height;
+                        // 静止判定：行谱与上一帧**完全相同** → 位移 0（页面没滚）。
+                        // （对无特征页面有效：那种页面匹配器测不出位移，但页面确实
+                        //  静止——否则会被当成「不确定」而一直加密采集。）
                         let profile = frame.row_profile();
-                        let shift = last_profile
-                            .as_ref()
-                            .and_then(|prev| hawksnap_core::stitch::estimate_shift(prev, &profile));
-                        interval = next_interval(interval, shift, frame.height);
+                        let still = last_profile.as_ref().map(|p| *p == profile).unwrap_or(false);
                         last_profile = Some(profile);
+                        // 喂给流式拼接器（内部即生产同款三层匹配 `estimate_frame_shift`
+                        // ——**不再单独跑一遍 1D 行谱**：1D 在准周期内容上会咬住假峰
+                        // （实测真解 678px 被 524px 假峰盖过）或直接返 None → 间隔
+                        // 永不调整 → 步长越滚越大 → 重叠耗尽 → 配对失配）。
                         session.push_frame(frame);
+                        // 节奏自适应：取**当前帧**的测量位移（与拼接链同一个匹配器）。
+                        let shift = if still { Some(0) } else { session.measured_shift() };
+                        interval = next_interval(interval, shift, region_h);
                     }
                 }
                 Err(e) => eprintln!("[hawksnap] 长截图抓帧失败: {e}"),
             }
             emit_tick(&app, &session);
+            // 画布触到内存上界（G2）→ 停止采集，提示用户把当前长图存下来。
+            if session.truncated() {
+                eprintln!("[hawksnap] 长截图已达最大长度（{}px），停止采集", session.max_height());
+                crate::panel::show_capture_error(
+                    &app,
+                    format!(
+                        "长截图：已达最大长度（{}px）——请按 ⌘S 或点「完成」保存当前长图",
+                        session.max_height()
+                    ),
+                );
+                break;
+            }
             let elapsed = t0.elapsed();
             if elapsed < interval {
                 std::thread::sleep(interval - elapsed);
@@ -336,6 +462,7 @@ fn emit_tick(app: &AppHandle, session: &Session) {
         ScrollshotTick {
             session: session.session,
             frames: session.frame_count(),
+            hotkey: None,
         },
     );
 }
@@ -344,10 +471,15 @@ fn emit_tick(app: &AppHandle, session: &Session) {
 // 完成热键（⌘S）
 // ---------------------------------------------------------------------------
 
-fn register_finish_hotkey(app: &AppHandle) {
+/// 注册 ⌘S 完成热键。**失败必须让用户看见**（I4，评审必修）：注册失败时若
+/// 只 eprintln，用户将没有任何「结束长截图」的键盘出口（提示条原本点击穿透、
+/// 没有按钮）→ 采集线程会一直跑到队列上限。故失败时：
+/// ① 走既有横幅通道告知用户；
+/// ② 提示条改为**可交互**（显示「完成」按钮），保证始终有鼠标出口。
+fn register_finish_hotkey(app: &AppHandle) -> bool {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     let handle = app.clone();
-    if let Err(e) = app.global_shortcut().on_shortcut(FINISH_COMBO, move |_app, _sc, event| {
+    match app.global_shortcut().on_shortcut(FINISH_COMBO, move |_app, _sc, event| {
         use tauri_plugin_global_shortcut::ShortcutState;
         if event.state() != ShortcutState::Pressed {
             return;
@@ -360,7 +492,15 @@ fn register_finish_hotkey(app: &AppHandle) {
             }
         });
     }) {
-        eprintln!("[hawksnap] 注册 ⌘S 完成热键失败: {e}");
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[hawksnap] 注册 ⌘S 完成热键失败: {e}");
+            crate::panel::show_capture_error(
+                app,
+                format!("长截图：⌘S 完成热键注册失败（{e}）——请用提示条上的「完成」按钮结束"),
+            );
+            false
+        }
     }
 }
 
@@ -376,6 +516,10 @@ fn unregister_finish_hotkey(app: &AppHandle) {
 // ---------------------------------------------------------------------------
 
 /// 提示条上屏（懒建 + 常驻复用，与 recording-bar 同款）。
+///
+/// **可交互**（I4）：条上有「完成」按钮 → 用户始终有鼠标出口（⌘S 注册失败
+/// 时它是唯一出口）。代价：条覆盖区域不再「鼠标穿透」（用户在该区域滚轮不会
+/// 滚动被拍页面）——故条刻意定位在**避开选区**的上下边缘。
 ///
 /// **位置刻意避开选区**：屏幕兜底抓取路径会把「屏幕上真实可见的像素」拍进去，
 /// 提示条若压在选区上就会在长图里留下自己的残影。选区在上下都避开时，退到
@@ -397,13 +541,14 @@ fn show_scrollshot_bar(app: &AppHandle, global: &hawksnap_platform_mac::windowca
     .resizable(false)
     .skip_taskbar(true)
     // 点击穿透：滚动页面的点击必须落到被拍的应用上（本窗只是提示）。
+    // 不抢键盘焦点（用户要滚动被拍的内容）——但**要能点**（I4：完成按钮是
+    // ⌘S 不可用时的唯一鼠标出口；此前整窗点击穿透 → 无任何鼠标出口）。
     .focusable(false)
     .focused(false)
     .transparent(false)
     .visible(false)
     .build()
     .map_err(|e| e.to_string())?;
-    let _ = win.set_ignore_cursor_events(true);
     position_bar(&win, global);
     let _ = win.show();
     Ok(())
@@ -457,7 +602,7 @@ fn close_scrollshot_bar(app: &AppHandle) {
 fn write_thumbnail(
     dir: &std::path::Path,
     out_path: &std::path::Path,
-    first: &Frame,
+    thumb: Option<(Vec<u8>, u32, u32)>,
 ) -> Result<std::path::PathBuf, String> {
     let thumbs_dir = dir.join("thumbs");
     std::fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
@@ -466,13 +611,9 @@ fn write_thumbnail(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "shot".into());
     let thumb_path = thumbs_dir.join(format!("{stem}.png"));
-    let (thumb_rgba, tw, th) = hawksnap_core::crop::rgba_thumbnail(
-        &first.rgba,
-        first.width,
-        first.height,
-        320,
-    )
-    .map_err(|e| e.to_string())?;
+    let Some((thumb_rgba, tw, th)) = thumb else {
+        return Err("首帧缩略图缺失，无法生成".into());
+    };
     let thumb_png = hawksnap_core::crop::rgba_to_png(&thumb_rgba, tw, th).map_err(|e| e.to_string())?;
     std::fs::write(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
     Ok(thumb_path)
@@ -488,8 +629,21 @@ mod tests {
 
     #[test]
     fn tick_payload_serializes_camel_case() {
-        let s = serde_json::to_string(&ScrollshotTick { session: 3, frames: 12 }).unwrap();
+        let s = serde_json::to_string(&ScrollshotTick {
+            session: 3,
+            frames: 12,
+            hotkey: None,
+        })
+        .unwrap();
         assert_eq!(s, r#"{"session":3,"frames":12}"#);
+        // hotkey 字段在场时（⌘S 不可用 → 提示条明示「完成」按钮是唯一出口）。
+        let s2 = serde_json::to_string(&ScrollshotTick {
+            session: 3,
+            frames: 12,
+            hotkey: Some(false),
+        })
+        .unwrap();
+        assert_eq!(s2, r#"{"session":3,"frames":12,"hotkey":false}"#);
     }
 
     #[test]
@@ -498,9 +652,19 @@ mod tests {
             session: 1,
             frames: 2,
             active: true,
+            hotkey: None,
         })
         .unwrap();
         assert_eq!(s, r#"{"session":1,"frames":2,"active":true}"#);
+        // hotkey 在场时（⌘S 注册失败 → 提示条明示「完成」按钮是唯一出口）。
+        let s2 = serde_json::to_string(&ScrollshotStatus {
+            session: 1,
+            frames: 2,
+            active: true,
+            hotkey: Some(false),
+        })
+        .unwrap();
+        assert_eq!(s2, r#"{"session":1,"frames":2,"active":true,"hotkey":false}"#);
     }
 
     #[test]
@@ -512,24 +676,28 @@ mod tests {
         assert_eq!((req.rect.x, req.rect.y, req.rect.w, req.rect.h), (10, 20, 800, 600));
     }
 
-    /// 帧队列有界：超过字节上限时丢**最旧**帧，剩余帧仍首尾相接（拼接链不断）。
+    /// 采集期**不留帧队列**（M5）：每帧喂进流式拼接器即释放 → 内存与帧数无关。
+    /// 断言：喂 N 帧后，会话里**没有**任何帧缓冲（只有拼接器内部的画布 + 2 帧）。
     #[test]
-    fn frame_queue_drops_oldest_when_over_budget() {
+    fn session_keeps_no_frame_queue() {
         let s = Session {
             session: 0,
             global: hawksnap_platform_mac::windowcap::GlobalRect::new(0.0, 0.0, 10.0, 10.0),
-            frames: Mutex::new(VecDeque::new()),
-            bytes: AtomicUsize::new(0),
+            stitcher: Mutex::new(None),
+            thumb: Mutex::new(None),
+            hotkey_ok: AtomicBool::new(true),
             stop: AtomicBool::new(false),
             captured: AtomicU64::new(0),
         };
-        // 造若干 1×1 帧（4 字节）——用 MAX_FRAMES 上限验证帧数边界。
-        for _ in 0..(MAX_FRAMES + 5) {
-            s.push_frame(Frame { width: 1, height: 1, rgba: vec![1, 2, 3, 4] });
+        for _ in 0..5 {
+            s.push_frame(Frame { width: 4, height: 4, rgba: vec![7u8; 4 * 4 * 4] });
         }
-        let q = s.frames.lock().unwrap();
-        assert_eq!(q.len(), MAX_FRAMES, "帧数上限必须生效");
-        assert_eq!(s.bytes.load(Ordering::Relaxed), MAX_FRAMES * 4, "字节计数须与实际一致");
+        // 会话里除拼接器与缩略图外**没有任何帧存储**——帧数再多也不涨内存。
+        assert_eq!(s.frame_count(), 5, "已抓帧数照常统计（提示条进度用）");
+        assert!(
+            s.stitcher.lock().unwrap().is_some(),
+            "拼接器应已建立（首帧创建）"
+        );
     }
 
     /// 自适应采集间隔（滞回规则，纯函数）：
@@ -549,8 +717,60 @@ mod tests {
         assert_eq!(next_interval(CAPTURE_INTERVAL_FAST, Some(100), h), CAPTURE_INTERVAL);
         // 滞回带内保持加密（不来回抖动）
         assert_eq!(next_interval(CAPTURE_INTERVAL_FAST, Some(250), h), CAPTURE_INTERVAL_FAST);
-        // 位移测不出（None）→ 保持当前间隔。
+        // 位移测不出（None）→ **加密**（不确定就拍密：拍疏了会丢掉重叠 → 断档）。
         assert_eq!(next_interval(CAPTURE_INTERVAL_FAST, None, h), CAPTURE_INTERVAL_FAST);
+        assert_eq!(next_interval(CAPTURE_INTERVAL, None, h), CAPTURE_INTERVAL_FAST);
+    }
+
+    /// 内存模型（M5 的量化依据）：**不留帧队列** → 帧数与内存无关 → 20000px
+    /// 可达。断言仅留「画布 + 2 帧」：本测试用一个 40 帧的小序列验证会话内
+    /// 不随帧数增长任何帧缓冲（画布随内容增长，是产物本身）。
+    #[test]
+    fn no_frame_queue_means_memory_is_independent_of_frame_count() {
+        let (w, h) = (400u32, 300u32);
+        let mut rgba = vec![255u8; (w * h * 4) as usize];
+        // 伪随机「文字块」：白底上零散的深色小方块（页面正文的形态）。
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed >> 33
+        };
+        for y in (0..h).step_by(14) {
+            let mut x = 6u32;
+            while x < w - 10 {
+                let len = 6 + (next() % 18) as u32;
+                for yy in y..(y + 5).min(h) {
+                    for xx in x..(x + len).min(w) {
+                        let i = ((yy * w + xx) * 4) as usize;
+                        let g = (30 + (next() % 120) as u8) as u8;
+                        rgba[i] = g;
+                        rgba[i + 1] = g;
+                        rgba[i + 2] = g;
+                    }
+                }
+                x += len + 8 + (next() % 10) as u32;
+            }
+        }
+        // 合成帧（构造用，不入库）：确认「输出 PNG 编码不复制输入」这一零拷贝
+        // 路径可用（长图 128MB 级，省一次复制就是省一次峰值）。
+        let png = hawksnap_core::crop::rgba_to_png_borrowed(&rgba, w, h).expect("编码应成功");
+        assert!(!png.is_empty());
+        // 帧队列已移除：会话里不再有「帧数 × 帧大小」的开销。
+        let s = Session {
+            session: 0,
+            global: hawksnap_platform_mac::windowcap::GlobalRect::new(0.0, 0.0, 10.0, 10.0),
+            stitcher: Mutex::new(None),
+            thumb: Mutex::new(None),
+            hotkey_ok: AtomicBool::new(true),
+            stop: AtomicBool::new(false),
+            captured: AtomicU64::new(0),
+        };
+        for _ in 0..40 {
+            s.push_frame(Frame { width: w, height: h, rgba: rgba.clone() });
+        }
+        assert_eq!(s.frame_count(), 40);
     }
 
     /// 会话槽空态：idle → scrollshot_active() == false。

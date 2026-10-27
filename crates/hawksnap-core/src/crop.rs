@@ -49,6 +49,24 @@ pub fn crop_rgba(rgba: &[u8], w_px: u32, h_px: u32, physical: &Rect) -> Result<V
     Ok(out)
 }
 
+/// RGBA → PNG（Fast+NoFilter，**不复制**输入缓冲）。
+///
+/// 与 [`rgba_to_png`] 的区别：后者走 `RgbaImage::from_raw(w, h, rgba.to_vec())`
+/// → 整帧复制一份（长截图合成时每帧都是 MB 级，复制纯属浪费）。本函数直接把
+/// 调用方的切片交给编码器，零拷贝。
+pub fn rgba_to_png_borrowed(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, CropError> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut std::io::Cursor::new(&mut out),
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(rgba, w, h, image::ExtendedColorType::Rgba8)
+    .map_err(|_| CropError::Encode)?;
+    Ok(out)
+}
+
 /// 裁剪结果 → PNG（Fast+NoFilter）。只在保存路径调用；剪贴板直用 RGBA。
 pub fn rgba_to_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, CropError> {
     let img = image::RgbaImage::from_raw(w, h, rgba.to_vec()).ok_or(CropError::Decode)?;
