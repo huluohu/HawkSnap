@@ -202,6 +202,43 @@ pub fn element_at_point_with_pid(_x: f64, _y: f64) -> Option<(AxFrame, i32)> {
     None
 }
 
+/// 当前**系统级焦点应用**的 pid（AXFocusedApplication → AXUIElementGetPid）。
+///
+/// 用途（M3 N4 keycast 评审修复）：验证「悬浮窗 show 是否抢走用户应用的键盘焦点」
+/// ——焦点应用 pid 在建窗前后**不变** = 未抢焦点（录屏中用户的按键仍落在被录应用）。
+/// 仅查询，不弹窗；未授予辅助功能 → None（调用方按「无法判定」处理，不当失败）。
+#[cfg(target_os = "macos")]
+pub fn focused_application_pid() -> Option<i32> {
+    use core_foundation::base::{CFType, CFTypeRef, TCFType};
+
+    // SAFETY: AXUIElementCreateSystemWide 无入参；成功返回 +1 引用。null → None。
+    let syswide_ptr = unsafe { ffi::AXUIElementCreateSystemWide() };
+    if syswide_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: 接管 +1 引用；早退路径由 Drop 兜底释放。
+    let syswide = unsafe { CFType::wrap_under_create_rule(syswide_ptr as CFTypeRef) };
+    let syswide_ref = syswide.as_CFTypeRef() as ffi::AXUIElementRef;
+
+    // AXFocusedApplication → 焦点应用的 AXUIElement（+1 引用）。
+    // SAFETY: syswide_ref 合法；out 为本地变量，出参按约定收到 +1 引用。
+    let Some(app) = (unsafe { copy_attr(syswide_ref, "AXFocusedApplication") }) else {
+        return None;
+    };
+    let app_ref = app.as_CFTypeRef() as ffi::AXUIElementRef;
+    // SAFETY: app_ref 为仍持有的合法 AXUIElement；pid 指向本地 i32。
+    let mut pid: i32 = 0;
+    if unsafe { ffi::AXUIElementGetPid(app_ref, &mut pid) } != 0 {
+        return None;
+    }
+    Some(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn focused_application_pid() -> Option<i32> {
+    None
+}
+
 #[cfg(test)]
 mod ax_tests {
     use super::*;

@@ -13,13 +13,20 @@ export default function KeycastWindow() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    // listen 的 promise 拒绝 = 该窗口标签没有对应 capability（ACL 按窗口标签授权）
+    // ——必须 catch，否则变成 unhandled rejection（白屏 + 控制台噪音）。此处记一次
+    // 错误日志，页面其余部分照常（无事件即无显示，无副作用）。
     listen<{ combo: string }>("hawk://keycast", (e) => {
       setCombo(e.payload.combo);
       setSeq((s) => s + 1); // key 变化 → 重建节点 → 淡出动画从头重放
-    }).then((un) => {
-      if (disposed) un();
-      else unlisten = un;
-    });
+    })
+      .then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      })
+      .catch((e) => {
+        console.error("[keycast] listen(hawk://keycast) 失败（窗口 capability 缺失？）", e);
+      });
     return () => {
       disposed = true;
       unlisten?.();

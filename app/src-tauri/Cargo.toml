@@ -62,8 +62,10 @@ base64 = "0.22"
 
 # 媒体键 F1 兼容（Task 13）：NSEvent 全局监听 systemDefined（亮度下键）事件。
 # 0.3.2 已在依赖树（wry）中，features 只增不改版本。
+# N4 keycast 焦点实证探针（keycast-focus-probe）：NSWindow 绑定（canBecomeKeyWindow
+# ——「能否成为 key window」的决定性判据）。同为 0.3.2，features 只增不改版本。
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"] }
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2", "NSWindow"] }
 block2 = "0.6"
 # Task 4 磁吸候选：CGWindowList 枚举在屏窗口。core-graphics 0.25 的 window 模块暴露
 # copy_window_info + kCGWindow* 常量，core-foundation 供 CFArray/CFDictionary/CFNumber

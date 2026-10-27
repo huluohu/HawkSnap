@@ -590,6 +590,12 @@ pub fn pip_update(
 /// （「录制必有可用产物」不变量，GIF 静默缺席）。
 #[tauri::command(async)]
 pub fn record_stop(app: AppHandle) -> Result<String, String> {
+    // N4 按键显示随录停止（不变量「tap 只在录制中存活」的执行点，best-effort）：
+    // **放在状态机 take/转移之前**（评审修复 Minor 8）——转移失败（未来扩展的非法
+    // 态）等早退路径也必须让 tap 死掉，绝不留系统级监听过夜。stop 收尾（≤25s
+    // 阻塞）之前完成：录屏一停 UI 即收，不等 writer。
+    crate::keycast::keycast_disable(&app);
+
     let rt = {
         let mut guard = lock_rec();
         let rt = guard.take().ok_or_else(|| "没有进行中的录屏".to_string())?;
@@ -606,12 +612,6 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
     // 若下次也失败则继续留着（正确——错误仍可见）。
     // close 须非主线程（record_stop 为 async 命令，运行时线程 ✓）；不入 idle_reaper
     //（close 语义更干净，reaper 是「隐藏满 10 分钟」的兜底，此处有明确生命周期点）。
-
-    // N4 按键显示随录停止（不变量「tap 只在录制中存活」的执行点，best-effort）：
-    // 取出 rt（REC 已空）后立即停 tap + 关 keycast 小窗——覆盖 stop 收尾成功与
-    // 失败两条路径（收尾失败时录制同样已结束，监听不留过夜）。此点在 ≤25s 阻塞
-    // 收尾**之前**：录屏一停 UI 即收，不等 writer。
-    crate::keycast::keycast_disable(&app);
 
     // 录制时长（M3 继承项①，入库 duration 列）：stop 收尾**前**取时刻——
     // recorder.stop() 阻塞 ≤25s 不得计入；口径与 tick/record_status 一致。

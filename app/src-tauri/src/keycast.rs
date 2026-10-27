@@ -4,10 +4,11 @@
 //!
 //! 悬浮条开关 → [`keycast_set`]（仅录制中可开）→ CGEventTap **listen-only** 键盘
 //! tap（专用线程 + 私有 CFRunLoop，录屏会话维度启停）→ keyDown 解析 keycode+flags →
-//! [`format_combo`]（修饰符序 Cmd⇧⌥⌃ + 键名 [`keycode_display_name`]）→ 100ms 同
-//! 组合合并节流（[`ComboThrottle`]，长按自动重复只在停手后显示一次）→ `hawk://keycast`
-//! {combo, ts} → keycast 小窗（320×88 透明、点击穿透、底部居中）大字显示 + 1.5s CSS
-//! 淡出。
+//! [`format_key_event`]（修饰符序 Cmd⇧⌥⌃ + 键名 [`keycode_display_name`]）→ 100ms 同
+//! 组合合并节流（[`ComboThrottle`]：**滑窗**语义——同组合的连续重复合并为一次显示
+//! 刷新；长按自动重复期间只显示一次，停手后再次按下才重新显示）→ `hawk://keycast`
+//! {combo, ts} → keycast 小窗（320×88 透明、点击穿透、**不可获 key 焦点**、底部
+//! 居中）大字显示 + 1.5s CSS 淡出。
 //!
 //! ## Tap API 选型（任务裁定）
 //!
@@ -19,7 +20,8 @@
 //! listen-only 保证 tap 绝不吞改事件——F6 停止热键照常触发，keycast 只是旁路旁观
 //! （顺带把 F6 按键也如实显示，诚实语义）。修饰符**单独**按下（flagsChanged）
 //! M3 不显示——只显示完整组合键（keyDown 时刻的 flags 快照），flagsChanged 不装
-//! 掩码、行为有据可查。
+//! 掩码、行为有据可查。**修饰键自身**的 keyDown 会显示其符号**一次**（旗标快照
+//! 已含该修饰符 → 不重复打印键名，见 [`format_key_event`]）。
 //!
 //! ## 生命周期与泄漏守卫
 //!
@@ -34,6 +36,19 @@
 //! 辅助功能未授予 → [`keycast_set`] 返回 Err（中文文案，悬浮条瞬态错误显示，与
 //! pip_update 的 Err 回流同款）；CGEventTapCreate 失败（NULL）同路径降级。
 //! 录制主链路零依赖 keycast——任何失败都不影响录制。
+//!
+//! ## 小窗的 ACL 与焦点纪律（评审修复）
+//!
+//! - **ACL 按窗口标签授权**：keycast 小窗要收 `hawk://keycast`（JS `listen`），
+//!   必须有覆盖标签 `keycast` 的 capability（`app/src-tauri/capabilities/keycast.json`
+//!   ——`core:default` → `core:event:default` → `allow-listen`）。缺了它 listen 的
+//!   promise 在运行时被 ACL 拒绝 → 窗口永远收不到事件（Rust 侧 tap 正常、窗口也
+//!   开着，但小窗空白）。守卫见 `app/src-tauri/tests/keycast_acl.rs`（走真实编译期
+//!   ACL 的 `resolve_access` 判定，非「文件存在」弱断言）。
+//! - **绝不获 key 焦点**：非交互浮层不得吞用户按键 → 建窗 `focusable(false)`
+//!   （tao 覆写 `canBecomeKeyWindow` → 本窗永不能成为 key window）+ `focused(false)`；
+//!   `set_ignore_cursor_events` 只管鼠标、键盘靠 focusable 兜。实证见
+//!   `src/bin/keycast-focus-probe.rs`（可见 + `canBecomeKeyWindow=false`）。
 
 use serde::Serialize;
 use std::sync::Mutex;
@@ -172,6 +187,28 @@ pub fn parse_flags(flags: u64) -> Mods {
     }
 }
 
+/// 修饰键角色（纯函数）：**修饰键自身的键码** → 它对应的 flags 位。用于「修饰键
+/// 自身按下」的显示去重（见 [`format_key_event`]）——旗标前缀已含该修饰符时，
+/// 键名位置不再重复打印同一符号（否则 ⌘ 键按下显示 "⌘⌘"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifierRole {
+    Cmd,
+    Shift,
+    Alt,
+    Ctrl,
+}
+
+/// 键码 → 修饰键角色（非修饰键 → None）。左右修饰键同角色（0x36 右 ⌘ 等）。
+pub fn modifier_role(code: u16) -> Option<ModifierRole> {
+    match code {
+        0x37 | 0x36 => Some(ModifierRole::Cmd), // command / right command
+        0x38 | 0x3C => Some(ModifierRole::Shift), // shift / right shift
+        0x3A | 0x3D => Some(ModifierRole::Alt), // option / right option
+        0x3B | 0x3E => Some(ModifierRole::Ctrl), // control / right control
+        _ => None,
+    }
+}
+
 /// 组合格式化（纯函数，契约裁定修饰符序 **Cmd ⇧ ⌥ ⌃**）：无修饰符 → 键名原样；
 /// 有修饰符 → 按序前缀（例：Ctrl+Alt+A → "⌥⌃A"，全修饰 → "⌘⇧⌥⌃A"）。
 pub fn format_combo(mods: Mods, key: &str) -> String {
@@ -192,8 +229,40 @@ pub fn format_combo(mods: Mods, key: &str) -> String {
     s
 }
 
-/// 100ms 同组合合并节流（纯逻辑）：**相同**组合在窗口内重复（长按自动重复 ~30Hz、
-/// 双击）→ 只允许首次（单次显示刷新）；不同组合立即放行（快速连打不延迟）。
+/// 一次按键事件的显示串（纯函数，评审修复 Minor 6 的落点）。
+///
+/// 规则：普通键 → [`format_combo`]（旗标前缀 + 键名）。**修饰键自身**按下 → 旗标
+/// 快照通常已含该修饰符（按下即生效），前缀会再打一遍同一符号（"⌘⌘"）——此时
+/// 抑制该位的前缀、由键名位置打一次（"⌘"）；其余旗标保留（⌘+⇧ 期间按 ⌘ → "⇧⌘"）。
+pub fn format_key_event(mods: Mods, code: u16) -> String {
+    let name = keycode_display_name(code);
+    let Some(role) = modifier_role(code) else {
+        return format_combo(mods, &name);
+    };
+    let mut s = String::new();
+    if mods.cmd && role != ModifierRole::Cmd {
+        s.push('⌘');
+    }
+    if mods.shift && role != ModifierRole::Shift {
+        s.push('⇧');
+    }
+    if mods.alt && role != ModifierRole::Alt {
+        s.push('⌥');
+    }
+    if mods.ctrl && role != ModifierRole::Ctrl {
+        s.push('⌃');
+    }
+    s.push_str(&name);
+    s
+}
+
+/// 100ms 同组合合并节流（纯逻辑）。**滑窗语义**（评审修复 Minor 3）：同组合的
+/// 重复在窗内被合并为**一次**显示刷新（plan 契约原文「identical combo repeats →
+/// single display refresh」）。
+///
+/// 基准时间在**抑制时也刷新**（滑窗）——长按自动重复（~30Hz）期间每次重复都把
+/// 基准推后，连续重复永不越过窗口 → **长按只显示一次**；停手后再次按下（距上次
+/// 尝试 >100ms）才重新显示。不同组合立即放行（快速连打零延迟）。
 #[derive(Debug)]
 pub(crate) struct ComboThrottle {
     window: Duration,
@@ -205,18 +274,14 @@ impl ComboThrottle {
         Self { window, last: None }
     }
 
-    /// 该组合此刻是否应显示（是 → 记录新基准）。
+    /// 该组合此刻是否应显示（是 → 记录新基准；否 → 抑制但**仍刷新基准**）。
     pub(crate) fn allow(&mut self, combo: &str, now: Instant) -> bool {
         let dup = matches!(
             &self.last,
             Some((c, t)) if *c == combo && now.duration_since(*t) < self.window
         );
-        if dup {
-            false
-        } else {
-            self.last = Some((combo.to_owned(), now));
-            true
-        }
+        self.last = Some((combo.to_owned(), now));
+        !dup
     }
 }
 
@@ -550,7 +615,7 @@ fn on_key_down(app: &AppHandle, code: u16, flags: u64) {
     static THROTTLE: Mutex<Option<ComboThrottle>> = Mutex::new(None);
     let mut slot = THROTTLE.lock().unwrap_or_else(|e| e.into_inner());
     let throttle = slot.get_or_insert_with(|| ComboThrottle::new(THROTTLE_WINDOW));
-    let combo = format_combo(parse_flags(flags), &keycode_display_name(code));
+    let combo = format_key_event(parse_flags(flags), code);
     if throttle.allow(&combo, Instant::now()) {
         let _ = app.emit(
             "hawk://keycast",
@@ -589,6 +654,13 @@ fn show_keycast_window(app: &AppHandle) -> Result<(), String> {
     .always_on_top(true)
     .resizable(false)
     .skip_taskbar(true)
+    // 绝不抢键盘焦点（评审修复 Important）：tao 的 focusable(false) 覆写
+    // `canBecomeKeyWindow` → 本窗**永远不能成为 key window** → show()（tao 走
+    // makeKeyAndOrderFront）只把它排到最前、不接管键盘，用户的按键仍落在被录
+    // 应用上。与 overlay/flow.rs「绝不 set_focus 抢焦点」同纪律。focused(false)
+    // 另确保建窗瞬间不做 makeKeyAndOrderFront。
+    .focusable(false)
+    .focused(false)
     .transparent(true) // 透明窗：页面自绘组合键胶囊 + CSS 淡出（overlay 同款能力）
     .visible(false)    // 先定位再 show，杜绝默认位置闪现（bar 同款）
     .build()
@@ -708,13 +780,62 @@ mod keycast_tests {
 
     #[test]
     fn throttle_merges_identical_repeats_within_window() {
+        // 滑窗语义（评审修复 Minor 3）：同组合的重复在窗内合并为**一次**显示刷新，
+        // 且**抑制时基准也前移**（长按自动重复永不越过窗口 → 只显示一次）。
         let mut t = ComboThrottle::new(Duration::from_millis(100));
         let t0 = Instant::now();
         assert!(t.allow("A", t0)); // 首次放行
-        assert!(!t.allow("A", t0 + Duration::from_millis(50))); // 窗口内同组合合并
+        assert!(!t.allow("A", t0 + Duration::from_millis(50))); // 窗内同组合合并
         assert!(t.allow("B", t0 + Duration::from_millis(60))); // 不同组合立即放行
         assert!(!t.allow("B", t0 + Duration::from_millis(80)));
-        assert!(t.allow("A", t0 + Duration::from_millis(120))); // 窗口外同组合再次放行
+        // 连续重复（长按）→ 基准持续前移 → 始终不越过窗口 → 只显示一次。
+        assert!(!t.allow("B", t0 + Duration::from_millis(150)));
+        assert!(!t.allow("B", t0 + Duration::from_millis(200)));
+        // 停手后再次按下（距上次尝试 >100ms）→ 重新显示。
+        assert!(t.allow("B", t0 + Duration::from_millis(350)));
+    }
+
+    #[test]
+    fn throttle_allows_same_combo_after_quiet_gap() {
+        // 静默间隔 > 窗口 → 同一组合重新显示（滑窗不等于「永久抑制」）。
+        let mut t = ComboThrottle::new(Duration::from_millis(100));
+        let t0 = Instant::now();
+        assert!(t.allow("A", t0));
+        assert!(!t.allow("A", t0 + Duration::from_millis(40)));
+        // 静默 200ms（无任何尝试）→ 基准仍是 t0+40ms → 已超窗 → 放行。
+        assert!(t.allow("A", t0 + Duration::from_millis(240)));
+    }
+
+    /// 评审修复 Minor 6：修饰键自身按下不重复打印符号（"⌘⌘" → "⌘"）。
+    #[test]
+    fn modifier_key_press_shows_single_symbol() {
+        let none = Mods { cmd: false, shift: false, alt: false, ctrl: false };
+        // ⌘ 键自身按下：旗标快照通常已含 cmd → 只显示一个 ⌘。
+        let cmd = Mods { cmd: true, ..none };
+        assert_eq!(format_key_event(cmd, 0x37), "⌘"); // 左 ⌘
+        assert_eq!(format_key_event(cmd, 0x36), "⌘"); // 右 ⌘
+        // 其余旗标保留：⌘+⇧ 期间按 ⌘ → "⇧⌘"（不重复 ⌘）。
+        let cmd_shift = Mods { cmd: true, shift: true, ..none };
+        assert_eq!(format_key_event(cmd_shift, 0x37), "⇧⌘");
+        // 旗标未含该修饰符时（个别驱动）：键名位置出符号，仍只一个。
+        assert_eq!(format_key_event(none, 0x37), "⌘");
+        // 修饰键角色表：非修饰键 → None。
+        assert_eq!(modifier_role(0x37), Some(ModifierRole::Cmd));
+        assert_eq!(modifier_role(0x38), Some(ModifierRole::Shift));
+        assert_eq!(modifier_role(0x3A), Some(ModifierRole::Alt));
+        assert_eq!(modifier_role(0x3B), Some(ModifierRole::Ctrl));
+        assert_eq!(modifier_role(0x00), None); // A
+    }
+
+    /// 普通键的显示仍是「旗标前缀 + 键名」（format_key_event 走 format_combo 分支）。
+    #[test]
+    fn ordinary_key_event_keeps_combo_format() {
+        let none = Mods { cmd: false, shift: false, alt: false, ctrl: false };
+        assert_eq!(format_key_event(none, 0x00), "A");
+        let cmd = Mods { cmd: true, ..none };
+        assert_eq!(format_key_event(cmd, 0x00), "⌘A");
+        let all = Mods { cmd: true, shift: true, alt: true, ctrl: true };
+        assert_eq!(format_key_event(all, 0x00), "⌘⇧⌥⌃A");
     }
 
     #[test]
