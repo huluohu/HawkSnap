@@ -85,6 +85,9 @@ export default function OverlayWindow() {
   // 录制启动失败的行内错误（覆盖层不是横幅宿主、主面板可能不存在——错误就地可见，
   // 覆盖层保留可重试/Esc 退出，Rust 侧失败路径不 hide）。
   const recordMode = display?.intent === "record";
+  // N5：长截图选区模式（托盘「长截图」进入）。选区 UI 与截图/录制完全同款，差异：
+  // 提示横幅文案、确认路由到 scrollshot_start（进入滚动采集会话）、动作浮条缺席。
+  const scrollshotMode = display?.intent === "scrollshot";
   const [recordError, setRecordError] = useState<string | null>(null);
   // N2 输出格式（录制横幅分段开关，默认 MP4）：覆盖层窗口常驻复用 → 该选择**跨
   // 轮保持**（用户偏好惯性——连录多条 GIF 时不逐轮重选；新一轮 payload 到达不重置，
@@ -205,6 +208,23 @@ export default function OverlayWindow() {
       const myFlow = flowRef.current;
       // N1：录制模式确认路由——record_start_region（成功由 Rust 收口：hide 全部
       // 覆盖层 + 清意图槽 + 拉起录制条；失败覆盖层保留，行内错误 + 解锁在途守卫）。
+      // N5：长截图确认路由——scrollshot_start（成功由 Rust 收口：隐藏全部覆盖层
+      // + 拉起长截图提示条 + 注册 ⌘S 完成热键；失败覆盖层保留，行内错误 + 解锁
+      // 在途守卫）。
+      if (display.intent === "scrollshot") {
+        try {
+          await invoke("scrollshot_start", {
+            req: { displayId: display.displayId, rect: r },
+          });
+          if (flowRef.current !== myFlow) return;
+        } catch (err) {
+          if (flowRef.current !== myFlow) return;
+          console.error("scrollshot_start failed", err);
+          setRecordError(String(err));
+          unlockConfirm();
+        }
+        return;
+      }
       if (display.intent === "record") {
         try {
           await invoke("record_start_region", {
@@ -640,7 +660,16 @@ export default function OverlayWindow() {
           N2：横幅右侧追加 MP4/GIF 分段开关（输出格式在录制开始前选择，确认时随
           record_start_region 下发；格式选中态为高亮胶囊）。录制启动失败时整组替换
           为红色行内错误（覆盖层保留可重试）。 */}
-      {recordMode && (
+      {/* N5 长截图模式提示横幅：与截图/录制同款视觉，仅文案不同（选区 UI 刻意一致）。 */}
+      {scrollshotMode && !recordError && (
+        <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
+          zIndex: 10, pointerEvents: "none", background: "#0D1522",
+          border: "1px solid #22405F", borderRadius: 8, padding: "4px 12px",
+          fontSize: 12, color: "#D8E2EE" }}>
+          {t("scrollshot.hint")}
+        </div>
+      )}
+      {(recordMode || scrollshotMode) && (
         recordError ? (
           <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
             zIndex: 10, pointerEvents: "none", background: "#0D1522",
@@ -677,7 +706,7 @@ export default function OverlayWindow() {
           触发拖拽/双击确认。Enter 缺省 confirm() = "copy"（语义裁定：保存须显式点按钮）。
           N1：录制模式动作浮条**缺席**（确认语义只有「录制这个选区」——Enter/双击/点击，
           无复制/保存/标注分支），选区出现即录即可达。 */}
-      {phase === "selected" && rect && !recordMode && (
+      {phase === "selected" && rect && !recordMode && !scrollshotMode && (
         <div style={{ position: "fixed", display: "flex", gap: 8, alignItems: "center",
           ...barPosition(rect, display.width, display.height),
           background: "#0D1522", border: "1px solid #22405F", borderRadius: 8,

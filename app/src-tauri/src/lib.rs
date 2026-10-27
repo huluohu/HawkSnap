@@ -12,6 +12,7 @@ mod panel;
 mod perf;
 mod pins;
 mod recording;
+mod scrollshot;
 mod settings;
 mod single_instance;
 mod updater;
@@ -33,6 +34,8 @@ pub fn build_tray_menu(
     let panel = MenuItem::with_id(app, "panel", "主面板", true, None::<&str>)?;
     let shot_label = format!("截图 ({})", settings.hotkey_capture);
     let shot = MenuItem::with_id(app, "shot", shot_label, true, None::<&str>)?;
+    // N5：长截图（滚动捕获 + 拼接）。无独立热键——托盘入口 + 覆盖层选区。
+    let scrollshot = MenuItem::with_id(app, "scrollshot", "长截图", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 HawkSnap", true, None::<&str>)?;
     // C5 贴图：关闭全部贴图恒可用（无贴图时调用为空操作，不做动态
     // enable/disable——省去菜单项状态的跨线程同步，与延时子菜单同口径）。
@@ -51,7 +54,7 @@ pub fn build_tray_menu(
         app, "delay-submenu", "延时截图", true,
         &[&delay_1, &delay_2, &delay_3, &delay_5, &delay_cancel],
     )?;
-    Menu::with_items(app, &[&panel, &shot, &pin_close_all, &delay_menu, &quit])
+    Menu::with_items(app, &[&panel, &shot, &scrollshot, &pin_close_all, &delay_menu, &quit])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -102,6 +105,7 @@ pub fn run() {
             recording::record_start, recording::record_pause, recording::record_resume,
             recording::record_stop, recording::record_status, recording::record_start_region,
             recording::pip_update,
+            scrollshot::scrollshot_start, scrollshot::scrollshot_stop, scrollshot::scrollshot_status,
             keycast::keycast_set,
             updater::check_for_updates, updater::install_update, updater::restart_app
         ])
@@ -219,6 +223,19 @@ pub fn run() {
                                 // emit 前确保主面板存在（懒创建）：启动零窗口且用户未开面板时
                                 // push 事件无窗可显——横幅会静默丢失（panel::show_capture_error）。
                                 if let Err(e) = overlay::start_capture_flow(&app) {
+                                    panel::show_capture_error(&app, e);
+                                }
+                            });
+                        }
+                        // N5 长截图入口：线程派发同 shot（建覆盖层禁主线程）；
+                        // 失败走 capture-error 横幅（与 shot 同口径，不静默）。
+                        "scrollshot" => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if crate::bench_mode::is_running() {
+                                    return;
+                                }
+                                if let Err(e) = overlay::start_scrollshot_selection_flow(&app) {
                                     panel::show_capture_error(&app, e);
                                 }
                             });

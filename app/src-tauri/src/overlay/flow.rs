@@ -64,6 +64,12 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
         crate::panel::show_capture_error(app, msg.to_string());
         return Ok(());
     }
+    // N5：长截图会话进行中 → 拒绝启动截图流程（两套全屏 UI 不叠屏；长截图期间
+    // 用户要滚动被拍的内容，不能被截图遮罩打断）。
+    if crate::scrollshot::scrollshot_active() {
+        crate::panel::show_capture_error(app, scrollshot_guard_msg().to_string());
+        return Ok(());
+    }
     // 修复（终审 wave）：手动 F1 撞上进行中的延时截图倒计时时，先置中止旗标再走本流程
     // ——延时 worker 的轮询循环每 ≤50ms 检查 DELAY_ABORT，见真即隐藏倒计时窗、清
     // DELAY_ACTIVE、直接返回（跳过它自己到点的 start_capture_flow）。否则倒计时归零与
@@ -98,12 +104,45 @@ pub fn start_record_selection_flow(app: &AppHandle) -> Result<(), String> {
         }
         F6Route::Reject(msg) => return Err(msg.to_string()),
     }
+    // N5：长截图会话进行中 → 拒绝启动录制选区（两套全屏 UI 不叠屏）。
+    if crate::scrollshot::scrollshot_active() {
+        return Err(scrollshot_guard_msg().to_string());
+    }
     // 延时倒计时中止（与 start_capture_flow 同款语义：新流程优先，倒计时让位）。
     if DELAY_ACTIVE.load(Ordering::SeqCst) {
         DELAY_ABORT.store(true, Ordering::SeqCst);
     }
     super::intent::set(CaptureIntent::Record);
     launch_overlay_flow(app, CaptureIntent::Record)
+}
+
+/// 长截图互斥守卫文案（纯函数可测）：长截图会话进行中 → 拒绝启动截图/录制选区。
+pub fn scrollshot_guard_msg() -> &'static str {
+    "长截图进行中，请先完成或取消长截图"
+}
+
+/// N5：长截图选区流程入口（托盘「长截图」）。
+///
+/// 与截图/录制选区共用同一套覆盖层选区 UI（冻结帧/十字准线/遮罩/磁吸/hover 直选），
+/// 差异只有两件事：提示横幅文案、确认路由到 scrollshot_start（进入滚动采集会话）。
+/// 守卫：录屏中 / 长截图会话中 / 覆盖层已可见 → 拒绝（两套全屏 UI 不叠屏）。
+// 必须在非主线程调用（与 start_capture_flow 同一建窗纪律）。
+pub fn start_scrollshot_selection_flow(app: &AppHandle) -> Result<(), String> {
+    if crate::recording::recording_active() {
+        return Err(capture_guard_msg(true).unwrap().to_string());
+    }
+    if crate::scrollshot::scrollshot_active() {
+        return Err(scrollshot_guard_msg().to_string());
+    }
+    if ANY_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+        return Err("请先完成或取消当前截图".into());
+    }
+    // 延时倒计时中止（与 start_capture_flow 同款语义：新流程优先，倒计时让位）。
+    if DELAY_ACTIVE.load(Ordering::SeqCst) {
+        DELAY_ABORT.store(true, Ordering::SeqCst);
+    }
+    super::intent::set(CaptureIntent::Scrollshot);
+    launch_overlay_flow(app, CaptureIntent::Scrollshot)
 }
 
 /// 两条流程入口的公共实现（N1 从 start_capture_flow 抽取，截图行为逐字节不变）：
@@ -326,6 +365,12 @@ mod tests {
     }
 
     /// 互斥守卫（终审 wave）纯逻辑：录屏进行中 → 拒绝文案；空闲 → 放行。
+    /// N5：长截图互斥守卫文案（纯逻辑）。
+    #[test]
+    fn scrollshot_guard_msg_is_stable() {
+        assert_eq!(scrollshot_guard_msg(), "长截图进行中，请先完成或取消长截图");
+    }
+
     #[test]
     fn capture_guard_only_when_recording() {
         assert_eq!(capture_guard_msg(true).unwrap(), "录屏进行中，请先停止录屏");

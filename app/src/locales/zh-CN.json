@@ -113,5 +113,8 @@
   "record.resume": "恢复",
   "record.stop": "停止",
   "record.paused": "已暂停",
-  "banner.recordError": "录屏失败：{message}"
+  "banner.recordError": "录屏失败：{message}",
+  "scrollshot.hint": "拖选要长截图的区域",
+  "scrollshot.bar.hint": "滚动页面…完成按 ⌘S",
+  "scrollshot.bar.frames": "{n} 帧"
 }

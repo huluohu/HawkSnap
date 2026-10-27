@@ -3,6 +3,10 @@ extern crate self as hawksnap_platform_mac;
 
 pub mod ax;
 
+// 长截图采集源（N5）：窗口区域抓取（CGWindowListCreateImage）+ 屏幕抓取兜底。
+// 模块内部按 cfg(target_os = "macos") 门控平台 API，非 macOS 走 Err 桩。
+pub mod windowcap;
+
 // Plan D Task D4：屏幕录制权限预检 + 系统设置深链引导（修静默壁纸缺陷）。
 pub mod permissions;
 

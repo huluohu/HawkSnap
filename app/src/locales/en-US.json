@@ -113,5 +113,8 @@
   "record.resume": "Resume",
   "record.stop": "Stop",
   "record.paused": "Paused",
-  "banner.recordError": "Recording failed: {message}"
+  "banner.recordError": "Recording failed: {message}",
+  "scrollshot.hint": "Drag to select the area for the long screenshot",
+  "scrollshot.bar.hint": "Scroll the page… press ⌘S to finish",
+  "scrollshot.bar.frames": "{n} frames"
 }

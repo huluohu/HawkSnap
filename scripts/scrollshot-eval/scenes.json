@@ -1,0 +1,191 @@
+{
+  "frame_width": 800,
+  "frame_height": 900,
+  "min_output_height": 20000,
+  "capture_interval_ms": 500,
+  "capture_interval_fast_ms": 200,
+  "fast_shift_ratio": 0.4,
+  "slow_shift_ratio": 0.2,
+  "scenes": [
+    {
+      "id": "01-text",
+      "layout": "text",
+      "seed": 101,
+      "scroll": {
+        "count": 81,
+        "velocity": 565
+      }
+    },
+    {
+      "id": "02-text-dense",
+      "layout": "text-dense",
+      "seed": 102,
+      "scroll": {
+        "count": 89,
+        "velocity": 510
+      }
+    },
+    {
+      "id": "03-images",
+      "layout": "images",
+      "seed": 103,
+      "scroll": {
+        "count": 72,
+        "velocity": 640
+      }
+    },
+    {
+      "id": "04-tables",
+      "layout": "tables",
+      "seed": 104,
+      "scroll": {
+        "count": 77,
+        "velocity": 590
+      }
+    },
+    {
+      "id": "05-code",
+      "layout": "code",
+      "seed": 105,
+      "scroll": {
+        "count": 84,
+        "velocity": 540
+      }
+    },
+    {
+      "id": "06-chat",
+      "layout": "chat",
+      "seed": 106,
+      "scroll": {
+        "count": 71,
+        "velocity": 645
+      }
+    },
+    {
+      "id": "07-fixed-header",
+      "layout": "fixed-header",
+      "seed": 107,
+      "scroll": {
+        "count": 81,
+        "velocity": 565
+      }
+    },
+    {
+      "id": "08-sticky-side",
+      "layout": "sticky-sidebar",
+      "seed": 108,
+      "scroll": {
+        "count": 79,
+        "velocity": 580
+      }
+    },
+    {
+      "id": "09-dark",
+      "layout": "dark",
+      "seed": 109,
+      "scroll": {
+        "count": 86,
+        "velocity": 530
+      }
+    },
+    {
+      "id": "10-doc",
+      "layout": "doc",
+      "seed": 110,
+      "scroll": {
+        "count": 79,
+        "velocity": 580
+      }
+    },
+    {
+      "id": "11-gallery",
+      "layout": "gallery",
+      "seed": 111,
+      "scroll": {
+        "count": 67,
+        "velocity": 690
+      }
+    },
+    {
+      "id": "12-blog",
+      "layout": "blog",
+      "seed": 112,
+      "scroll": {
+        "count": 71,
+        "velocity": 645
+      }
+    },
+    {
+      "id": "13-wiki",
+      "layout": "wiki",
+      "seed": 113,
+      "scroll": {
+        "count": 77,
+        "velocity": 590
+      }
+    },
+    {
+      "id": "14-form",
+      "layout": "form",
+      "seed": 114,
+      "scroll": {
+        "count": 71,
+        "velocity": 645
+      }
+    },
+    {
+      "id": "15-news",
+      "layout": "news",
+      "seed": 115,
+      "scroll": {
+        "count": 77,
+        "velocity": 590
+      }
+    },
+    {
+      "id": "16-forum",
+      "layout": "forum",
+      "seed": 116,
+      "scroll": {
+        "count": 71,
+        "velocity": 645
+      }
+    },
+    {
+      "id": "17-pdf-toolbar",
+      "layout": "pdf-toolbar",
+      "seed": 117,
+      "scroll": {
+        "count": 81,
+        "velocity": 565
+      }
+    },
+    {
+      "id": "18-spreadsheet",
+      "layout": "spreadsheet",
+      "seed": 118,
+      "scroll": {
+        "count": 71,
+        "velocity": 645
+      }
+    },
+    {
+      "id": "19-slides",
+      "layout": "slides",
+      "seed": 119,
+      "scroll": {
+        "count": 67,
+        "velocity": 690
+      }
+    },
+    {
+      "id": "20-mixed",
+      "layout": "mixed",
+      "seed": 120,
+      "scroll": {
+        "count": 77,
+        "velocity": 590
+      }
+    }
+  ]
+}
