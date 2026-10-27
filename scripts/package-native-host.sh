@@ -83,7 +83,7 @@ TARGET_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
 [ -n "$TARGET_TRIPLE" ] || die "无法从 rustc -vV 解析 target triple"
 
 # —— 1) 构建宿主 ——
-echo "==> 构建宿主（profile=$PROFILE, feature=native-host）"
+echo "==> 构建宿主（profile=${PROFILE}, feature=native-host）"
 cargo build \
   --manifest-path "$MANIFEST_PATH" \
   $( [ "$PROFILE" = "release" ] && echo "--release" ) \

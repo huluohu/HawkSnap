@@ -60,7 +60,7 @@ fi
 STATUS=0
 wait "$TEST_PID" || STATUS=$?
 if [ "$STATUS" -ne 0 ]; then
-  echo "[soak] FAIL：录制测试退出码 $STATUS（崩溃≠0，G5 不通过）" >&2
+  echo "[soak] FAIL：录制测试退出码 ${STATUS}（崩溃≠0，G5 不通过）" >&2
   exit "$STATUS"
 fi
 

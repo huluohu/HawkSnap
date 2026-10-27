@@ -96,7 +96,7 @@ COLD_MED=$(median "${COLD_ALL[@]}"); COLD_P90=$(p90 "${COLD_ALL[@]}")
 PANEL_MED=$(median "${PANEL_ALL[@]}"); PANEL_P90=$(p90 "${PANEL_ALL[@]}")
 COLD_OK=$([ "$COLD_MED" -le 800 ] && echo PASS || echo FAIL)
 PANEL_OK=$([ "$PANEL_MED" -le 300 ] && echo PASS || echo FAIL)
-[ "$FAILED" -gt 0 ] && echo "[g4] 失败轮：$FAILED/$RUNS（未计入统计）" >&2
+[ "$FAILED" -gt 0 ] && echo "[g4] 失败轮：${FAILED}/${RUNS}（未计入统计）" >&2
 echo "[g4] cold_start median=${COLD_MED}ms P90=${COLD_P90}ms target<=800ms $COLD_OK"
 echo "[g4] panel median=${PANEL_MED}ms P90=${PANEL_P90}ms target<=300ms $PANEL_OK"
 [ "$COLD_OK" = PASS ] && [ "$PANEL_OK" = PASS ] || exit 1
