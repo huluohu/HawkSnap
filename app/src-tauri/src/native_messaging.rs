@@ -558,7 +558,7 @@ mod tests {
             }),
         );
         assert!(!reply.ok, "缺令牌必须被拒");
-        assert!(reply.error.unwrap_or_default().contains("令牌"), "实际: {line}");
+        assert!(reply.error.unwrap_or_default().contains("令牌"));
 
         // —— 令牌错误 → 拒 ——
         let reply = send_frame(
@@ -605,7 +605,7 @@ mod tests {
         
         assert!(
             reply.error.unwrap_or_default().contains("save"),
-            "错误信息应说明 save 仅宿主侧支持，实际: {line}"
+            "错误信息应说明 save 仅宿主侧支持"
         );
 
         // 历史入库一行 kind="browser"、app="browser"（上面两个被拒的请求不得入库）。
