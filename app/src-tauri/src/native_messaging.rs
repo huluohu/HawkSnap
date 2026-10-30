@@ -523,15 +523,17 @@ mod tests {
     /// 发一帧并读回执（跨平台测试 helper）。
     /// CI 重负载下测试线程与 handler 的调度延迟可能超过 handler 的 15s
     /// 读超时（handler 报 EAGAIN → 连接关 → 测试读到 EOF）——重连重发。
+    /// 预算 10 次 × 300ms ≈ 3.3s：覆盖 macos-14/ubuntu-24.04 runner 的
+    /// 线程调度毛刺（此前 3×200ms 在三平台都偶发耗尽，见 run 41088219403）。
     fn send_frame(port: u16, frame: &serde_json::Value) -> Reply {
         let payload = frame.to_string();
-        for _ in 0..3 {
+        for _ in 0..10 {
             let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
             s.write_all(payload.as_bytes()).unwrap();
             let mut line = String::new();
             BufReader::new(&mut s).read_line(&mut line).unwrap();
             if line.trim().is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::thread::sleep(std::time::Duration::from_millis(300));
                 continue; // handler 超时关连接——重连重发
             }
             return serde_json::from_str(line.trim()).unwrap();
