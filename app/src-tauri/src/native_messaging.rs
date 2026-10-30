@@ -526,7 +526,10 @@ mod tests {
     /// 预算 10 次 × 300ms ≈ 3.3s：覆盖 macos-14/ubuntu-24.04 runner 的
     /// 线程调度毛刺（此前 3×200ms 在三平台都偶发耗尽，见 run 41088219403）。
     fn send_frame(port: u16, frame: &serde_json::Value) -> Reply {
-        let payload = frame.to_string();
+        // 帧协议 = 一行 JSON + \n（handler 按 available 字节扫 \n；缺 \n 会
+        // 缓冲凑不齐一行 → 15s 读超时 EAGAIN → 连接关）。json! 宏重构时曾
+        // 丢失这个 \n，导致三平台全红的必现失败（run 41098282150）。
+        let payload = format!("{frame}\n");
         for _ in 0..10 {
             let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
             s.write_all(payload.as_bytes()).unwrap();
