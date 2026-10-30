@@ -28,12 +28,13 @@ HawkSnap 是一款免费、纯本地的轻量级截屏工具，基于 Tauri 2 + 
 
 真正的平台适配（Windows 抓屏与全局热键、Linux X11 录屏与窗口枚举、Wayland 走 portal 等，见设计文档 §6.3 平台验收矩阵）留待后续里程碑。
 
-**CI 门禁分档**：macOS 与 Linux 腿是**硬门**（均已在真实 runner 上跑绿）；Windows 腿
-**首轮为非阻塞平台验证**（`continue-on-error`）——该腿从未在 Windows runner 上执行过，
-WebView2 SDK（构建期）、xcap 的 Windows 后端（与 X11 不同的代码路径）、rusqlite
-bundled 的 MSVC 依赖、路径 / 临时目录语义（`%TEMP%`、反斜杠）等未知项都是真实的。
-**翻门条件：Windows 腿首次跑绿即改为硬门**（去掉 workflow 里的
-`continue-on-error`），并同步更新本节与 workflow 注释。
+**CI 门禁分档（2026-10-31 起）**：macOS、Linux、Windows 三腿全部为**硬门**（均已在
+真实 runner 上跑绿）。Windows 腿 2026-10-31 从首轮软门翻入：软门期暴露的
+WebView2 SDK（构建期）、xcap 的 Windows 后端、rusqlite bundled 的 MSVC 依赖、
+路径 / 临时目录语义（`%TEMP%`、反斜杠、共享锁）等未知项均已消除或按 Windows
+语义修复。唯一已记录例外：更新器伪签名集成测试（`tests/update_signature.rs`）
+在 Windows 进程加载阶段死于 DLL 入口点缺失（0xc0000139），已平台门控跳过，
+待 Windows 真机诊断（更新器 feed 目前 darwin-only，不影响保证力）。
 
 ## 当前进度
 
