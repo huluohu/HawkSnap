@@ -10,7 +10,9 @@
 #
 # 门禁分档（2026-10-31 起，三腿全硬）：
 #   - Linux（ubuntu-24.04）：**硬门**——该腿已在真实 Linux runner 上跑绿。
-#   - macOS（macos-14）：**硬门**。
+#   - macOS（macos-15）：**硬门**。（2026-10-31 从 macos-14 迁移：GitHub macos-14
+#     镜像 2026-10 每日 14:00–24:00 UTC 棕色收缩、11-02 永久退役——10-30/31 两轮
+#     macos-14 job 全部被 GitHub 收缩窗口取消，非代码回归。）
 #   - Windows（windows-2022）：**硬门**（2026-10-31 从首轮软门翻入，软门期四个
 #     未知项的解除记录见 rust-test matrix 处注释；update_signature 的 Windows
 #     平台门控为唯一已记录例外）。
@@ -33,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04, windows-2022]
+        os: [macos-15, ubuntu-24.04, windows-2022]
     # —— Windows 腿：**硬门**（2026-10-31 翻门）——
     #
     # 软门期遗留项的处置记录（评审修复轮 I2 的四个未知项全部解除）：
@@ -114,7 +116,7 @@ jobs:
   size:
     # G1 体积断言（≤15MB dmg，plan D2 落地、D6 起为正式门）。tauri build 慢是预期；
     # continue-on-error: false——此 job 即 G1 断言本体，红 = 不达标，不允许静默。
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -167,7 +169,7 @@ jobs:
   #   产物会对不上（make-latest 的 --platforms 门）。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: read
     # 签名私钥只进本 job 的构建环境。缺失/为空时 tauri CLI 在签名阶段硬失败
