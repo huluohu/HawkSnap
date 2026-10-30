@@ -437,6 +437,17 @@ pub fn history_delete(app: AppHandle, id: i64) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// Windows 上 SQLite 句柄释放有延迟——remove_dir_all 需重试（code 32 共享冲突）。
+    fn remove_dir_all_retry(dir: &std::path::Path) {
+        for attempt in 0..5 {
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => return,
+                Err(_) if attempt < 4 => std::thread::sleep(std::time::Duration::from_millis(200)),
+                Err(e) => panic!("remove_dir_all 重试后仍失败: {e}"),
+            }
+        }
+    }
+
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "hs-history-{tag}-{}-{}",
@@ -472,7 +483,7 @@ mod tests {
         open_at(&db).unwrap();
         open_at(&db).unwrap(); // 二次 init 不炸（CREATE TABLE IF NOT EXISTS）
         assert!(db.exists());
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -494,7 +505,7 @@ mod tests {
         assert_eq!(rows[1].app, "Safari");
         assert!(!rows[0].created_at.is_empty());
         assert!(rows[0].thumb_path.is_empty() || rows[0].thumb_path == "");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -518,7 +529,7 @@ mod tests {
         // NotFound 忽略：对已删除文件路径的条目再删不炸
         let id2 = record_at(&db, dir.join("gone.png").to_str().unwrap(), "", 1, 1, "App", "region", None).unwrap();
         delete_at(&db, id2).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -538,7 +549,7 @@ mod tests {
         assert!(kept.contains(&ids[5]), "最新的保留");
         assert!(!dir.join("p0.png").exists(), "最旧的文件连带删除");
         assert!(dir.join("p5.png").exists(), "保留条目的文件不动");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// 终审 wave I6：自动裁剪**永不删录制媒体**——行预算对所有 kind 平权（500 条），
@@ -574,7 +585,7 @@ mod tests {
         let rec_row = record_at(&db, dir.join("manual.mp4").to_str().unwrap(), "", 10, 10, "recording", "recording", Some(1.0)).unwrap();
         delete_at(&db, rec_row).unwrap();
         assert!(!dir.join("manual.mp4").exists(), "用户显式删除仍删媒体文件");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -590,7 +601,7 @@ mod tests {
         assert_eq!(page1.iter().map(|r| r.id).collect::<Vec<_>>(), vec![ids[2], ids[1]], "第一页新→旧");
         assert_eq!(page2.iter().map(|r| r.id).collect::<Vec<_>>(), vec![ids[0]], "第二页只剩最旧一条");
         assert!(list_at(&db, 2, 9).unwrap().is_empty(), "越界 offset 空集");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -621,7 +632,7 @@ mod tests {
         assert_eq!((n, ocr), (1, None), "老行保留且 ocr_text 为 NULL");
         // 评审 Fix 同源断言：老库升级后老行必须可检索（回填生效）
         assert_eq!(search_at(&db, "a.png", 50).unwrap().len(), 1, "升级首开回填老行进 FTS");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// FTS5 可用性实证（Task M0 验证项）：bundled libsqlite3-sys 0.38.2 的 build.rs
@@ -664,7 +675,7 @@ mod tests {
         let v: i64 = Connection::open(&db).unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, 3, "回填后 user_version 置 3（M3 duration 列后的迁移终点）");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// 评审 Fix：已迁移库（user_version ≥ 1）不得在每次开连接时重建索引。
@@ -687,7 +698,7 @@ mod tests {
             search_at(&db, "once", 50).unwrap().is_empty(),
             "user_version ≥ 3 必须短路 rebuild（开连接不恢复被掏空的索引）"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -710,7 +721,7 @@ mod tests {
         assert_eq!(by_name[0].app, "Safari");
         // 空查询防御：空集不 Err
         assert!(search_at(&db, "   ", 50).unwrap().is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -727,7 +738,7 @@ mod tests {
         // 引号查询仍能命中普通词（转义不破坏匹配语义）
         assert_eq!(search_at(&db, "a.pn\"g", 50).unwrap().len(), 0);
         assert_eq!(search_at(&db, "a.p\"ng", 50).unwrap().len(), 0, "含引号的短语按分词匹配");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     #[test]
@@ -742,7 +753,7 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         let fts_n: i64 = conn.query_row("SELECT COUNT(*) FROM shots_fts", [], |r| r.get(0)).unwrap();
         assert_eq!(fts_n, 0);
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// M4：M0 形态旧库（两列 FTS + user_version=1）升级——重建三列 FTS 且旧行
@@ -782,7 +793,7 @@ mod tests {
         let hits = search_at(&db, "发票抬头", 50).unwrap();
         assert_eq!(hits.len(), 1, "ocr 文本可检索");
         assert_eq!(hits[0].path, "/pics/a.png");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// M4：set_ocr_text 回填 → 检索 → 覆盖更新 → 删除级联，全程 FTS 一致。
@@ -804,7 +815,7 @@ mod tests {
         // 行删除级联 ocr 索引。
         delete_at(&db, id).unwrap();
         assert!(search_at(&db, "年度预算", 50).unwrap().is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// F12 计时守护（≤200ms/500 条）：合成 500 行后整链计时（含每次操作重开连接——
@@ -827,7 +838,7 @@ mod tests {
             elapsed.as_millis() < 200,
             "F12：500 行搜索必须 <200ms，实测 {elapsed:?}"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// M3 继承项①：kind + duration 写入契约——record_at 按 kind 落 kind 列；截图
@@ -859,7 +870,7 @@ mod tests {
         assert_eq!(rows[1].kind, "region");
         // duration 语义入库即生效：老行（迁移库）读回 NULL 不炸
         assert!(search_at(&db, "rec.mp4", 10).unwrap()[0].duration == Some(12.5));
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// M3 继承项①：0.2.0 的 v2 库升级到 v3——duration 列按探测补齐，老行保留且
@@ -899,7 +910,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!((n, kind.as_str(), duration), (1, "region", None), "老行保留且 duration 为 NULL");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 
     /// M3 继承项①（prune 平权）：prune 已移入 record 本体——入库超过 KEEP_MAX 即
@@ -942,6 +953,6 @@ mod tests {
             "录制条目的媒体文件不被自动裁剪删除（只删行，留文件）"
         );
         assert!(rows.iter().any(|r| r.id == last.unwrap()), "最新一条保留");
-        std::fs::remove_dir_all(&dir).unwrap();
+        remove_dir_all_retry(&dir);
     }
 }

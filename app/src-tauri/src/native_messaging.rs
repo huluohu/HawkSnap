@@ -432,7 +432,11 @@ mod tests {
     #[test]
     fn path_validation_rejects_outside_temp_dir() {
         let e = validate_capture_path("/etc/hawksnap-plugin-x.png").unwrap_err();
-        assert!(e.contains("临时文件不存在") || e.contains("临时目录"), "实际: {e}");
+        // 跨平台：/etc/... 在 Windows 上先被"绝对路径"检查拒绝（同为拒绝语义）
+        assert!(
+            e.contains("临时文件不存在") || e.contains("临时目录") || e.contains("绝对路径"),
+            "实际: {e}"
+        );
     }
 
     #[test]
@@ -540,11 +544,11 @@ mod tests {
 
         // —— 令牌错误 → 拒 ——
         let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        let bad = format!(
-            r#"{{"cmd":"capture","id":"bad-token","path":"{}","width":1,"height":1,"token":"wrong"}}
-"#,
-            plugin_png.to_string_lossy()
-        );
+        let bad = serde_json::json!({
+            "cmd": "capture", "id": "bad-token", "path": plugin_png.to_string_lossy(),
+            "width": 1, "height": 1, "token": "wrong"
+        })
+        .to_string();
         s.write_all(bad.as_bytes()).unwrap();
         let mut line = String::new();
         BufReader::new(&mut s).read_line(&mut line).unwrap();
@@ -553,12 +557,11 @@ mod tests {
 
         // —— 合法帧 → 落盘 + 入库 ——
         let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        let good = format!(
-            r#"{{"cmd":"capture","id":"ok-1","path":"{}","width":1,"height":1,"token":"{}"}}
-"#,
-            plugin_png.to_string_lossy(),
-            cfg.token
-        );
+        let good = serde_json::json!({
+            "cmd": "capture", "id": "ok-1", "path": plugin_png.to_string_lossy(),
+            "width": 1, "height": 1, "token": &cfg.token
+        })
+        .to_string();
         s.write_all(good.as_bytes()).unwrap();
         let mut line = String::new();
         BufReader::new(&mut s).read_line(&mut line).unwrap();
@@ -572,11 +575,11 @@ mod tests {
 
         // —— 恶意 path（临时目录外）→ 桌面端必须拒（不落盘、不入库）——
         let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        let bad_path = format!(
-            r#"{{"cmd":"capture","id":"bad-path","path":"/etc/hawksnap-plugin-evil.png","width":1,"height":1,"token":"{}"}}
-"#,
-            cfg.token
-        );
+        let bad_path = serde_json::json!({
+            "cmd": "capture", "id": "bad-path", "path": "/etc/hawksnap-plugin-evil.png",
+            "width": 1, "height": 1, "token": &cfg.token
+        })
+        .to_string();
         s.write_all(bad_path.as_bytes()).unwrap();
         let mut line = String::new();
         BufReader::new(&mut s).read_line(&mut line).unwrap();
@@ -586,12 +589,10 @@ mod tests {
 
         // —— cmd=save → 桌面端只认 capture，必须拒（否则 save 帧会被当成截图入库）——
         let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        let save_cmd = format!(
-            r#"{{"cmd":"save","id":"save-1","path":"{}","token":"{}"}}
-"#,
-            plugin_png.to_string_lossy(),
-            cfg.token
-        );
+        let save_cmd = serde_json::json!({
+            "cmd": "save", "id": "save-1", "path": plugin_png.to_string_lossy(), "token": &cfg.token
+        })
+        .to_string();
         s.write_all(save_cmd.as_bytes()).unwrap();
         let mut line = String::new();
         BufReader::new(&mut s).read_line(&mut line).unwrap();
