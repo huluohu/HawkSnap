@@ -556,17 +556,27 @@ mod tests {
         assert!(!reply.ok, "错误令牌必须被拒");
 
         // —— 合法帧 → 落盘 + 入库 ——
-        let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
+        // CI 重负载下测试线程的调度延迟可能超过 handler 的 15s 读超时
+        //（handler 报 EAGAIN → 连接关 → 测试读到 EOF）——重连重发一次。
         let good = serde_json::json!({
             "cmd": "capture", "id": "ok-1", "path": plugin_png.to_string_lossy(),
             "width": 1, "height": 1, "token": &cfg.token
         })
         .to_string();
-        s.write_all(good.as_bytes()).unwrap();
-        let mut line = String::new();
-        BufReader::new(&mut s).read_line(&mut line).unwrap();
-        let reply: Reply = serde_json::from_str(line.trim()).unwrap();
-        assert!(reply.ok, "合法帧必须成功，实际: {line}");
+        let mut reply: Option<Reply> = None;
+        for _ in 0..2 {
+            let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
+            s.write_all(good.as_bytes()).unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut s).read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                continue; // handler 超时关连接——重发
+            }
+            reply = Some(serde_json::from_str(line.trim()).unwrap());
+            break;
+        }
+        let reply = reply.unwrap_or_else(|| panic!("合法帧重试后仍无回执"));
+        assert!(reply.ok, "合法帧必须成功");
         let saved = reply.saved_path.clone().unwrap();
         assert!(Path::new(&saved).exists(), "落盘文件必须存在: {saved}");
         let save_dir_s = save_dir.to_string_lossy().into_owned();
