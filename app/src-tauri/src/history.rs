@@ -437,7 +437,10 @@ pub fn history_delete(app: AppHandle, id: i64) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// Windows 上 SQLite 句柄释放有延迟——remove_dir_all 需重试（code 32 共享冲突）。
+    /// Windows 共享锁语义：任何打开中的句柄都会让 remove_dir_all **确定性**
+    /// 失败（os error 32，不是瞬态——句柄必须先 Drop；POSIX 允许 unlink 打开中
+    /// 的文件所以本机不可见）。重试只兜底 Defender/索引器类的短暂占用。
+    /// 测试侧规约：连接全部块作用域，清理前必须已关闭。
     fn remove_dir_all_retry(dir: &std::path::Path) {
         for attempt in 0..5 {
             match std::fs::remove_dir_all(dir) {
@@ -620,16 +623,18 @@ mod tests {
         }
         open_at(&db).unwrap();
         open_at(&db).unwrap(); // 二次迁移幂等（ALTER 不重复执行）
-        let conn = Connection::open(&db).unwrap();
-        let has: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_table_info('shots') WHERE name = 'ocr_text'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(has, 1, "ocr_text 列已加");
-        // 老数据不受影响
-        let (n, ocr): (i64, Option<String>) = conn
-            .query_row("SELECT COUNT(*), MAX(ocr_text) FROM shots", [], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap();
-        assert_eq!((n, ocr), (1, None), "老行保留且 ocr_text 为 NULL");
+        {
+            let conn = Connection::open(&db).unwrap();
+            let has: i64 = conn
+                .query_row("SELECT COUNT(*) FROM pragma_table_info('shots') WHERE name = 'ocr_text'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(has, 1, "ocr_text 列已加");
+            // 老数据不受影响
+            let (n, ocr): (i64, Option<String>) = conn
+                .query_row("SELECT COUNT(*), MAX(ocr_text) FROM shots", [], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap();
+            assert_eq!((n, ocr), (1, None), "老行保留且 ocr_text 为 NULL");
+        } // conn 必须在清理前 Drop——Windows 打开句柄会确定性阻塞删目录
         // 评审 Fix 同源断言：老库升级后老行必须可检索（回填生效）
         assert_eq!(search_at(&db, "a.png", 50).unwrap().len(), 1, "升级首开回填老行进 FTS");
         remove_dir_all_retry(&dir);
@@ -642,10 +647,12 @@ mod tests {
     fn fts5_available_and_open_idempotent() {
         let db = db_file("fts5-avail");
         open_at(&db).unwrap(); // 含 FTS_SCHEMA 二次执行（CREATE VIRTUAL TABLE IF NOT EXISTS）
-        let conn = Connection::open(&db).unwrap();
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts5_probe USING fts5(x)", [])
-            .expect("bundled SQLite 必须启用 FTS5");
-        std::fs::remove_dir_all(db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts5_probe USING fts5(x)", [])
+                .expect("bundled SQLite 必须启用 FTS5");
+        } // conn 必须在清理前 Drop——Windows 打开句柄会确定性阻塞删目录
+        remove_dir_all_retry(db.parent().unwrap());
     }
 
     /// 评审 Fix：C3 老库（裸 SCHEMA + 手工 INSERT，无 FTS 表、user_version 默认 0）
@@ -750,9 +757,11 @@ mod tests {
         delete_at(&db, id).unwrap();
         assert!(search_at(&db, "cascade", 50).unwrap().is_empty(), "删除后 FTS 索引同步失效");
         // 触发器 delete 路径无残留：FTS 行数与 shots 行数一致
-        let conn = Connection::open(&db).unwrap();
-        let fts_n: i64 = conn.query_row("SELECT COUNT(*) FROM shots_fts", [], |r| r.get(0)).unwrap();
-        assert_eq!(fts_n, 0);
+        {
+            let conn = Connection::open(&db).unwrap();
+            let fts_n: i64 = conn.query_row("SELECT COUNT(*) FROM shots_fts", [], |r| r.get(0)).unwrap();
+            assert_eq!(fts_n, 0);
+        } // conn 必须在清理前 Drop——Windows 打开句柄会确定性阻塞删目录
         remove_dir_all_retry(&dir);
     }
 
@@ -856,15 +865,17 @@ mod tests {
         assert_eq!(rows[1].duration, None, "截图行 duration 为 NULL");
         // kind 列直查 + **前端契约面**：ShotRow 现在暴露 kind（终审 wave：前端按
         // kind 门控「重新编辑」等动作，不再靠 app 列冒充）。
-        let conn = Connection::open(&db).unwrap();
-        let kinds: Vec<String> = conn
-            .prepare("SELECT kind FROM shots ORDER BY id")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(kinds, vec!["region", "recording"]);
+        {
+            let conn = Connection::open(&db).unwrap();
+            let kinds: Vec<String> = conn
+                .prepare("SELECT kind FROM shots ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(kinds, vec!["region", "recording"]);
+        } // conn 必须在清理前 Drop——Windows 打开句柄会确定性阻塞删目录
         // 前端契约：ShotRow.kind 直接可读（region / recording）。
         assert_eq!(rows[0].kind, "recording");
         assert_eq!(rows[1].kind, "region");
@@ -895,21 +906,23 @@ mod tests {
         }
         open_at(&db).unwrap();
         open_at(&db).unwrap(); // 二次迁移幂等
-        let conn = Connection::open(&db).unwrap();
-        let has: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_table_info('shots') WHERE name = 'duration'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(has, 1, "duration 列已加");
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 3, "v2 库升级置 3");
-        let (n, kind, duration): (i64, String, Option<f64>) = conn
-            .query_row(
-                "SELECT COUNT(*), MAX(kind), MAX(duration) FROM shots",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((n, kind.as_str(), duration), (1, "region", None), "老行保留且 duration 为 NULL");
+        {
+            let conn = Connection::open(&db).unwrap();
+            let has: i64 = conn
+                .query_row("SELECT COUNT(*) FROM pragma_table_info('shots') WHERE name = 'duration'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(has, 1, "duration 列已加");
+            let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(v, 3, "v2 库升级置 3");
+            let (n, kind, duration): (i64, String, Option<f64>) = conn
+                .query_row(
+                    "SELECT COUNT(*), MAX(kind), MAX(duration) FROM shots",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((n, kind.as_str(), duration), (1, "region", None), "老行保留且 duration 为 NULL");
+        } // conn 必须在清理前 Drop——Windows 打开句柄会确定性阻塞删目录
         remove_dir_all_retry(&dir);
     }
 
