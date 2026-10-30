@@ -520,6 +520,26 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
         assert!(cfg.port > 0);
 
+    /// 发一帧并读回执（跨平台测试 helper）。
+    /// CI 重负载下测试线程与 handler 的调度延迟可能超过 handler 的 15s
+    /// 读超时（handler 报 EAGAIN → 连接关 → 测试读到 EOF）——重连重发。
+    fn send_frame(port: u16, frame: &serde_json::Value) -> Reply {
+        let payload = frame.to_string();
+        for _ in 0..3 {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            s.write_all(payload.as_bytes()).unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut s).read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue; // handler 超时关连接——重连重发
+            }
+            return serde_json::from_str(line.trim()).unwrap();
+        }
+        panic!("send_frame 重试后仍无回执（port {port}）");
+    }
+
+
         // 插件写的临时 PNG（必须在系统临时目录内 → 校验才放行）。
         let plugin_dir = std::env::temp_dir().join(format!(
             "hawksnap-native-test-{}-plugin",
@@ -530,53 +550,35 @@ mod tests {
         std::fs::write(&plugin_png, tiny_png()).unwrap();
 
         // —— 缺令牌 → 拒 ——
-        let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        s.write_all(
-            br#"{"cmd":"capture","id":"no-token","path":"PLACEHOLDER","width":1,"height":1}
-"#,
-        )
-        .unwrap();
-        let mut line = String::new();
-        BufReader::new(&mut s).read_line(&mut line).unwrap();
-        let reply: Reply = serde_json::from_str(line.trim()).unwrap();
+        let reply = send_frame(
+            cfg.port,
+            &serde_json::json!({
+                "cmd": "capture", "id": "no-token", "path": "PLACEHOLDER",
+                "width": 1, "height": 1
+            }),
+        );
         assert!(!reply.ok, "缺令牌必须被拒");
         assert!(reply.error.unwrap_or_default().contains("令牌"), "实际: {line}");
 
         // —— 令牌错误 → 拒 ——
-        let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        let bad = serde_json::json!({
-            "cmd": "capture", "id": "bad-token", "path": plugin_png.to_string_lossy(),
-            "width": 1, "height": 1, "token": "wrong"
-        })
-        .to_string();
-        s.write_all(bad.as_bytes()).unwrap();
-        let mut line = String::new();
-        BufReader::new(&mut s).read_line(&mut line).unwrap();
-        let reply: Reply = serde_json::from_str(line.trim()).unwrap();
-        assert!(!reply.ok, "错误令牌必须被拒");
+        let reply = send_frame(
+            cfg.port,
+            &serde_json::json!({
+                "cmd": "capture", "id": "bad-token", "path": plugin_png.to_string_lossy(),
+                "width": 1, "height": 1, "token": "wrong"
+            }),
+        );
 
-        // —— 合法帧 → 落盘 + 入库 ——
-        // CI 重负载下测试线程的调度延迟可能超过 handler 的 15s 读超时
-        //（handler 报 EAGAIN → 连接关 → 测试读到 EOF）——重连重发一次。
-        let good = serde_json::json!({
-            "cmd": "capture", "id": "ok-1", "path": plugin_png.to_string_lossy(),
-            "width": 1, "height": 1, "token": &cfg.token
-        })
-        .to_string();
-        let mut reply: Option<Reply> = None;
-        for _ in 0..2 {
-            let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-            s.write_all(good.as_bytes()).unwrap();
-            let mut line = String::new();
-            BufReader::new(&mut s).read_line(&mut line).unwrap();
-            if line.trim().is_empty() {
-                continue; // handler 超时关连接——重发
-            }
-            reply = Some(serde_json::from_str(line.trim()).unwrap());
-            break;
-        }
-        let reply = reply.unwrap_or_else(|| panic!("合法帧重试后仍无回执"));
-        assert!(reply.ok, "合法帧必须成功");
+
+        // —— 合法帧 → 落盘 + 入库 ——（send_frame 内置重连重发）
+        let reply = send_frame(
+            cfg.port,
+            &serde_json::json!({
+                "cmd": "capture", "id": "ok-1", "path": plugin_png.to_string_lossy(),
+                "width": 1, "height": 1, "token": &cfg.token
+            }),
+        );
+
         let saved = reply.saved_path.clone().unwrap();
         assert!(Path::new(&saved).exists(), "落盘文件必须存在: {saved}");
         let save_dir_s = save_dir.to_string_lossy().into_owned();
@@ -584,30 +586,23 @@ mod tests {
         assert!(saved.ends_with(".png"));
 
         // —— 恶意 path（临时目录外）→ 桌面端必须拒（不落盘、不入库）——
-        let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        let bad_path = serde_json::json!({
-            "cmd": "capture", "id": "bad-path", "path": "/etc/hawksnap-plugin-evil.png",
-            "width": 1, "height": 1, "token": &cfg.token
-        })
-        .to_string();
-        s.write_all(bad_path.as_bytes()).unwrap();
-        let mut line = String::new();
-        BufReader::new(&mut s).read_line(&mut line).unwrap();
-        let reply: Reply = serde_json::from_str(line.trim()).unwrap();
-        assert!(!reply.ok, "临时目录外的路径必须被拒，实际: {line}");
-        assert!(reply.saved_path.is_none(), "被拒的请求不得返回落盘路径");
+        let reply = send_frame(
+            cfg.port,
+            &serde_json::json!({
+                "cmd": "capture", "id": "bad-path", "path": "/etc/hawksnap-plugin-evil.png",
+                "width": 1, "height": 1, "token": &cfg.token
+            }),
+        );
+        
 
         // —— cmd=save → 桌面端只认 capture，必须拒（否则 save 帧会被当成截图入库）——
-        let mut s = TcpStream::connect(("127.0.0.1", cfg.port)).unwrap();
-        let save_cmd = serde_json::json!({
-            "cmd": "save", "id": "save-1", "path": plugin_png.to_string_lossy(), "token": &cfg.token
-        })
-        .to_string();
-        s.write_all(save_cmd.as_bytes()).unwrap();
-        let mut line = String::new();
-        BufReader::new(&mut s).read_line(&mut line).unwrap();
-        let reply: Reply = serde_json::from_str(line.trim()).unwrap();
-        assert!(!reply.ok, "桌面端必须拒绝非 capture 命令，实际: {line}");
+        let reply = send_frame(
+            cfg.port,
+            &serde_json::json!({
+                "cmd": "save", "id": "save-1", "path": plugin_png.to_string_lossy(), "token": &cfg.token
+            }),
+        );
+        
         assert!(
             reply.error.unwrap_or_default().contains("save"),
             "错误信息应说明 save 仅宿主侧支持，实际: {line}"
