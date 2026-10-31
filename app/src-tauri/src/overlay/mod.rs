@@ -23,7 +23,7 @@ pub use hotkey::{hotkey_error, register_hotkeys, register_one, HotkeyKind};
 // 保存管线（settings.rs apply_pipeline）按注册序逐项注册热键：crate 内共享，不外暴。
 pub(crate) use hotkey::register_in_order;
 #[cfg(target_os = "macos")]
-pub use hotkey::{register_hover_probe, register_media_key_f1};
+pub use hotkey::register_hover_probe;
 
 pub(crate) use flow::ANY_OVERLAY_VISIBLE;
 // bench_mode 基准链路专用：HIDE_WINDOWS 置位 + 轮间隐藏。flow 模块保持私有（门面不破）。

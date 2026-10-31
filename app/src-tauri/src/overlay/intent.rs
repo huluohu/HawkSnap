@@ -6,7 +6,7 @@
 //! record_start_region）。两种用途同一时刻至多一轮流程（M2 互斥守卫 a/b 保证
 //! 不叠屏），故状态槽是 `Mutex<Option<CaptureIntent>>` 单槽：
 //!
-//! - 触发点写入：F1/媒体键/托盘/面板/延时 → [`CaptureIntent::Capture`]；
+//! - 触发点写入：F1/托盘/面板/延时 → [`CaptureIntent::Capture`]；
 //!   F6 空闲触发 → [`CaptureIntent::Record`]（F6 完整语义见 [`f6_route`]）。
 //! - 覆盖层就绪后经 overlay-ready 载荷的 `intent` 字段（`"capture"|"record"`）
 //!   交给前端路由确认——Rust 侧静态槽是单一事实源，载荷值由它派生。

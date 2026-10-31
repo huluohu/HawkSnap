@@ -58,7 +58,7 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
     // 启动截图流程——覆盖层与录屏两套全屏 UI 不叠屏，也避免截图抓屏与 SCStream 并发
     // 争抢。守卫在 mark_hotkey 之前（被拒的触发不计入 perf 打点，与 bench 守卫同款
     // 摆位纪律）；反馈走既有 capture-error 横幅通道（懒拉面板，不静默），返回 Ok(())
-    // ——本轮「无截图」是既定产品行为而非失败。F1/媒体键（trigger_capture_flow）/
+    // ——本轮「无截图」是既定产品行为而非失败。F1（trigger_capture_flow）/
     // 托盘 / 面板按钮全部经本入口，一处守卫全路径生效。
     if let Some(msg) = capture_guard_msg(crate::recording::recording_active()) {
         crate::panel::show_capture_error(app, msg.to_string());
@@ -157,7 +157,7 @@ fn launch_overlay_flow(app: &AppHandle, intent: CaptureIntent) -> Result<(), Str
     // hawk://capture-error → App.tsx 横幅链回流，前端零改动）。
     // bench 守卫（裁定 1）：bench 量链路延迟，与本机授权态无关（bench 宿主可能从未授权），
     // HIDE_WINDOWS 为真（bench 轮次进行中）时跳过预检，基准轮次照常。
-    // 覆盖面：F1 / 媒体键（trigger_capture_flow）/ 托盘 / 面板按钮（截图意图）与
+    // 覆盖面：F1（trigger_capture_flow）/ 托盘 / 面板按钮（截图意图）与
     // F6（录制选区意图）全部经本入口，一处预检全路径生效。
     if !HIDE_WINDOWS.load(Ordering::SeqCst)
         && !hawksnap_platform_mac::permissions::screen_recording_prechecked()
