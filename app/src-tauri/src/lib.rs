@@ -195,14 +195,9 @@ pub fn run() {
                 });
             }
 
-            // 媒体键兼容（Task 13）：macOS 默认 F1=亮度键（fnState 未开启时物理 F1 不发
-            // keycode 122），监听 systemDefined 的亮度下键走与 F1 相同的截图流程；
-            // 监听不可用（未授予辅助功能）时降级并按需经 hotkey-error 通道发「提示：」，
-            // 绝不阻塞启动。
-            #[cfg(target_os = "macos")]
-            if let Err(err) = overlay::register_media_key_f1(app.handle()) {
-                eprintln!("[hawksnap] 媒体键监听注册失败: {err}");
-            }
+            // 截图热键 = 标准 F1（keycode 122，fnState 关闭时按 fn+F1 产生）——不监听
+            // 亮度媒体键：Task 13 的媒体键通道会与系统亮度调节并存（NSEvent 全局监听
+            // 无法吞事件），用户裁定不要占系统键，已整通道移除（见 README「F1 按键模式」）。
 
             // 智能吸附悬停探测（Plan B Task 5）：辅助功能未授予时整条链路缺席（不装监听、
             // 不弹窗，拖拽框选不受影响）；注册失败只 eprintln，绝不阻塞启动。

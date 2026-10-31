@@ -14,9 +14,9 @@
 //!
 //! **CGEventTap（CoreGraphics 裸 extern，ax.rs 同款）而非 NSEvent 全局监听**：
 //! NSEvent 全局监听对按键类事件（keyDown/keyUp）**不投递其他应用**的按键（只有
-//! systemDefined 等特殊事件流例外——媒体键路径正是利用该例外，见 overlay/hotkey.rs
-//! 选型注）；CGEventTap listen-only + kCGSessionEventTap 是监听全局键盘的**正典
-//! API**，辅助功能授权（本应用既有门槛：热键/悬停/媒体键同款）下可靠工作。
+//! systemDefined 等特殊事件流例外）；CGEventTap listen-only + kCGSessionEventTap
+//! 是监听全局键盘的**正典 API**，辅助功能授权（本应用既有门槛：热键/悬停同款）
+//! 下可靠工作。
 //! listen-only 保证 tap 绝不吞改事件——F6 停止热键照常触发，keycast 只是旁路旁观
 //! （顺带把 F6 按键也如实显示，诚实语义）。修饰符**单独**按下（flagsChanged）
 //! M3 不显示——只显示完整组合键（keyDown 时刻的 flags 快照），flagsChanged 不装
@@ -387,7 +387,7 @@ mod ffi {
 }
 
 // ---------------------------------------------------------------------------
-// tap 线程（媒体键 monitor 的线程化对应物：回调只解析+投递，绝不建窗/关窗）
+// tap 线程（回调只解析+投递，绝不建窗/关窗——与热键/悬停监听同一线程纪律）
 // ---------------------------------------------------------------------------
 
 /// tap 回调分发的处理闭包（进程级单槽：keycast tap 进程内至多一个——LIFECYCLE
@@ -456,8 +456,8 @@ impl TapHandle {
     }
 }
 
-/// 装键盘 tap（专用线程 + 私有 CFRunLoop——媒体键模式把监听挂主线程 AppKit 循环，
-/// CGEventTap 则自备 runloop：tauri 主循环归 wry，不可注入外部 source）。
+/// 装键盘 tap（专用线程 + 私有 CFRunLoop——CGEventTap 自备 runloop：tauri 主循环
+/// 归 wry，不可注入外部 source）。
 /// `on_key` 在 tap 线程被调（键码, flags）。创建失败（NULL：辅助功能未授予）→ Err。
 #[cfg(target_os = "macos")]
 pub(crate) fn spawn_tap(on_key: KeyHandler) -> Result<TapHandle, String> {

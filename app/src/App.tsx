@@ -83,7 +83,7 @@ let autoCheckFired = false;
 const fmtMb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
 
 // 热键注册失败载荷（D0-⑤）：与后端 HotkeyError（serde camelCase）对齐——kind 供横幅
-// 归因，message 为人类可读文案（注册失败原因或媒体键降级提示）。kind 的展示名走
+// 归因，message 为人类可读文案（注册失败原因）。kind 的展示名走
 // t(`hotkey.kind.${kind}`)（唯一约定的动态 key 族，单测断言双语在盘——检查器扫不到
 // 模板字面量，scripts/check-i18n.mjs 对此类调用报 warn 不 fail）。
 type HotkeyKind = "capture" | "pin" | "record";

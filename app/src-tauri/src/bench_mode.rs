@@ -15,7 +15,7 @@ use hawksnap_core::geometry::Rect;
 /// 模式，跑完即 app.exit）。供外部触发点守卫用（D0-③，Plan C 终审）——见 [`is_running`]。
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// bench 模式进行中？外部触发入口（F1/媒体键经 trigger_capture_flow、托盘截图、面板
+/// bench 模式进行中？外部触发入口（F1 经 trigger_capture_flow、托盘截图、面板
 /// 截图按钮）应在此为 true 时忽略触发：bench 轮次直接调 start_capture_flow、不走这些
 /// 外部入口，用户/托盘中途混入的一轮会污染当轮计时。bench 线程自身不查此旗标。
 pub fn is_running() -> bool {
