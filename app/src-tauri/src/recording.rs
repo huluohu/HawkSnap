@@ -305,7 +305,7 @@ pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String
         if let Err(e) = hawksnap_platform_mac::permissions::open_screen_recording_settings() {
             eprintln!("[hawksnap] 打开屏幕录制权限设置失败: {e}");
         }
-        return Err("屏幕录制权限未授予：已为你打开系统设置，授权后重新按 F6 即可".into());
+        return Err("屏幕录制权限未授予：请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 HawkSnap（首次失败已自动打开设置）".into());
     }
 
     let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
@@ -446,7 +446,7 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
         if let Err(e) = hawksnap_platform_mac::permissions::open_screen_recording_settings() {
             eprintln!("[hawksnap] 打开屏幕录制权限设置失败: {e}");
         }
-        return Err("屏幕录制权限未授予：已为你打开系统设置，授权后重新按 F6 即可".into());
+        return Err("屏幕录制权限未授予：请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 HawkSnap（首次失败已自动打开设置）".into());
     }
 
     let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
@@ -607,7 +607,7 @@ pub fn pip_update(
     }
 }
 
-/// 停止：writer 收尾（阻塞 ≤25s）→（gif 会话）drain 旁路队列 gifski 编码（硬超时
+/// 停止：writer 收尾（阻塞 ≤25s）→（gif 会话）drain 旁路队列 GIF 编码（硬超时
 /// 60s，正常 ≤10s——F8 预算）→ 历史入库（kind=recording，thumb 留空——M0 网格对
 /// 空 thumbPath 已有占位渲染）→ 关闭悬浮条窗口（终审修复，见函数体注；失败路径
 /// 条保持可见展示行内错误）。返回产物路径（gif 会话 = .gif；编码失败降级 = MP4）。

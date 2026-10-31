@@ -1,116 +1,733 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
+/* ============================================================================
+   HawkSnap 主面板样式（表现层，仅供 App.tsx 渲染的主窗口使用）
+   ----------------------------------------------------------------------------
+   设计 token（浅色为基线；深色整组在 [data-theme="dark"] 覆盖，变量语义不变）：
 
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafb);
-}
+   色板
+     窗口底色      --hs-bg               #f5f5f7 / #1e1e20
+     卡片底        --hs-card-bg          #ffffff / #2a2a2d
+     卡片描边      --hs-card-border      rgba(0,0,0,.08) / rgba(255,255,255,.10)
+     分隔线        --hs-separator        rgba(0,0,0,.06) / rgba(255,255,255,.08)
+     正文          --hs-text             #1d1d1f / #f5f5f7
+     次要文字      --hs-text-2           #6e6e73 / #a1a1a6
+     弱文字/占位   --hs-text-3           #98989d / #7c7c81
+     强调蓝        --hs-accent           #0a84ff（hover 提亮 / active 压暗）
+     危险红        --hs-red              #ff3b30 / #ff453a
+     成功绿(文字)  --hs-green-text       #1d7d33 / #63e08c
+   间距     4 · 8 · 12 · 16 · 24 · 32
+   圆角     小钮 5px · 控件 7px · 卡片/瓦片 10–12px · 胶囊 999px
+   字号     11 瓦片钮 · 12 meta/提示/状态 · 13 正文基准 · 15 区块标题/品牌
+   阴影     卡片 0 1px 2px rgba(0,0,0,.04), 0 4px 14px rgba(0,0,0,.05)
+            （深色整体加深）；瓦片 hover 单独 --hs-shadow-tile
+   焦点环   --hs-focus-ring  0 0 0 3px rgba(10,132,255,.30)（仅 focus-visible）
+   ----------------------------------------------------------------------------
+   作用域约定：本文件经 main.tsx 的静态 import 图进入所有窗口（overlay /
+   editor / recording-bar 等共用同一 index.html 产物），因此除 CSS 变量声明
+   与 body.hs-panel-body（仅主面板运行时会打上的标记）外，全部规则挂在
+   .hs-root 之下 —— 禁止裸元素选择器，避免污染其它窗口的内联样式。
+   ============================================================================ */
+
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+  color-scheme: light;
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
+  /* 表面 */
+  --hs-bg: #f5f5f7;
+  --hs-card-bg: #ffffff;
+  --hs-card-border: rgba(0, 0, 0, 0.08);
+  --hs-separator: rgba(0, 0, 0, 0.06);
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+  /* 文字 */
+  --hs-text: #1d1d1f;
+  --hs-text-2: #6e6e73;
+  --hs-text-3: #98989d;
+
+  /* 强调色 */
+  --hs-accent: #0a84ff;
+  --hs-accent-hover: #2f96ff;
+  --hs-accent-active: #0069d9;
+  --hs-red: #ff3b30;
+  --hs-red-hover: #ff5147;
+  --hs-red-active: #e0342b;
+  --hs-green: #34c759;
+
+  /* 横幅（红=错误，绿=状态告知） */
+  --hs-red-bg: rgba(255, 59, 48, 0.08);
+  --hs-red-border: rgba(255, 59, 48, 0.32);
+  --hs-red-text: #c22a20;
+  --hs-green-bg: rgba(52, 199, 89, 0.10);
+  --hs-green-border: rgba(52, 199, 89, 0.35);
+  --hs-green-text: #1d7d33;
+
+  /* 控件 */
+  --hs-input-bg: #ffffff;
+  --hs-input-border: rgba(0, 0, 0, 0.14);
+  --hs-input-border-hover: rgba(0, 0, 0, 0.28);
+  --hs-hover: rgba(0, 0, 0, 0.05);
+  --hs-hover-active: rgba(0, 0, 0, 0.09);
+  --hs-code-bg: rgba(0, 0, 0, 0.04);
+
+  /* 瓦片占位渐变 */
+  --hs-blank-grad: linear-gradient(135deg, #f1f1f4, #e4e4ea);
+  --hs-record-grad: linear-gradient(135deg, #e3f0ff, #eae6ff);
+  --hs-tile-hover-border: rgba(0, 0, 0, 0.18);
+
+  /* 阴影 / 焦点环 */
+  --hs-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 14px rgba(0, 0, 0, 0.05);
+  --hs-shadow-tile: 0 2px 10px rgba(0, 0, 0, 0.09);
+  --hs-focus-ring: 0 0 0 3px rgba(10, 132, 255, 0.3);
+
+  /* 字体 */
+  --hs-font:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "PingFang SC",
+    "Hiragino Sans GB", "Segoe UI", sans-serif;
+  --hs-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-.container {
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --hs-bg: #1e1e20;
+  --hs-card-bg: #2a2a2d;
+  --hs-card-border: rgba(255, 255, 255, 0.1);
+  --hs-separator: rgba(255, 255, 255, 0.08);
+
+  --hs-text: #f5f5f7;
+  --hs-text-2: #a1a1a6;
+  --hs-text-3: #7c7c81;
+
+  --hs-accent: #0a84ff;
+  --hs-accent-hover: #409cff;
+  --hs-accent-active: #0a6ede;
+  --hs-red: #ff453a;
+  --hs-red-hover: #ff6259;
+  --hs-red-active: #d9342b;
+  --hs-green: #30d158;
+
+  --hs-red-bg: rgba(255, 69, 58, 0.14);
+  --hs-red-border: rgba(255, 69, 58, 0.38);
+  --hs-red-text: #ff9a93;
+  --hs-green-bg: rgba(48, 209, 88, 0.13);
+  --hs-green-border: rgba(48, 209, 88, 0.38);
+  --hs-green-text: #63e08c;
+
+  --hs-input-bg: rgba(255, 255, 255, 0.055);
+  --hs-input-border: rgba(255, 255, 255, 0.14);
+  --hs-input-border-hover: rgba(255, 255, 255, 0.28);
+  --hs-hover: rgba(255, 255, 255, 0.08);
+  --hs-hover-active: rgba(255, 255, 255, 0.14);
+  --hs-code-bg: rgba(255, 255, 255, 0.06);
+
+  --hs-blank-grad: linear-gradient(135deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.1));
+  --hs-record-grad: linear-gradient(135deg, rgba(10, 132, 255, 0.2), rgba(94, 92, 230, 0.26));
+  --hs-tile-hover-border: rgba(255, 255, 255, 0.22);
+
+  --hs-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px rgba(0, 0, 0, 0.35);
+  --hs-shadow-tile: 0 2px 10px rgba(0, 0, 0, 0.45);
+  --hs-focus-ring: 0 0 0 3px rgba(10, 132, 255, 0.38);
+}
+
+/* 仅主面板运行时由 App.tsx 的主题 effect 打标（body.classList.add），其余窗口
+   不会带此类 —— body 级背景/字体由此限定作用域。 */
+body.hs-panel-body {
   margin: 0;
-  padding-top: 10vh;
+  background: var(--hs-bg);
+  color: var(--hs-text);
+  font-family: var(--hs-font);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* —— 根布局：单列内容（≤640px 居中），窗口 800×560 内首屏放下头部+入口+历史 —— */
+
+.hs-root {
+  box-sizing: border-box;
+  min-height: 100vh;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px 20px 32px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  text-align: center;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+.hs-root *,
+.hs-root *::before,
+.hs-root *::after {
+  box-sizing: border-box;
 }
 
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
+.hs-root button {
+  cursor: pointer;
   font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
 }
 
-button {
+.hs-root button:disabled {
+  cursor: default;
+}
+
+.hs-root ::placeholder {
+  color: var(--hs-text-3);
+}
+
+/* —— 紧凑头部：应用标识 + 两个主操作 —— */
+
+.hs-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  margin-bottom: 14px;
+}
+
+.hs-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--hs-text);
+}
+
+.hs-brand-icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #0a84ff, #5e5ce6);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.35),
+    0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.hs-topbar-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+/* —— 通知条区域（错误红系 / 状态绿系，安静底色，可多条堆叠） —— */
+
+.hs-banners {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.hs-banners:empty {
+  display: none;
+}
+
+.hs-banner {
+  padding: 12px;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.hs-banner-error {
+  background: var(--hs-red-bg);
+  border-color: var(--hs-red-border);
+  color: var(--hs-red-text);
+}
+
+.hs-banner-info {
+  background: var(--hs-green-bg);
+  border-color: var(--hs-green-border);
+  color: var(--hs-green-text);
+}
+
+.hs-banner-sm {
+  padding: 8px 12px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+/* —— 卡片分组（历史 / 设置 / 插件） —— */
+
+.hs-content {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.hs-card {
+  min-width: 0;
+  padding: 16px;
+  background: var(--hs-card-bg);
+  border: 1px solid var(--hs-card-border);
+  border-radius: 12px;
+  box-shadow: var(--hs-shadow-card);
+}
+
+.hs-section-title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--hs-text);
+}
+
+/* —— 历史区：胶囊搜索框 + auto-fill 网格 —— */
+
+.hs-search {
+  width: 100%;
+  appearance: none;
+  padding: 7px 14px;
+  border: 1px solid var(--hs-input-border);
+  border-radius: 999px;
+  background: var(--hs-input-bg);
+  color: var(--hs-text);
+  font: inherit;
+  font-size: 13px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hs-search:hover {
+  border-color: var(--hs-input-border-hover);
+}
+
+.hs-search:focus-visible {
+  outline: none;
+  border-color: var(--hs-accent);
+  box-shadow: var(--hs-focus-ring);
+}
+
+.hs-empty {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 28px 12px 20px;
+  color: var(--hs-text-2);
+}
+
+.hs-empty-icon {
+  font-size: 30px;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.hs-empty-text {
+  margin: 0;
+  font-size: 13px;
+}
+
+.hs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.hs-tile {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--hs-card-bg);
+  border: 1px solid var(--hs-card-border);
+  border-radius: 10px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hs-tile:hover,
+.hs-tile:focus-within {
+  border-color: var(--hs-tile-hover-border);
+  box-shadow: var(--hs-shadow-tile);
+}
+
+/* 缩略图：4:3 固定比例 + cover；占位（录屏 🎬 / 无缩略图）走主题化渐变底 */
+.hs-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-bottom: 1px solid var(--hs-separator);
+  background: var(--hs-blank-grad);
+}
+
+div.hs-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hs-thumb-record {
+  font-size: 30px;
+  line-height: 1;
+  background: var(--hs-record-grad);
+}
+
+.hs-thumb-blank {
+  background: var(--hs-blank-grad);
+}
+
+.hs-tile-meta {
+  padding: 7px 10px 2px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--hs-text-2);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  min-height: 2.7em;
+}
+
+/* 动作按钮组：hover / 键盘聚焦瓦片时浮现 */
+.hs-tile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px 8px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.hs-tile:hover .hs-tile-actions,
+.hs-tile:focus-within .hs-tile-actions {
+  opacity: 1;
+}
+
+.hs-tile-btn {
+  appearance: none;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.3;
+  padding: 3px 8px;
+  border: 1px solid var(--hs-input-border);
+  border-radius: 5px;
+  background: var(--hs-card-bg);
+  color: var(--hs-text);
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.hs-tile-btn:hover {
+  background: var(--hs-hover);
+}
+
+.hs-tile-btn:active {
+  background: var(--hs-hover-active);
+}
+
+.hs-tile-btn:focus-visible {
+  outline: none;
+  border-color: var(--hs-accent);
+  box-shadow: var(--hs-focus-ring);
+}
+
+/* 两步删除的确认态：红底白字 */
+.hs-tile-btn-danger {
+  background: var(--hs-red);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 500;
+}
+
+.hs-tile-btn-danger:hover {
+  background: var(--hs-red-hover);
+}
+
+.hs-tile-btn-danger:active {
+  background: var(--hs-red-active);
+}
+
+.hs-tile-btn-danger:focus-visible {
+  border-color: transparent;
+}
+
+/* —— 设置区 / 插件区：label 左列(120px) + 控件右列，行间细分隔线 —— */
+
+.hs-field {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px 16px;
+  align-items: start;
+  padding: 10px 0;
+}
+
+.hs-field + .hs-field {
+  border-top: 1px solid var(--hs-separator);
+}
+
+.hs-field-label {
+  padding-top: 2px;
+  font-size: 13px;
+  color: var(--hs-text);
+}
+
+.hs-field-control {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hs-slot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.hs-slot-label {
+  flex: none;
+  width: 88px;
+  font-size: 12px;
+  color: var(--hs-text-2);
+}
+
+.hs-hotkey-btn {
+  min-width: 120px;
+  font-family: var(--hs-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.hs-pressing {
+  font-size: 12px;
+  color: var(--hs-accent);
+}
+
+.hs-radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  padding-top: 2px;
+}
+
+.hs-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
   cursor: pointer;
 }
 
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.hs-quality {
+  display: inline-flex;
+  flex: 1;
+  min-width: 180px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--hs-text-2);
 }
 
-input,
-button {
+.hs-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.hs-input,
+.hs-select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--hs-text);
+  padding: 6px 10px;
+  border: 1px solid var(--hs-input-border);
+  border-radius: 7px;
+  background: var(--hs-input-bg);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.hs-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.hs-select {
+  padding-right: 26px;
+  cursor: pointer;
+}
+
+.hs-input:hover,
+.hs-select:hover {
+  border-color: var(--hs-input-border-hover);
+}
+
+.hs-input:focus-visible,
+.hs-select:focus-visible {
   outline: none;
+  border-color: var(--hs-accent);
+  box-shadow: var(--hs-focus-ring);
 }
 
-#greet-input {
-  margin-right: 5px;
+.hs-updates-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+.hs-status-ok {
+  font-size: 12px;
+  color: var(--hs-green-text);
+}
+
+.hs-status-busy {
+  font-size: 12px;
+  color: var(--hs-text-2);
+}
+
+.hs-status-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.hs-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--hs-text-3);
+}
+
+.hs-dot-idle {
+  background: var(--hs-text-3);
+}
+
+.hs-dot-ready {
+  background: var(--hs-green);
+}
+
+.hs-dot-stopped {
+  background: var(--hs-red);
+}
+
+.hs-notes {
+  margin: 0;
+  font-size: 12px;
+  color: var(--hs-text-2);
+  white-space: pre-wrap;
+}
+
+.hs-code {
+  font-family: var(--hs-font-mono);
+  font-size: 12px;
+  color: var(--hs-text);
+  background: var(--hs-code-bg);
+  border: 1px solid var(--hs-separator);
+  border-radius: 6px;
+  padding: 3px 8px;
+  overflow-wrap: anywhere;
+}
+
+.hs-field-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--hs-text-2);
+}
+
+.hs-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hs-separator);
+}
+
+.hs-btn-save {
+  min-width: 132px;
+  padding: 7px 28px;
+}
+
+/* —— 按钮：基础 / 主（accent 蓝）/ 次（描边） —— */
+
+.hs-btn {
+  appearance: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--hs-card-bg);
+  color: var(--hs-text);
+  user-select: none;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    color 0.15s ease;
+}
+
+.hs-btn:focus-visible {
+  outline: none;
+  border-color: var(--hs-accent);
+  box-shadow: var(--hs-focus-ring);
+}
+
+.hs-btn:disabled {
+  opacity: 0.45;
+}
+
+.hs-btn-primary {
+  background: var(--hs-accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.hs-btn-primary:not(:disabled):hover {
+  background: var(--hs-accent-hover);
+}
+
+.hs-btn-primary:not(:disabled):active {
+  background: var(--hs-accent-active);
+}
+
+.hs-btn-secondary {
+  border-color: var(--hs-input-border);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.03);
+}
+
+.hs-btn-secondary:not(:disabled):hover {
+  background: var(--hs-hover);
+}
+
+.hs-btn-secondary:not(:disabled):active {
+  background: var(--hs-hover-active);
+}
+
+/* —— 原生控件的强调色（radio/checkbox/range 走 accent，焦点环兜底） —— */
+
+.hs-root input[type="radio"],
+.hs-root input[type="checkbox"],
+.hs-root input[type="range"] {
+  accent-color: var(--hs-accent);
+  cursor: pointer;
+}
+
+.hs-root input[type="radio"]:focus-visible,
+.hs-root input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--hs-accent);
+  outline-offset: 2px;
+}
+
+/* —— 窄窗口兜底（面板最小 600×420）：label 列塌成单列 —— */
+
+@media (max-width: 520px) {
+  .hs-field {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
+  .hs-field-label {
+    padding-top: 0;
   }
 }

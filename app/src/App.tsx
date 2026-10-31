@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -9,6 +9,7 @@ import {
   type LanguageSetting,
 } from "./lib/i18n";
 import { formatShotDate, shotKind, canReedit, type ShotRow } from "./lib/history";
+import "./App.css";
 
 // —— 设置模型（C7）：与 Rust Settings（serde camelCase）逐字段对齐 ——
 interface Settings {
@@ -119,7 +120,7 @@ function comboFromEvent(e: KeyboardEvent): string | null {
 }
 
 function App() {
-  // 订阅 i18n 语言态：语言切换触发本组件重渲染，全部 t() 文案即时换新（不重载）。
+  // 订阅 i18n 语言态：语言切换触发本组件重渲染，全部文案即时换新（不重载）。
   useSyncExternalStore(subscribe, getLanguage);
   const [hotkeyError, setHotkeyError] = useState<HotkeyErrorPayload | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
@@ -254,6 +255,27 @@ function App() {
       })
       .catch((e) => setSettingsError(String(e)));
   }, []);
+
+  // —— 外观主题接线（表现层，本次 UI 重设计新增的唯一逻辑）——
+  // form.appearance（system|light|dark）→ documentElement.dataset.theme（light/dark）；
+  // "跟随系统"经 prefers-color-scheme 解析并订阅其变化实时切换。App.css 全部颜色走
+  // CSS 变量，[data-theme="dark"] 整组覆盖。面板 body 打标 hs-panel-body——本样式表
+  // 经 main.tsx 打进所有窗口的产物，body 级规则借此只作用主面板。
+  useEffect(() => {
+    const mq =
+      typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-color-scheme: dark)")
+        : null;
+    const apply = () => {
+      const dark =
+        form.appearance === "dark" || (form.appearance === "system" && !!mq?.matches);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    };
+    apply();
+    document.body.classList.add("hs-panel-body");
+    mq?.addEventListener("change", apply);
+    return () => mq?.removeEventListener("change", apply);
+  }, [form.appearance]);
 
   // 热键捕获模式：捕获态挂 window 捕获相 keydown——下一个组合键写入对应槽位；Esc 取消；
   // 纯修饰键忽略。capture 相 + stopPropagation 避免页面其他快捷逻辑收到该事件。
@@ -437,485 +459,409 @@ function App() {
     setForm((f) => ({ ...f, [key]: value }));
 
   return (
-    <main className="container">
-      {hotkeyError && (
-        <div role="alert" style={banner}>
-          {t("banner.hotkeyError", {
-            kind: t(`hotkey.kind.${hotkeyError.kind}`),
-            message: hotkeyError.message,
-          })}
+    <main className="hs-root">
+      <header className="hs-topbar">
+        <h1 className="hs-brand">
+          <span className="hs-brand-icon" aria-hidden="true">🦅</span>
+          HawkSnap
+        </h1>
+        <div className="hs-topbar-actions">
+          <button className="hs-btn hs-btn-primary" onClick={() => trigger("capture")}>
+            {t("panel.capture", { key: form.hotkeyCapture })}
+          </button>
+          <button className="hs-btn hs-btn-primary" onClick={() => trigger("pin")}>
+            {t("panel.pin", { key: form.hotkeyPin })}
+          </button>
         </div>
-      )}
-      {captureError && (
-        <div role="alert" style={banner}>
-          {t("banner.captureError", { message: captureError })}
-        </div>
-      )}
-      {recordError && (
-        <div role="alert" style={banner}>
-          {t("banner.recordError", { message: recordError })}
-        </div>
-      )}
-      {settingsError && (
-        <div role="alert" style={banner}>
-          {t("banner.settingsError", { message: settingsError })}
-        </div>
-      )}
-      {updateError && (
-        <div role="alert" style={banner}>
-          {updateError}
-        </div>
-      )}
-      {browserCapture && (
-        <div role="status" style={infoBanner}>
-          {t("banner.browserCapture", { path: browserCapture })}
-        </div>
-      )}
-      <h1>HawkSnap</h1>
-      <section style={{ display: "flex", gap: 12, justifyContent: "center", margin: "16px 0" }}>
-        <button style={entryBtn} onClick={() => trigger("capture")}>
-          {t("panel.capture", { key: form.hotkeyCapture })}
-        </button>
-        <button style={entryBtn} onClick={() => trigger("pin")}>
-          {t("panel.pin", { key: form.hotkeyPin })}
-        </button>
-      </section>
-      {/* —— 历史分区（M0）：替代 C6 的禁用「历史」入口行 —— */}
-      <section style={historySection}>
-        <h2 style={{ fontSize: 16, margin: "0 0 8px" }}>{t("history.title")}</h2>
-        <input
-          type="search"
-          style={{ ...entryBtn, cursor: "text", width: "100%", boxSizing: "border-box" }}
-          placeholder={t("history.searchPlaceholder")}
-          aria-label={t("history.searchPlaceholder")}
-          value={historyQuery}
-          onChange={(e) => setHistoryQuery(e.target.value)}
-        />
-        {historyError && (
-          <div role="alert" style={historyBanner}>
-            {t("history.actionError", { message: historyError })}
-          </div>
-        )}
-        {shots.length === 0 ? (
-          <p style={{ color: "#666", textAlign: "center" }}>
-            {debouncedQuery.trim() === "" ? t("history.empty") : t("history.emptySearch")}
-          </p>
-        ) : (
-          <div style={grid}>
-            {shots.map((shot) => {
-              const title = `${formatShotDate(shot.createdAt, getLanguage())} · ${shot.app}`;
-              return (
-                <div key={shot.id} style={tile} title={title}>
-                  {shot.thumbPath ? (
-                    <img
-                      src={convertFileSrc(shot.thumbPath)}
-                      alt={title}
-                      loading="lazy"
-                      style={thumb}
-                    />
-                  ) : shotKind(shot) === "recording" ? (
-                    // 录屏条目（M6）：无缩略图 → 🎬 占位（贴图/重新编辑对 MP4 无意义，
-                    // 下方动作区隐藏；打开目录/删除照常）。按 kind 判定（不再靠 app
-                    // 列复用——kind 已是契约字段）。
-                    <div style={{ ...thumb, background: "#e9e9ee", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }} aria-hidden="true">🎬</div>
-                  ) : (
-                    <div style={{ ...thumb, background: "#e9e9ee" }} aria-hidden="true" />
-                  )}
-                  <div style={tileMeta}>{title}</div>
-                  <div style={tileActions}>
-                    <button style={tileBtn} onClick={() => pinShot(shot.path)}>
-                      {t("history.pin")}
-                    </button>
-                    <button style={tileBtn} onClick={() => openShot(shot.path)}>
-                      {t("history.openFolder")}
-                    </button>
-                    {confirmDeleteId === shot.id ? (
-                      // 长hand 边框（不与 tileBtn 的 border 简写混用，避免 React 样式合并告警）
-                      <button style={tileBtnDanger} onClick={() => removeShot(shot.id)}>
-                        {t("history.confirmDelete")}
-                      </button>
-                    ) : (
-                      <button style={tileBtn} onClick={() => setConfirmDeleteId(shot.id)}>
-                        {t("history.delete")}
-                      </button>
-                    )}
-                    {/* M2 Task M3：重新编辑启用——editor_open（origin=null）；录屏条目
-                        不提供（MP4 非编辑器输入，M6 裁定）；**长截图条目同样不提供**
-                        （终审 wave I7：长图可达 32MP，编辑器画布/导出路径按巨幅位图
-                        走会出内存尖峰与导出超时）。按 kind 门控。 */}
-                    {canReedit(shot) && (
-                      <button style={tileBtn} onClick={() => reeditShot(shot.path)}>
-                        {t("history.reedit")}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
+      </header>
+
+      {/* 通知条区域：五路错误（热键/截图/录屏/设置/更新）红色系，浏览器截图入库
+          为状态告知绿色系；允许多条堆叠，视觉安静（浅色底 + 细描边）。 */}
+      <div className="hs-banners">
+        {hotkeyError && (
+          <div role="alert" className="hs-banner hs-banner-error">
+            {t("banner.hotkeyError", {
+              kind: t(`hotkey.kind.${hotkeyError.kind}`),
+              message: hotkeyError.message,
             })}
           </div>
         )}
-      </section>
-      <section style={settingsSection}>
-        <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>{t("settings.title")}</h2>
+        {captureError && (
+          <div role="alert" className="hs-banner hs-banner-error">
+            {t("banner.captureError", { message: captureError })}
+          </div>
+        )}
+        {recordError && (
+          <div role="alert" className="hs-banner hs-banner-error">
+            {t("banner.recordError", { message: recordError })}
+          </div>
+        )}
+        {settingsError && (
+          <div role="alert" className="hs-banner hs-banner-error">
+            {t("banner.settingsError", { message: settingsError })}
+          </div>
+        )}
+        {updateError && (
+          <div role="alert" className="hs-banner hs-banner-error">
+            {updateError}
+          </div>
+        )}
+        {browserCapture && (
+          <div role="status" className="hs-banner hs-banner-info">
+            {t("banner.browserCapture", { path: browserCapture })}
+          </div>
+        )}
+      </div>
 
-        <div style={fieldRow}>
-          <label style={fieldLabel}>{t("settings.hotkeyLabel")}</label>
-          <div style={{ display: "grid", gap: 6 }}>
-            {([
-              { key: "hotkeyCapture" as const, label: t("settings.slot.capture") },
-              { key: "hotkeyPin" as const, label: t("settings.slot.pin") },
-              { key: "hotkeyRecord" as const, label: t("settings.slot.record") },
-            ]).map(({ key, label }) => (
-              <div key={key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 90, color: "#666" }}>{label}</span>
-                <button
-                  type="button"
-                  style={{ ...entryBtn, minWidth: 140, fontFamily: "monospace" }}
-                  onClick={() => setCapturing(key)}
-                >
-                  {form[key]}
-                </button>
-                {capturing === key && (
-                  <span style={{ color: "#396cd8" }}>{t("settings.pressCombo")}</span>
+      <div className="hs-content">
+        {/* —— 历史分区（M0）：替代 C6 的禁用「历史」入口行 —— */}
+        <section className="hs-card">
+          <h2 className="hs-section-title">{t("history.title")}</h2>
+          <input
+            type="search"
+            className="hs-search"
+            placeholder={t("history.searchPlaceholder")}
+            aria-label={t("history.searchPlaceholder")}
+            value={historyQuery}
+            onChange={(e) => setHistoryQuery(e.target.value)}
+          />
+          {historyError && (
+            <div role="alert" className="hs-banner hs-banner-error hs-banner-sm">
+              {t("history.actionError", { message: historyError })}
+            </div>
+          )}
+          {shots.length === 0 ? (
+            <div className="hs-empty">
+              <span className="hs-empty-icon" aria-hidden="true">🖼️</span>
+              <p className="hs-empty-text">
+                {debouncedQuery.trim() === "" ? t("history.empty") : t("history.emptySearch")}
+              </p>
+            </div>
+          ) : (
+            <div className="hs-grid">
+              {shots.map((shot) => {
+                const title = `${formatShotDate(shot.createdAt, getLanguage())} · ${shot.app}`;
+                return (
+                  <div key={shot.id} className="hs-tile" title={title}>
+                    {shot.thumbPath ? (
+                      <img
+                        src={convertFileSrc(shot.thumbPath)}
+                        alt={title}
+                        loading="lazy"
+                        className="hs-thumb"
+                      />
+                    ) : shotKind(shot) === "recording" ? (
+                      // 录屏条目（M6）：无缩略图 → 🎬 占位（贴图/重新编辑对 MP4 无意义，
+                      // 下方动作区隐藏；打开目录/删除照常）。按 kind 判定（不再靠 app
+                      // 列复用——kind 已是契约字段）。
+                      <div className="hs-thumb hs-thumb-record" aria-hidden="true">🎬</div>
+                    ) : (
+                      <div className="hs-thumb hs-thumb-blank" aria-hidden="true" />
+                    )}
+                    <div className="hs-tile-meta">{title}</div>
+                    <div className="hs-tile-actions">
+                      <button className="hs-tile-btn" onClick={() => pinShot(shot.path)}>
+                        {t("history.pin")}
+                      </button>
+                      <button className="hs-tile-btn" onClick={() => openShot(shot.path)}>
+                        {t("history.openFolder")}
+                      </button>
+                      {confirmDeleteId === shot.id ? (
+                        // 两步删除第二步：确认态红底白字（逻辑同旧实现，仅换皮）
+                        <button
+                          className="hs-tile-btn hs-tile-btn-danger"
+                          onClick={() => removeShot(shot.id)}
+                        >
+                          {t("history.confirmDelete")}
+                        </button>
+                      ) : (
+                        <button
+                          className="hs-tile-btn"
+                          onClick={() => setConfirmDeleteId(shot.id)}
+                        >
+                          {t("history.delete")}
+                        </button>
+                      )}
+                      {/* M2 Task M3：重新编辑启用——editor_open（origin=null）；录屏条目
+                          不提供（MP4 非编辑器输入，M6 裁定）；**长截图条目同样不提供**
+                          （终审 wave I7：长图可达 32MP，编辑器画布/导出路径按巨幅位图
+                          走会出内存尖峰与导出超时）。按 kind 门控。 */}
+                      {canReedit(shot) && (
+                        <button className="hs-tile-btn" onClick={() => reeditShot(shot.path)}>
+                          {t("history.reedit")}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        <section className="hs-card">
+          <h2 className="hs-section-title">{t("settings.title")}</h2>
+
+          <div className="hs-field">
+            <label className="hs-field-label">{t("settings.hotkeyLabel")}</label>
+            <div className="hs-field-control">
+              {([
+                { key: "hotkeyCapture" as const, label: t("settings.slot.capture") },
+                { key: "hotkeyPin" as const, label: t("settings.slot.pin") },
+                { key: "hotkeyRecord" as const, label: t("settings.slot.record") },
+              ]).map(({ key, label }) => (
+                <div key={key} className="hs-slot-row">
+                  <span className="hs-slot-label">{label}</span>
+                  <button
+                    type="button"
+                    className="hs-btn hs-btn-secondary hs-hotkey-btn"
+                    onClick={() => setCapturing(key)}
+                  >
+                    {form[key]}
+                  </button>
+                  {capturing === key && (
+                    <span className="hs-pressing">{t("settings.pressCombo")}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="hs-field">
+            <label className="hs-field-label">{t("settings.outputFormat")}</label>
+            <div className="hs-field-control">
+              <div className="hs-radio-row">
+                <label className="hs-check">
+                  <input
+                    type="radio"
+                    name="output-format"
+                    checked={form.outputFormat === "png"}
+                    onChange={() => setField("outputFormat", "png")}
+                  />
+                  PNG
+                </label>
+                <label className="hs-check">
+                  <input
+                    type="radio"
+                    name="output-format"
+                    checked={form.outputFormat === "jpeg"}
+                    onChange={() => setField("outputFormat", "jpeg")}
+                  />
+                  JPEG
+                </label>
+                {form.outputFormat === "jpeg" && (
+                  <label className="hs-quality">
+                    {t("settings.quality", { n: form.jpegQuality })}
+                    <input
+                      type="range"
+                      min={1}
+                      max={100}
+                      value={form.jpegQuality}
+                      onChange={(e) => setField("jpegQuality", Number(e.target.value))}
+                    />
+                  </label>
                 )}
               </div>
-            ))}
+            </div>
           </div>
-        </div>
 
-        <div style={fieldRow}>
-          <label style={fieldLabel}>{t("settings.outputFormat")}</label>
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            <label>
-              <input
-                type="radio"
-                name="output-format"
-                checked={form.outputFormat === "png"}
-                onChange={() => setField("outputFormat", "png")}
-              />{" "}
-              PNG
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="output-format"
-                checked={form.outputFormat === "jpeg"}
-                onChange={() => setField("outputFormat", "jpeg")}
-              />{" "}
-              JPEG
-            </label>
-            {form.outputFormat === "jpeg" && (
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {t("settings.quality", { n: form.jpegQuality })}
+          <div className="hs-field">
+            <label className="hs-field-label" htmlFor="save-dir">{t("settings.saveDir")}</label>
+            <div className="hs-field-control">
+              <div className="hs-input-row">
                 <input
-                  type="range"
-                  min={1}
-                  max={100}
-                  value={form.jpegQuality}
-                  onChange={(e) => setField("jpegQuality", Number(e.target.value))}
+                  id="save-dir"
+                  type="text"
+                  className="hs-input"
+                  placeholder={t("settings.saveDirPlaceholder")}
+                  value={form.saveDir}
+                  onChange={(e) => setField("saveDir", e.target.value)}
                 />
-              </label>
-            )}
+                <button
+                  type="button"
+                  className="hs-btn hs-btn-secondary"
+                  onClick={() => setField("saveDir", "")}
+                  title={t("settings.restoreDefaultTip")}
+                >
+                  {t("settings.restoreDefault")}
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
 
-        <div style={fieldRow}>
-          <label style={fieldLabel} htmlFor="save-dir">{t("settings.saveDir")}</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              id="save-dir"
-              type="text"
-              style={{ ...entryBtn, flex: 1, cursor: "text" }}
-              placeholder={t("settings.saveDirPlaceholder")}
-              value={form.saveDir}
-              onChange={(e) => setField("saveDir", e.target.value)}
-            />
-            <button
-              type="button"
-              style={entryBtn}
-              onClick={() => setField("saveDir", "")}
-              title={t("settings.restoreDefaultTip")}
-            >
-              {t("settings.restoreDefault")}
-            </button>
-          </div>
-        </div>
-
-        <div style={fieldRow}>
-          <label style={fieldLabel} htmlFor="launch-at-login">{t("settings.launchAtLogin")}</label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              id="launch-at-login"
-              type="checkbox"
-              checked={form.launchAtLogin}
-              onChange={(e) => setField("launchAtLogin", e.target.checked)}
-            />
-            {t("settings.launchAtLoginDesc")}
-          </label>
-        </div>
-
-        <div style={fieldRow}>
-          <span style={fieldLabel}>{t("settings.appearance")}</span>
-          <div>
-            {(["system", "light", "dark"] as const).map((mode) => (
-              <label key={mode} style={{ marginRight: 16 }}>
+          <div className="hs-field">
+            <label className="hs-field-label" htmlFor="launch-at-login">{t("settings.launchAtLogin")}</label>
+            <div className="hs-field-control">
+              <label className="hs-check">
                 <input
-                  type="radio"
-                  name="appearance"
-                  checked={form.appearance === mode}
-                  onChange={() => setField("appearance", mode)}
-                />{" "}
-                {mode === "system"
-                  ? t("settings.appearanceSystem")
-                  : mode === "light"
-                    ? t("settings.appearanceLight")
-                    : t("settings.appearanceDark")}
+                  id="launch-at-login"
+                  type="checkbox"
+                  checked={form.launchAtLogin}
+                  onChange={(e) => setField("launchAtLogin", e.target.checked)}
+                />
+                {t("settings.launchAtLoginDesc")}
               </label>
-            ))}
+            </div>
           </div>
-        </div>
 
-        <div style={fieldRow}>
-          <label style={fieldLabel} htmlFor="language">{t("settings.language")}</label>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* D1：语言选择随表单保存生效（保存后回显生效值并即时切换文案）。 */}
-            <select
-              id="language"
-              style={{ ...entryBtn }}
-              value={form.language}
-              onChange={(e) => setField("language", e.target.value)}
-            >
-              <option value="system">{t("settings.langSystem")}</option>
-              <option value="zh-CN">{t("settings.langZh")}</option>
-              <option value="en-US">{t("settings.langEn")}</option>
-            </select>
+          <div className="hs-field">
+            <span className="hs-field-label">{t("settings.appearance")}</span>
+            <div className="hs-field-control">
+              <div className="hs-radio-row">
+                {(["system", "light", "dark"] as const).map((mode) => (
+                  <label key={mode} className="hs-check">
+                    <input
+                      type="radio"
+                      name="appearance"
+                      checked={form.appearance === mode}
+                      onChange={() => setField("appearance", mode)}
+                    />
+                    {mode === "system"
+                      ? t("settings.appearanceSystem")
+                      : mode === "light"
+                        ? t("settings.appearanceLight")
+                        : t("settings.appearanceDark")}
+                  </label>
+                ))}
+              </div>
+            </div>
           </div>
-        </div>
 
-        <div style={fieldRow}>
-          <label style={fieldLabel} htmlFor="update-enabled">{t("settings.updates")}</label>
-          <div style={{ display: "grid", gap: 8 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <input
-                id="update-enabled"
-                type="checkbox"
-                checked={form.updateEnabled}
-                onChange={(e) => setField("updateEnabled", e.target.checked)}
-              />
-              {t("settings.updatesAutoDesc")}
-            </label>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <button
-                type="button"
-                style={entryBtn}
-                onClick={checkForUpdates}
-                disabled={updateState.phase === "checking" || updateState.phase === "downloading"}
+          <div className="hs-field">
+            <label className="hs-field-label" htmlFor="language">{t("settings.language")}</label>
+            <div className="hs-field-control">
+              {/* D1：语言选择随表单保存生效（保存后回显生效值并即时切换文案）。 */}
+              <select
+                id="language"
+                className="hs-select"
+                value={form.language}
+                onChange={(e) => setField("language", e.target.value)}
               >
-                {t("settings.checkUpdates")}
-              </button>
-              {updateState.phase === "checking" && (
-                <span style={{ color: "#666" }}>{t("settings.updates.checking")}</span>
-              )}
-              {updateState.phase === "latest" && (
-                <span style={{ color: "#3c763d" }}>{t("settings.updates.latest")}</span>
-              )}
-              {updateState.phase === "available" && (
-                <span style={{ color: "#3c763d" }}>
-                  {t("settings.updates.available", { version: updateState.info.version })}
-                </span>
-              )}
-              {updateState.phase === "downloading" && (
-                <span style={{ color: "#666" }}>
-                  {updateState.progress == null
-                    ? t("settings.updates.downloading")
-                    : updateState.progress.total != null
-                      ? t("settings.updates.progressKnown", {
-                          a: fmtMb(updateState.progress.downloaded),
-                          b: fmtMb(updateState.progress.total),
-                        })
-                      : t("settings.updates.progressUnknown", {
-                          a: fmtMb(updateState.progress.downloaded),
-                        })}
-                </span>
-              )}
-              {updateState.phase === "installed" && (
-                <span style={{ color: "#3c763d" }}>{t("settings.updates.installed")}</span>
-              )}
-              {updateState.phase === "available" && (
-                <button type="button" style={entryBtn} onClick={installUpdate}>
-                  {t("settings.updates.downloadInstall")}
+                <option value="system">{t("settings.langSystem")}</option>
+                <option value="zh-CN">{t("settings.langZh")}</option>
+                <option value="en-US">{t("settings.langEn")}</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="hs-field">
+            <label className="hs-field-label" htmlFor="update-enabled">{t("settings.updates")}</label>
+            <div className="hs-field-control">
+              <label className="hs-check">
+                <input
+                  id="update-enabled"
+                  type="checkbox"
+                  checked={form.updateEnabled}
+                  onChange={(e) => setField("updateEnabled", e.target.checked)}
+                />
+                {t("settings.updatesAutoDesc")}
+              </label>
+              <div className="hs-updates-row">
+                <button
+                  type="button"
+                  className="hs-btn hs-btn-secondary"
+                  onClick={checkForUpdates}
+                  disabled={updateState.phase === "checking" || updateState.phase === "downloading"}
+                >
+                  {t("settings.checkUpdates")}
                 </button>
-              )}
-              {updateState.phase === "installed" && (
-                <button type="button" style={entryBtn} onClick={restartApp}>
-                  {t("settings.updates.restart")}
-                </button>
+                {updateState.phase === "checking" && (
+                  <span className="hs-status-busy">{t("settings.updates.checking")}</span>
+                )}
+                {updateState.phase === "latest" && (
+                  <span className="hs-status-ok">{t("settings.updates.latest")}</span>
+                )}
+                {updateState.phase === "available" && (
+                  <span className="hs-status-ok">
+                    {t("settings.updates.available", { version: updateState.info.version })}
+                  </span>
+                )}
+                {updateState.phase === "downloading" && (
+                  <span className="hs-status-busy">
+                    {updateState.progress == null
+                      ? t("settings.updates.downloading")
+                      : updateState.progress.total != null
+                        ? t("settings.updates.progressKnown", {
+                            a: fmtMb(updateState.progress.downloaded),
+                            b: fmtMb(updateState.progress.total),
+                          })
+                        : t("settings.updates.progressUnknown", {
+                            a: fmtMb(updateState.progress.downloaded),
+                          })}
+                  </span>
+                )}
+                {updateState.phase === "installed" && (
+                  <span className="hs-status-ok">{t("settings.updates.installed")}</span>
+                )}
+                {updateState.phase === "available" && (
+                  <button type="button" className="hs-btn hs-btn-secondary" onClick={installUpdate}>
+                    {t("settings.updates.downloadInstall")}
+                  </button>
+                )}
+                {updateState.phase === "installed" && (
+                  <button type="button" className="hs-btn hs-btn-secondary" onClick={restartApp}>
+                    {t("settings.updates.restart")}
+                  </button>
+                )}
+              </div>
+              {/* 更新说明简版（计划裁定：下载进度级占位，完整 changelog 渲染归 M2）。 */}
+              {updateState.phase === "available" && updateState.info.notes && (
+                <p className="hs-notes">{updateState.info.notes}</p>
               )}
             </div>
-            {/* 更新说明简版（计划裁定：下载进度级占位，完整 changelog 渲染归 M2）。 */}
-            {updateState.phase === "available" && updateState.info.notes && (
-              <div style={{ color: "#666", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                {updateState.info.notes}
-              </div>
-            )}
           </div>
-        </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
-          <button type="button" style={{ ...entryBtn, padding: "8px 32px" }} onClick={save} disabled={saving}>
-            {saving ? t("settings.saving") : t("settings.save")}
-          </button>
-          {saveOk && <span style={{ color: "#3c763d" }}>{t("settings.saved")}</span>}
-        </div>
-      </section>
+          <div className="hs-settings-actions">
+            <button
+              type="button"
+              className="hs-btn hs-btn-primary hs-btn-save"
+              onClick={save}
+              disabled={saving}
+            >
+              {saving ? t("settings.saving") : t("settings.save")}
+            </button>
+            {saveOk && <span className="hs-status-ok">{t("settings.saved")}</span>}
+          </div>
+        </section>
 
-      {/* —— 浏览器插件分区（M4 P1：Native Messaging 桥）——
-          只展示状态与扩展 ID 占位（注册动作在宿主侧：scripts/install-native-host.sh）。
-          状态来自 native_messaging_status（后端监听是否在跑）。 */}
-      <section style={settingsSection}>
-        <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>{t("plugin.title")}</h2>
-        <div style={fieldRow}>
-          <span style={fieldLabel}>{t("plugin.statusLabel")}</span>
-          <span>
-            {nativeReady === null
-              ? t("plugin.status.unknown")
-              : nativeReady
-                ? t("plugin.status.ready")
-                : t("plugin.status.stopped")}
-          </span>
-        </div>
-        <div style={fieldRow}>
-          <span style={fieldLabel}>{t("plugin.extIdLabel")}</span>
-          <code style={{ fontSize: 13 }}>{t("plugin.extIdPlaceholder")}</code>
-        </div>
-        <p style={{ color: "#666", fontSize: 13, margin: 0 }}>{t("plugin.installHint")}</p>
-      </section>
+        {/* —— 浏览器插件分区（M4 P1：Native Messaging 桥）——
+            只展示状态与扩展 ID 占位（注册动作在宿主侧：scripts/install-native-host.sh）。
+            状态来自 native_messaging_status（后端监听是否在跑）。 */}
+        <section className="hs-card">
+          <h2 className="hs-section-title">{t("plugin.title")}</h2>
+          <div className="hs-field">
+            <span className="hs-field-label">{t("plugin.statusLabel")}</span>
+            <div className="hs-field-control">
+              <span className="hs-status-line">
+                <span
+                  aria-hidden="true"
+                  className={
+                    nativeReady === null
+                      ? "hs-dot hs-dot-idle"
+                      : nativeReady
+                        ? "hs-dot hs-dot-ready"
+                        : "hs-dot hs-dot-stopped"
+                  }
+                />
+                {nativeReady === null
+                  ? t("plugin.status.unknown")
+                  : nativeReady
+                    ? t("plugin.status.ready")
+                    : t("plugin.status.stopped")}
+              </span>
+            </div>
+          </div>
+          <div className="hs-field">
+            <span className="hs-field-label">{t("plugin.extIdLabel")}</span>
+            <div className="hs-field-control">
+              <code className="hs-code">{t("plugin.extIdPlaceholder")}</code>
+            </div>
+          </div>
+          <p className="hs-field-hint">{t("plugin.installHint")}</p>
+        </section>
+      </div>
     </main>
   );
 }
-
-const banner: CSSProperties = {
-  margin: "12px",
-  padding: "10px 14px",
-  border: "1px solid #d9534f",
-  borderRadius: 6,
-  background: "#fdecea",
-  color: "#a94442",
-  fontSize: 14,
-};
-
-const entryBtn: CSSProperties = {
-  padding: "10px 20px",
-  fontSize: 15,
-  borderRadius: 6,
-  border: "1px solid #ccc",
-  background: "#fff",
-  cursor: "pointer",
-};
-
-const settingsSection: CSSProperties = {
-  margin: "24px auto 40px",
-  maxWidth: 560,
-  textAlign: "left",
-  fontSize: 14,
-};
-
-// —— 历史分区（M0）—— 网格 ~120px 瓦片（auto-fill 适配面板宽度），日期+应用做标题。
-const historySection: CSSProperties = {
-  margin: "0 auto 24px",
-  maxWidth: 720,
-  textAlign: "left",
-  fontSize: 14,
-};
-
-const historyBanner: CSSProperties = {
-  margin: "8px 0",
-  padding: "8px 12px",
-  border: "1px solid #d9534f",
-  borderRadius: 6,
-  background: "#fdecea",
-  color: "#a94442",
-  fontSize: 13,
-};
-
-// 提示型横幅（浏览器截图入库等「非错误」信息）——绿色描边，与错误横幅区分。
-const infoBanner: CSSProperties = {
-  margin: "12px",
-  padding: "10px 14px",
-  border: "1px solid #3c763d",
-  borderRadius: 6,
-  background: "#eaf6ea",
-  color: "#2b5e2c",
-  fontSize: 14,
-};
-
-const grid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
-  gap: 10,
-  marginTop: 12,
-};
-
-const tile: CSSProperties = {
-  border: "1px solid #ddd",
-  borderRadius: 6,
-  padding: 6,
-  display: "grid",
-  gap: 6,
-  alignContent: "start",
-};
-
-const thumb: CSSProperties = {
-  width: "100%",
-  aspectRatio: "4 / 3",
-  objectFit: "cover",
-  borderRadius: 4,
-  display: "block",
-};
-
-const tileMeta: CSSProperties = {
-  fontSize: 12,
-  color: "#555",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const tileActions: CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 4,
-};
-
-const tileBtn: CSSProperties = {
-  padding: "3px 6px",
-  fontSize: 12,
-  borderRadius: 4,
-  border: "1px solid #ccc",
-  background: "#fff",
-  cursor: "pointer",
-};
-
-const tileBtnDanger: CSSProperties = {
-  padding: "3px 6px",
-  fontSize: 12,
-  borderRadius: 4,
-  borderStyle: "solid",
-  borderColor: "#d9534f",
-  borderWidth: 1,
-  background: "#fff",
-  cursor: "pointer",
-  color: "#a94442",
-};
-
-const fieldRow: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "90px 1fr",
-  alignItems: "start",
-  gap: 8,
-  marginBottom: 14,
-};
-
-const fieldLabel: CSSProperties = { color: "#666", paddingTop: 6 };
 
 export default App;

@@ -357,7 +357,7 @@ pub fn scrollshot_start(app: AppHandle, req: ScrollshotReq) -> Result<(), String
     // 屏幕录制权限预检（与截图/录屏同门槛；未授权时 macOS 静默返回空图）。
     if !hawksnap_platform_mac::permissions::screen_recording_prechecked() {
         let _ = hawksnap_platform_mac::permissions::open_screen_recording_settings();
-        return Err("屏幕录制权限未授予：已为你打开系统设置，授权后重试".into());
+        return Err("屏幕录制权限未授予：请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 HawkSnap（首次失败已自动打开设置）".into());
     }
     // 显示器全局几何（覆盖层那一轮抓屏留下的几何快照；释放整帧后仍保留）。
     let Some(geo) = crate::commands::captured_display_geometry(req.display_id) else {

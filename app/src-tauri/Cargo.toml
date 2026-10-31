@@ -58,13 +58,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arboard = "3"
 chrono = "0.4"
-# N2 GIF 导出（Task N2）：gifski 库（pngquant 系 GIF 编码器）。default-features=false
-# 关掉 binary（clap/y4m/pbr/wild 等 CLI 依赖）与 png 输入——本 crate 只用
-# add_frame_rgba（内存 RGBA 帧直喂），依赖树全 Rust 无 C 编译。GIF 循环/质量在
-# app/src-tauri/src/gif.rs 的编码裁定（repeat=Infinite，quality 常量）。许可是
-# AGPL-3.0-or-later（plan Tech Stack 预授权选型；主程序无 license 字段，分发口径
-# 由仓库 LICENSE 统一，见任务报告）。
-gifski = { version = "1.34", default-features = false }
+# N2 GIF 导出（Task N2）：`gif` crate（image-rs 生态，MIT / Apache-2.0 双许可）。
+# 2026-10-31 起 HawkSnap 整体改 MIT 授权，原 gifski（AGPL-3.0 传染）按许可证一致性
+# 替换：NeuQuant 量化（gif 内建 from_rgba_speed）质量略逊 gifski，录屏动图场景可感
+# 差异极小，换来的是许可证自由 + 依赖树更轻（无 C 编译、无 crossbeam 编码线程协议）。
+# 循环/时序裁定在 app/src-tauri/src/gif.rs（repeat=Infinite，PTS→10ms delay 成对映射）。
+gif = "0.13"
 # 编辑器降级装载（editor_image_dataurl）：asset 协议失败时 base64 dataURL 兜底。
 # 0.22 已在依赖树（dev-dependencies 同版本），非新增下载。
 base64 = "0.22"
