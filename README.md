@@ -1,6 +1,28 @@
+<div align="center">
+
+<img src="docs/logo.png" alt="HawkSnap" width="140" />
+
 # HawkSnap
 
-**像鹰一样准，一按就截。**
+### 像鹰一样准，一按就截
+
+*Press, frame, done.* ／ *按下快捷键、框住、完事。*
+
+**免费 · 纯本地 · 三平台（macOS / Windows / Linux）· MIT**
+
+[![Release](https://img.shields.io/github/v/release/huluohu/HawkSnap)](https://github.com/huluohu/HawkSnap/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-0a84ff)](#下载)
+[![CI](https://github.com/huluohu/HawkSnap/actions/workflows/pipeline.yml/badge.svg)](https://github.com/huluohu/HawkSnap/actions/workflows/pipeline.yml)
+[![License](https://img.shields.io/badge/license-MIT-34c759)](LICENSE)
+
+</div>
+
+---
+
+<p>
+  <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap 主面板（浅色）" />
+  <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap 主面板（深色）" />
+</p>
 
 HawkSnap 是一款免费、纯本地的轻量级截屏 + 录屏工具——无账号、无云端、无遥测。
 
