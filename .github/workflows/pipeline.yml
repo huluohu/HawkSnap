@@ -17,12 +17,17 @@
 #     未知项的解除记录见 rust-test matrix 处注释；update_signature 的 Windows
 #     平台门控为唯一已记录例外）。
 #
-# 发布仍为 **macOS-only**：跨平台编译 ≠ 跨平台分发（Windows/Linux 的打包、
-# 签名与 updater feed 口径另案裁定，见 release job 注）。
+# 四平台发布（2026-10-31 多平台化）：macOS arm64/Intel + Windows x64 + Linux x64，
+# 见 release job 注与 README 平台表。
 name: CI
 
 on:
   push:
+    # 显式过滤：branches + tags。旧版本 tag（v0.x/v1.0.x）留在本地不推送——
+    # 任何 v* tag 推送都会触发 release 矩阵构建；误推 `git push --tags` 会给
+    # 每个旧 tag 造一次发布流程，故分支与 tag 分别白名单。
+    branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
