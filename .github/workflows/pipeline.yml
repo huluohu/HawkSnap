@@ -287,11 +287,11 @@ jobs:
             sleep 15
           done
           [ -n "$built" ] || { echo "::error::tauri build 三次均失败"; exit 1; }
-          # 交叉构建的 bundle 落在 target/<triple>/ 下——归位到标准路径供
-          # 统一上传通配（原生构建无此目录，跳过）。
+          # 交叉构建的 bundle 落在 workspace 根 target/<triple>/ 下——归位到标准路径
+          # 供统一上传通配（原生构建无此目录，跳过）。注意 cwd=app/ → 上级目录路径。
           if [ -n "${{ matrix.rust_target }}" ]; then
-            mkdir -p target/release/bundle
-            cp -R "target/${{ matrix.rust_target }}/release/bundle/." target/release/bundle/
+            mkdir -p ../target/release/bundle
+            cp -R "../target/${{ matrix.rust_target }}/release/bundle/." ../target/release/bundle/
           fi
       # 双 mac 腿的 updater 产物撞名（HawkSnap.app.tar.gz 不含架构）→ merge-multiple
       # 下载时后者覆盖前者——上传前按架构改名（Ottr 同款；make-latest 按
