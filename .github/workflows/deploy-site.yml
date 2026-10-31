@@ -20,7 +20,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     steps:
+      # fetch-depth: 0 —— gate 步要 diff github.event.before..sha；浅克隆取不到
+      # before 对象 → diff 失败 → changed=false → 部署步骤全跳过（b401b55 实挂）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Detect site/ changes (push only)
         id: gate
         run: |
