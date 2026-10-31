@@ -19,6 +19,8 @@
 
 ---
 
+**简体中文** | [繁體中文](README.zh-Hant.md) | [文言](README.classical.md) | [English](README.en.md) | [日本語](README.ja.md)
+
 <p>
   <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap 主面板（浅色）" />
   <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap 主面板（深色）" />
