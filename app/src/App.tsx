@@ -463,7 +463,7 @@ function App() {
       <header className="hs-topbar">
         <h1 className="hs-brand">
           <span className="hs-brand-icon" aria-hidden="true">🦅</span>
-          HawkSnap
+          {t("brand.name")}
         </h1>
         <div className="hs-topbar-actions">
           <button className="hs-btn hs-btn-primary" onClick={() => trigger("capture")}>

@@ -2,7 +2,7 @@
 
 <img src="docs/logo.png" alt="HawkSnap" width="140" />
 
-# HawkSnap
+# HawkSnap · 猎影
 
 ### 像鹰一样准，一按就截
 
@@ -26,7 +26,7 @@
   <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap 主面板（深色）" />
 </p>
 
-HawkSnap 是一款免费、纯本地的轻量级截屏 + 录屏工具——无账号、无云端、无遥测。
+HawkSnap（中文名**猎影**）是一款免费、纯本地的轻量级截屏 + 录屏工具——无账号、无云端、无遥测。
 
 ## 功能
 

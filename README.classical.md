@@ -2,7 +2,7 @@
 
 <img src="docs/logo.png" alt="HawkSnap" width="140" />
 
-# HawkSnap · 鷹截
+# HawkSnap · 獵影
 
 ### 準若鷹瞵，一擊而獲
 
@@ -26,7 +26,7 @@
   <img src="docs/screenshots/main-dark.png" width="49%" alt="主面板，夜色" />
 </p>
 
-鷹截者，截屏録屏之輕器也。不設帳籍，不寄雲端，不窺行止，諸事皆辦於君之機，纖毫不外洩。
+獵影者，截屏録屏之輕器也。不設帳籍，不寄雲端，不窺行止，諸事皆辦於君之機，纖毫不外洩。
 
 ## 其能
 

@@ -1,4 +1,5 @@
 {
+  "brand.name": "猎影",
   "panel.capture": "截图 ({key})",
   "panel.pin": "贴图 ({key})",
   "history.title": "历史",
@@ -31,7 +32,7 @@
   "settings.restoreDefault": "恢复默认",
   "settings.restoreDefaultTip": "清空 = 使用默认目录",
   "settings.launchAtLogin": "开机自启",
-  "settings.launchAtLoginDesc": "登录时自动启动 HawkSnap",
+  "settings.launchAtLoginDesc": "登录时自动启动猎影",
   "settings.appearance": "外观",
   "settings.appearanceSystem": "跟随系统",
   "settings.appearanceLight": "浅色",
@@ -103,7 +104,7 @@
   "editor.tool.step": "序号",
   "editor.saved": "已保存",
   "editor.saveFailed": "保存失败：{message}",
-  "record.barLabel": "HawkSnap 录屏",
+  "record.barLabel": "猎影录屏",
   "record.regionTitle": "区域 {w}×{h}",
   "record.format.mp4": "MP4",
   "record.format.gif": "GIF",

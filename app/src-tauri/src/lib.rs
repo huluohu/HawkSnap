@@ -54,7 +54,7 @@ pub fn build_tray_menu(
     // N5：停止长截图（I4：⌘S 注册失败 / 用户想提前结束时的托盘出口）。
     // 恒显示（与「取消倒计时」同款口径）：无会话时调用返回 Err → 横幅提示。
     let scrollshot_stop = MenuItem::with_id(app, "scrollshot-stop", "停止长截图", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 HawkSnap", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出猎影 HawkSnap", true, None::<&str>)?;
     // C5 贴图：关闭全部贴图恒可用（无贴图时调用为空操作，不做动态
     // enable/disable——省去菜单项状态的跨线程同步，与延时子菜单同口径）。
     let pin_close_all =
