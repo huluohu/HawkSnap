@@ -103,7 +103,7 @@ echo "==> 构建宿主（profile=${PROFILE}, feature=native-host, target=${TARGE
 cargo build \
   --manifest-path "$MANIFEST_PATH" \
   $( [ "$PROFILE" = "release" ] && echo "--release" ) \
-  "${CARGO_TARGET_ARGS[@]}" \
+  ${CARGO_TARGET_ARGS[@]+"${CARGO_TARGET_ARGS[@]}"} \
   --features native-host \
   --bin hawksnap-host
 
