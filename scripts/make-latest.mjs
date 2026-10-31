@@ -2,21 +2,20 @@
 // scripts/make-latest.mjs — 组装 Tauri updater 静态源 latest.json（plan D6，G7 更新通道）。
 //
 // 用法：node scripts/make-latest.mjs --tag v0.1.0 --repo OWNER/REPO --dist <dir> --out <dir>
-//       [--platforms darwin-aarch64,linux-x86_64,windows-x86_64]
+//       [--platforms darwin-aarch64,darwin-x86_64,linux-x86_64,windows-x86_64]
 //
 // 在 --dist（publish job 里为 release artifact 合并下载目录）中为每个
 // updater 平台键各找一份更新载荷 + 同名 .sig：
-//   darwin-aarch64  <- *.app.tar.gz     （tauri build --bundles app 的 updater 归档）
+//   darwin-aarch64  <- *aarch64*.app.tar.gz （双 mac 腿产物已按架构改名，见 release job）
+//   darwin-x86_64   <- *x86_64*.app.tar.gz
 //   linux-x86_64    <- *.AppImage       （v2 updater 直接分发 AppImage 本体）
 //   windows-x86_64  <- *-setup.exe      （v2 updater 直接分发 NSIS 安装器本体）
 // 语义：任一平台缺失载荷/签名、或多于一份 → exit 1（宁可失败也不出脏 feed；
 // .sig 缺失即「未签名产物不得发布」——与 workflow 的 secrets 硬失败同一防线）。
 //
 // --platforms：本次发布**参与**的平台键（逗号分隔）。未列出的平台不要求载荷、
-// 也不出现在 feed 里——0.3.0 起发布策略为 macOS-only（Linux/Windows 编译验证
-// 顺延 M4），feed 里写上没有产物的平台键 = 指向 404 的下载链接 = 脏 feed。
-// 对**列出的**平台仍是「恰好 1 份 + 签名齐全」的硬判据。省略该参数时行为不变
-// （三个平台全要），保持既有调用方兼容。
+// 也不出现在 feed 里。对**列出的**平台是「恰好 1 份 + 签名齐全」的硬判据。
+// 省略该参数时要求全部四平台（保持既有调用方兼容）。
 //
 // signature 字段 = .sig 全文（单行 base64(minisign 文本)，tauri signer 产物），
 // 仅去首尾空白；url 指向该 tag 的 Release 下载地址。
@@ -26,12 +25,20 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ALL_PLATFORM_KEYS = ["darwin-aarch64", "linux-x86_64", "windows-x86_64"];
+const ALL_PLATFORM_KEYS = [
+  "darwin-aarch64",
+  "darwin-x86_64",
+  "linux-x86_64",
+  "windows-x86_64",
+];
 
+// matches：文件相对 dist 的路径判据（互斥——双 darwin 键都指向 .app.tar.gz，
+// 只能靠架构子串区分；release job 的 per-arch 改名保证该子串存在）。
 const PAYLOADS = [
-  { key: "darwin-aarch64", ends: ".app.tar.gz" },
-  { key: "linux-x86_64", ends: ".AppImage" },
-  { key: "windows-x86_64", ends: "-setup.exe" },
+  { key: "darwin-aarch64", matches: (p) => p.includes("aarch64") && p.endsWith(".app.tar.gz") },
+  { key: "darwin-x86_64", matches: (p) => p.includes("x86_64") && p.endsWith(".app.tar.gz") },
+  { key: "linux-x86_64", matches: (p) => p.endsWith(".AppImage") },
+  { key: "windows-x86_64", matches: (p) => p.endsWith("-setup.exe") },
 ];
 
 function walk(dir, out = []) {
@@ -81,12 +88,12 @@ if (selectedKeys.length === 0) {
 
 const files = walk(dist);
 const platforms = {};
-for (const { key, ends } of PAYLOADS) {
+for (const { key, matches } of PAYLOADS) {
   if (!selectedKeys.includes(key)) continue; // 未参与本次发布的平台 → 不进 feed
-  const hits = files.filter((f) => f.endsWith(ends));
+  const hits = files.filter((f) => matches(relative(dist, f).replaceAll("\\", "/")));
   if (hits.length !== 1) {
     console.error(
-      `make-latest: ${key} 期望恰好 1 份 *${ends}，实得 ${hits.length}：\n  ${hits.map((f) => relative(dist, f)).join("\n  ") || "(无)"}`,
+      `make-latest: ${key} 期望恰好 1 份匹配载荷，实得 ${hits.length}：\n  ${hits.map((f) => relative(dist, f)).join("\n  ") || "(无)"}`,
     );
     process.exit(1);
   }

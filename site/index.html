@@ -124,27 +124,28 @@
                 <td>✅</td>
                 <td>✅ 功能完整</td>
                 <td>✅ 功能完整</td>
-                <td>✅（当前唯一发布平台）</td>
+                <td>✅ dmg（双架构）+ 自动更新</td>
               </tr>
               <tr>
-                <th scope="row">Linux（Ubuntu 22.04 / 24.04）</th>
+                <th scope="row">Linux（Ubuntu 22.04 / 24.04，x64）</th>
                 <td>✅</td>
-                <td>⚠️ 走跨平台 xcap 后端（可能可用，<strong>未适配、未实测</strong>；窗口自动识别为 macOS 专属）</td>
+                <td>⚠️ 走跨平台 xcap 后端（可能可用，<strong>未逐项适配实测</strong>；窗口自动识别为 macOS 专属）</td>
                 <td>❌ macOS 专属——相关入口明确报错</td>
-                <td>❌</td>
+                <td>✅ AppImage + deb + rpm + 自动更新（v1.1.0 起）</td>
               </tr>
               <tr>
-                <th scope="row">Windows（Win10 1903+ / Win11）</th>
+                <th scope="row">Windows（Win10 1903+ / Win11，x64）</th>
                 <td>✅</td>
-                <td>⚠️ 同 Linux（xcap 后端，<strong>未适配、未实测</strong>）</td>
+                <td>⚠️ 同 Linux（xcap 后端，<strong>未逐项适配实测</strong>）</td>
                 <td>❌ macOS 专属——同上</td>
-                <td>❌</td>
+                <td>✅ NSIS 安装器 + MSI + 自动更新（v1.1.0 起）</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <p class="table-note">Linux / Windows 当前只保证「能编译、能跑测」；真正的平台适配（打包、签名、更新 feed 与
-          采集能力逐项验证）留待后续里程碑。macOS 专属能力在其它平台<strong>明确报错</strong>，绝不静默假装成功。</p>
+        <p class="table-note">四平台安装包均由 CI 构建并经 Ed25519 签名的更新器 feed 分发（v1.1.0 起，Ottr 式矩阵）。
+          已知限制：macOS dmg 无公证、Windows 安装器未代码签名（SmartScreen 告警）；Linux / Windows
+          的采集能力未逐项适配实测（录屏/贴图等 macOS 专属能力在其它平台<strong>明确报错</strong>，绝不静默假装成功）。</p>
       </div>
     </section>
 

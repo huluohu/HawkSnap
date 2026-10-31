@@ -148,7 +148,7 @@ jobs:
 
   # 官网部署已拆分至 .github/workflows/deploy-site.yml（2026-10-28：Pages 服务
   # 状态异常时 pages job 会把整个 pipeline 拖成 startup_failure，独立 workflow 隔离故障域）。
-  # ---- 发布流水线（plan D6，0.3.0 起 macOS-only）----
+  # ---- 发布流水线（plan D6 → 2026-10-31 多平台化，形态参考 Ottr release.yml）----
   #
   # 控制器前置条件（首次 tag 推送前必须完成，缺一签名步骤即硬失败——有意为之，
   # 未签名产物绝不能进入 Release / updater feed）：
@@ -157,19 +157,22 @@ jobs:
   #        TAURI_SIGNING_PRIVATE_KEY_PASSWORD  — 私钥口令（无口令则设为空串）
   #   2. tauri.conf.json 的 plugins.updater.pubkey 填入配对公钥（已随 0.1.0 填入，
   #      8123f6c；更换密钥 = 替换此处 + conf + secrets）。
-  # 两者齐备后：push tag v* → release 构建签名（macOS）→ publish 组装 latest.json
-  # 并创建【草稿】Release，控制器人工复核后发布（plan D7）。
+  # 两者齐备后：push tag v* → release 四腿矩阵构建+签名（mac arm/intel + win + linux）
+  # → publish 组装多平台 latest.json 并创建【草稿】Release，控制器人工复核后发布
+  # （plan D7；Ottr 直接发布，HawkSnap 保留草稿复核纪律）。
   #
-  # **为什么仍只跑 macOS 一条腿**（M4 Task P0 后维持）：
-  #   跨平台**编译**已通（M4 P0：platform-mac 按 target 门控 + 平台桩，Linux/
-  #   macOS 的 `cargo test --workspace` 已是 CI 硬门；Windows 腿首轮为**非阻塞
-  #   平台验证**，首轮绿后翻硬门）；但跨平台**分发**是另一件事——Windows/Linux
-  #   的打包、代码签名与 updater feed 口径（macOS-only 的 feed 里没有 win32/
-  #   linux 键）尚未裁定。恢复矩阵前必须先定分发口径，否则 publish 的 feed 与
-  #   产物会对不上（make-latest 的 --platforms 门）。
+  # **多平台发布口径（2026-10-31，用户裁定「参考 Ottr」）**：
+  #   - macOS（arm64 原生 + x86_64 交叉编译）：app + dmg，adhoc/自签证书（见下）；
+  #   - Windows：NSIS（*-setup.exe，updater 载荷）+ MSI（附加分发件）——无证书，
+  #     SmartScreen 会告警（已知限制）；
+  #   - Linux：AppImage（updater 载荷）+ deb + rpm；
+  #   - updater feed = 四平台键齐全（darwin-aarch64/darwin-x86_64/windows-x86_64/
+  #     linux-x86_64），同一 Ed25519 密钥签全平台更新件（minisign 与平台无关）。
+  #   - 功能差异如实声明（README 平台表）：录屏/媒体键类 macOS 专属；截图走 xcap
+  #     跨平台后端；编译与测试已由 rust-test 三腿硬门把守，打包段为新增路径——
+  #     首个 tag 构建即真验证。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-15
     permissions:
       contents: read
     # 签名私钥只进本 job 的构建环境。缺失/为空时 tauri CLI 在签名阶段硬失败
@@ -177,15 +180,36 @@ jobs:
     # "failed to decode secret key"），本 job 红 = 未签名产物绝不发布（有意为之）。
     # 注意：pubkey 已随 0.1.0 填入（8123f6c）；若 pubkey 缺失/被回退为占位，同样
     # 硬失败（无法 base64 解码）——pubkey 与 secrets 必须始终配对且先于 tag。
-    # 签名策略（1.0）：macOS dmg 为 adhoc 签名——自签证书的 CI 信任链与
-    # tauri-bundler 独立钥匙串的集成未通（run 40588810887），README 已知限制有述。
-    # 用户本地构建：scripts/sign-local.sh 重签可持久化 TCC 授权。
+    # 签名策略：更新器签名 = TAURI_SIGNING_PRIVATE_KEY（全平台同一把 Ed25519）；
+    # macOS 代码签名用 HawkSnapCodesign 自签证书（TCC 授权按证书锚定，用户升级后
+    # 屏幕录制/辅助功能授权持久；adhoc 签名每次构建失配）。bundler 检测到
+    # APPLE_CERTIFICATE 即自动签名；secrets 未配置时仅 macOS 产物退回 adhoc（有告警）。
+    # 用户本地构建：scripts/sign-local.sh 重签可持久化 TCC 授权。Win/Linux 忽略
+    # macOS 证书相关 env。
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      # macOS 产物用 HawkSnapCodesign 自签证书签名：TCC 授权按证书锚定，用户升级后
-      # 屏幕录制/辅助功能授权持久（adhoc 签名每次构建失配）。bundler 检测到
-      # APPLE_CERTIFICATE 即自动签名；secrets 未配置时仅 macOS 产物退回 adhoc（有告警）。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-15
+            bundles: "app dmg"
+            source_archive: true
+          # Intel 包：macos-13（Intel 金属机型）已被 GitHub 淘汰（Ottr v0.2.0 实测
+          # 卡 30 分钟等不到 runner）——在 arm runner 上交叉编译（ Ottr 同款）。
+          - name: macos-intel
+            os: macos-15
+            rust_target: x86_64-apple-darwin
+            bundles: "app dmg"
+          - name: windows-x64
+            os: windows-2022
+            bundles: "nsis msi"
+          - name: linux-x64
+            os: ubuntu-24.04
+            bundles: "appimage deb rpm"
+    runs-on: ${{ matrix.os }}
     steps:
       # fetch-depth: 0 —— 「对应源码包」（AGPL §6）用 `git archive <tag>` 生成，
       # 必须能取到 tag 对象；浅克隆（默认 depth=1）没有 tag 引用。
@@ -193,6 +217,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -201,6 +230,14 @@ jobs:
       - name: npm ci
         working-directory: app
         run: npm ci
+      # Linux 打包系统依赖（Ottr 同款清单；appindicator = 托盘）。
+      - name: Install Linux system dependencies
+        if: matrix.name == 'linux-x64'
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
       # --config 合入 src-tauri/tauri.release.conf.json（bundle.createUpdaterArtifacts: true
       # **且** bundle.externalBin 宿主——updater 归档与 dmg 同一次构建、完全同口径）。
       # 为何 createUpdaterArtifacts 独立成覆盖文件而不写进 tauri.conf.json：该开关开启后
@@ -211,35 +248,89 @@ jobs:
       # --bundles 各平台只造发布所需（G1 dmg 门槛由 size job 把守）。
       # 产物布局（tauri v2，createUpdaterArtifacts: true 时 v2 updater 直接用安装器
       # 本体 + 同名 .sig；macOS 为 .app.tar.gz 归档 + .sig）：
-      #   macOS   target/release/bundle/macos/HawkSnap.app.tar.gz{,.sig} + dmg/*.dmg
+      #   macOS   bundle/macos/HawkSnap.app.tar.gz{,.sig} + dmg/*.dmg
+      #   Windows bundle/nsis/HawkSnap_*-setup.exe{,.sig} + msi/*.msi{,.zip…}
+      #   Linux   bundle/appimage/*_amd64.AppImage{,.sig} + deb/ + rpm/
       # M4 P1：Native Messaging 宿主（hawksnap-host）是 feature 门控的独立 bin，
       # 默认构建不含它 → 必须**先**构建并暂存给 tauri-bundler（externalBin，
       # 见 src-tauri/tauri.release.conf.json 的
       # bundle.externalBin: ["binaries/hawksnap-host"]），bundler 才会把它复制进
       # .app（Contents/MacOS/hawksnap-host）。顺序很关键：bundler 先产出
       # .app.tar.gz，事后再往 .app 里拷已经晚于归档生成。
-      # 暂存路径 app/src-tauri/binaries/hawksnap-host-<triple> 不入库（.gitignore）。
+      # 暂存路径 app/src-tauri/binaries/hawksnap-host-<triple>[.exe] 不入库（.gitignore）。
       # （评审修复轮 P1：tauri v2 的 externalBin 是**文件名后缀**语义——
       #  bundler 找的是 binaries/hawksnap-host-<triple>，不是 binaries/<triple>/…。）
+      # Intel 交叉构建传 --target（脚本同步按 target triple 暂存 + 取产物路径）。
       - name: "Stage native messaging host (M4 P1)"
-        run: scripts/package-native-host.sh
-      - name: "tauri build (macOS: app + dmg)"
+        shell: bash
+        run: scripts/package-native-host.sh ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+      # 打包段重试（Ottr v1.5.8 实挂同款）：macOS 的 bundle_dmg.sh 靠 hdiutil 挂盘 +
+      # AppleScript 驱动 Finder 排图标，无头 runner 上会间歇静默失败。cargo/vite 缓存
+      # 全命中，重试只重跑打包段；重试前卸掉残留挂载卷（不卸则 attach 报 Resource busy）。
+      - name: "tauri build (per-OS bundles)"
         working-directory: app
-        run: npm run tauri build -- --config src-tauri/tauri.release.conf.json --bundles app dmg
-      - name: Upload updater payload + artifacts (macOS)
+        shell: bash
+        run: |
+          built=""
+          for attempt in 1 2 3; do
+            if npm run tauri build -- --config src-tauri/tauri.release.conf.json \
+                 --bundles ${{ matrix.bundles }} \
+                 ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}; then
+              built=1
+              break
+            fi
+            [ "$attempt" -lt 3 ] || break
+            echo "::warning::tauri build 第 $attempt 次失败，清残留挂载后重试"
+            for vol in /Volumes/HawkSnap*; do
+              [ -d "$vol" ] && hdiutil detach "$vol" -force || true
+            done
+            sleep 15
+          done
+          [ -n "$built" ] || { echo "::error::tauri build 三次均失败"; exit 1; }
+          # 交叉构建的 bundle 落在 target/<triple>/ 下——归位到标准路径供
+          # 统一上传通配（原生构建无此目录，跳过）。
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            mkdir -p target/release/bundle
+            cp -R "target/${{ matrix.rust_target }}/release/bundle/." target/release/bundle/
+          fi
+      # 双 mac 腿的 updater 产物撞名（HawkSnap.app.tar.gz 不含架构）→ merge-multiple
+      # 下载时后者覆盖前者——上传前按架构改名（Ottr 同款；make-latest 按
+      # *aarch64*/*x86_64* 模式匹配）。
+      - name: Disambiguate macOS updater artifacts (per-arch)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.rust_target }}" ]; then arch=x86_64; else arch=aarch64; fi
+          dir=target/release/bundle/macos
+          for f in "$dir/HawkSnap.app.tar.gz" "$dir/HawkSnap.app.tar.gz.sig"; do
+            if [ -f "$f" ]; then
+              mv "$f" "$dir/HawkSnap_${arch}.app.tar.gz${f##*/HawkSnap.app.tar.gz}"
+            fi
+          done
+          ls -la "$dir"
+      - name: Upload updater payload + artifacts (per-OS)
         uses: actions/upload-artifact@v4
         with:
-          name: release-macos
+          name: release-${{ matrix.name }}
           if-no-files-found: error
           path: |
             target/release/bundle/macos/*.app.tar.gz
             target/release/bundle/macos/*.app.tar.gz.sig
             target/release/bundle/dmg/*.dmg
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            target/release/bundle/msi/*.msi.zip
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            target/release/bundle/**/*.sig
       # —— AGPL §6「对应源码」包（0.3.0 合规收口）——
       # 二进制分发必须附对应源码：git archive 该 tag 的**已提交内容**（含 Cargo.lock
       # = 构建脚本与依赖锁定信息），随 Release 一起发布。发布出去的源码包与仓库
       # 同源同版（tag 即版本），满足 AGPL-3.0-or-later 的源码提供义务。
+      # 只在 arm64 腿产一次（矩阵去重）。
       - name: Build source archive (AGPL §6 corresponding source)
+        if: matrix.source_archive
         run: |
           mkdir -p dist
           git archive --format=tar.gz \
@@ -248,6 +339,7 @@ jobs:
             "${GITHUB_REF_NAME}"
           tar -tzf "dist/HawkSnap-${GITHUB_REF_NAME}-source.tar.gz" | head -5
       - name: Upload source archive
+        if: matrix.source_archive
         uses: actions/upload-artifact@v4
         with:
           name: release-source
@@ -279,11 +371,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # macOS-only 发布 → feed 只含 darwin 键（0.3.0 裁定）。--platforms 显式指定
-      # 参与平台：make-latest 对**未列出的**平台不再要求载荷（Linux/Windows 本就
-      # 没有产物），对**列出的**平台仍强制「恰好 1 份 + 签名齐全」（脏 feed 防线）。
+      # 多平台发布（2026-10-31）→ feed 四平台键齐全。--platforms 显式指定参与平台：
+      # make-latest 对**列出的**平台强制「恰好 1 份 + 签名齐全」（脏 feed 防线），
+      # 任一平台缺失即 publish 红 = 半成品 Release 绝不出门。
       - name: Assemble latest.json (updater feed)
-        run: node scripts/make-latest.mjs --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dist dist --out dist --platforms darwin-aarch64
+        run: node scripts/make-latest.mjs --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dist dist --out dist --platforms darwin-aarch64,darwin-x86_64,windows-x86_64,linux-x86_64
       # （run 40591912444 根因修复）原实现 `gh release create … dist/*` 把
       # download-artifact 合并出的**目录**（dist/dmg、dist/macos）也当 asset 传给
       # gh → "read dist/macos: is a directory"。且上次失败的 run 已留下同名草稿
@@ -301,7 +393,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --title "HawkSnap $GITHUB_REF_NAME" \
-              --notes "Draft assembled by CI (plan D6). macOS-only binary release (0.3.0 policy; distribution stays macOS-only — the M4 cross-platform work made Linux/Windows *compile* (CI true-gate), but Windows/Linux packaging + signing + updater-feed policy is still undecided). The corresponding source archive (AGPL-3.0-or-later §6) is attached to this release. Controller: review artifacts, finalize release notes, then publish (plan D7)."
+              --notes "Draft assembled by CI (plan D6). Multi-platform binary release (2026-10-31: macOS arm64/intel + Windows x64 + Linux x64, Ottr-style matrix). Known limitations: macOS dmg is adhoc/自签 signed (no notarization); Windows installers are unsigned (SmartScreen warning); platform feature depth per README platform table. The corresponding source archive (AGPL-3.0-or-later §6) is attached to this release. Controller: review artifacts, finalize release notes, then publish (plan D7)."
           fi
       # asset 名 = 文件 basename，必须与 make-latest.mjs 写进 feed 的下载 URL 文件名
       # 一致（darwin-aarch64 → HawkSnap.app.tar.gz），否则 updater feed 指向 404。
@@ -335,14 +427,42 @@ jobs:
               assets+=("$m")
             done
           }
-          # download-artifact(pattern: release-*, merge-multiple) 布局：
-          #   release-macos 的 LCA 是 target/release/bundle → dist/{macos,dmg}/…
+          add_optional() {
+            local pattern="$1" m
+            local matches=($pattern)
+            if [ "${#matches[@]}" -eq 0 ]; then
+              echo "WARNING: no file matched $pattern（附加分发件缺席，不阻断发布）" >&2
+              return 0
+            fi
+            for m in "${matches[@]}"; do
+              [ -f "$m" ] && assets+=("$m")
+            done
+          }
+          # download-artifact(pattern: release-*, merge-multiple) 布局（各腿产物
+          # 的 LCA 都是 target/release/bundle → 平台子目录保留）：
+          #   dist/{macos,dmg}/…        （mac arm/intel 两腿合并后按架构改名）
+          #   dist/{nsis,msi}/…         （windows）
+          #   dist/{appimage,deb,rpm}/… （linux）
           #   release-source 平铺在 dist 根；latest.json 由 make-latest 写入 dist 根。
-          add "dist/dmg/*.dmg"
-          add "dist/macos/*.app.tar.gz"
-          add "dist/macos/*.app.tar.gz.sig"
+          # REQUIRED = updater feed 与合规相关（缺任一 = feed 404/AGPL 违规 → 硬失败）；
+          # OPTIONAL = 附加分发件（dmg/msi/deb/rpm）——缺了只警告不阻断（某腿打包
+          # 降级不应炸掉整个发布，feed 载荷由 REQUIRED 与 make-latest 双重把守）。
+          add "dist/macos/HawkSnap_aarch64.app.tar.gz"
+          add "dist/macos/HawkSnap_aarch64.app.tar.gz.sig"
+          add "dist/macos/HawkSnap_x86_64.app.tar.gz"
+          add "dist/macos/HawkSnap_x86_64.app.tar.gz.sig"
+          add "dist/nsis/HawkSnap_*-setup.exe"
+          add "dist/nsis/HawkSnap_*-setup.exe.sig"
+          add "dist/appimage/*.AppImage"
+          add "dist/appimage/*.AppImage.sig"
           add "dist/HawkSnap-*-source.tar.gz"
           add "dist/latest.json"
+          add_optional "dist/dmg/*.dmg"
+          add_optional "dist/msi/*.msi"
+          add_optional "dist/msi/*.msi.zip"
+          add_optional "dist/msi/*.msi.zip.sig"
+          add_optional "dist/deb/*.deb"
+          add_optional "dist/rpm/*.rpm"
           echo "Uploading ${#assets[@]} asset(s):"
           printf '  %s\n' "${assets[@]}"
           gh release upload "$GITHUB_REF_NAME" \

@@ -55,6 +55,7 @@ set -euo pipefail
 
 PROFILE="release"
 INJECT_APP=""
+TARGET=""
 # 防御性初始化：set -u 下末尾总结 heredoc 的变量展开永不致命（CI 首跑事故）
 BIN_SRC="${BIN_SRC:-}"
 STAGED="${STAGED:-}"
@@ -71,6 +72,7 @@ while [ $# -gt 0 ]; do
     --debug) PROFILE="debug"; shift ;;
     --release) PROFILE="release"; shift ;;
     --inject) INJECT_APP="${2:-}"; shift 2 ;;
+    --target) TARGET="${2:-}"; shift 2 ;;
     -h|--help) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
@@ -79,25 +81,40 @@ done
 command -v cargo >/dev/null 2>&1 || die "找不到 cargo（宿主是 Rust 二进制）"
 
 # —— 目标三元组（暂存目录名要用）——
-TARGET_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
-[ -n "$TARGET_TRIPLE" ] || die "无法从 rustc -vV 解析 target triple"
+# 默认 = host 三元组（原生构建）；--target <triple> = 交叉构建（与 tauri build
+# --target 同款 triple——externalBin 按**构建 target** 找 binaries/hawksnap-host-<triple>，
+# 不传对不上就打包失败）。Windows 目标产物与暂存名都带 .exe（tauri-utils 按 ext 追加）。
+HOST_TRIPLE="$(rustc -vV | awk '/^host:/ {print $2}')"
+[ -n "$HOST_TRIPLE" ] || die "无法从 rustc -vV 解析 target triple"
+TARGET_TRIPLE="${TARGET:-$HOST_TRIPLE}"
+BIN_SUBDIR="$PROFILE"
+CARGO_TARGET_ARGS=()
+if [ -n "$TARGET" ]; then
+  CARGO_TARGET_ARGS=(--target "$TARGET")
+  BIN_SUBDIR="$TARGET/$PROFILE"
+fi
+BIN_EXT=""
+case "$TARGET_TRIPLE" in
+  *windows*) BIN_EXT=".exe" ;;
+esac
 
 # —— 1) 构建宿主 ——
-echo "==> 构建宿主（profile=${PROFILE}, feature=native-host）"
+echo "==> 构建宿主（profile=${PROFILE}, feature=native-host, target=${TARGET_TRIPLE}）"
 cargo build \
   --manifest-path "$MANIFEST_PATH" \
   $( [ "$PROFILE" = "release" ] && echo "--release" ) \
+  "${CARGO_TARGET_ARGS[@]}" \
   --features native-host \
   --bin hawksnap-host
 
-BIN_SRC="$REPO_DIR/target/$PROFILE/hawksnap-host"
-[ -x "$BIN_SRC" ] || die "构建产物不存在: $BIN_SRC"
+BIN_SRC="$REPO_DIR/target/$BIN_SUBDIR/hawksnap-host$BIN_EXT"
+[ -f "$BIN_SRC" ] || die "构建产物不存在: $BIN_SRC"
 
 # —— 2) 暂存给 tauri-bundler（externalBin）——
-# tauri v2 的形状：`binaries/hawksnap-host-<target-triple>`（见文件头注）。
+# tauri v2 的形状：`binaries/hawksnap-host-<target-triple>[.exe]`（见文件头注）。
 STAGE_DIR="$REPO_DIR/app/src-tauri/binaries"
 mkdir -p "$STAGE_DIR"
-STAGED="$STAGE_DIR/hawksnap-host-$TARGET_TRIPLE"
+STAGED="$STAGE_DIR/hawksnap-host-$TARGET_TRIPLE$BIN_EXT"
 cp "$BIN_SRC" "$STAGED"
 chmod +x "$STAGED"
 echo "==> 已暂存: $STAGED"
