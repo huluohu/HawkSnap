@@ -19,7 +19,7 @@
 
 ---
 
-[简体中文](README.md) | [繁體中文](README.zh-Hant.md) | **文言** | [English](README.en.md) | [日本語](README.ja.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | **文言** | [日本語](README.ja.md)
 
 <p>
   <img src="docs/screenshots/main.png" width="49%" alt="主面板" />

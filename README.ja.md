@@ -19,7 +19,7 @@
 
 ---
 
-[简体中文](README.md) | [繁體中文](README.zh-Hant.md) | [文言](README.classical.md) | [English](README.en.md) | **日本語**
+[English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | [文言](README.classical.md) | **日本語**
 
 <p>
   <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap メインパネル（ライト）" />

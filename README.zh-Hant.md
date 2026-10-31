@@ -19,7 +19,7 @@
 
 ---
 
-[简体中文](README.md) | **繁體中文** | [文言](README.classical.md) | [English](README.en.md) | [日本語](README.ja.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | **繁體中文** | [文言](README.classical.md) | [日本語](README.ja.md)
 
 <p>
   <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap 主面板（淺色）" />
