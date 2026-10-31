@@ -15,7 +15,9 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$CACHE/**"]
+        "scope": [
+          "$CACHE/**"
+        ]
       }
     }
   },
@@ -38,7 +40,7 @@
       "endpoints": [
         "https://github.com/huluohu/HawkSnap/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFFQTU1QTZFNDY2RTVCRjEKUldUeFcyNUdibHFscmdjSWw1VmZmWndVQk9UTm11Y1NUcG9sVzNuWmsyRHYzYnNEOXFUWGF0V3QK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwQjExODNENTI5QUREOUMKUldTYzNacFNQUml4Y0NDd1JMWFIvRkhnSGhxZ280OXQ2Wlc1MSsvQVZ4b1F5Si83cDh1UlllVlcK"
     }
   }
 }
