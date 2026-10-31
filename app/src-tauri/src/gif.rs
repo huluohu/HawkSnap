@@ -43,9 +43,9 @@ use gif::{Encoder, Frame, Repeat};
 
 use hawksnap_platform_mac::record::GifFrame;
 
-/// NeuQuant 采样速度（from_rgba_speed 的 1-30 档；10 = 质量优先的均衡档）。
+/// NeuQuant 采样速度（from_rgba_speed 的 1-30 档，i32；10 = 质量优先的均衡档）。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const GIF_SPEED: u8 = 10;
+const GIF_SPEED: i32 = 10;
 
 /// 编码硬超时（F8 预算的 6 倍兜底：正常 150 帧 ≤10s，超时 = 编码异常 → 走
 /// MP4 降级路径而不是卡死 stop）。
@@ -110,16 +110,14 @@ pub(crate) fn encode_gif(frames: &[GifFrame], out: &Path) -> Result<GifOutcome, 
             ));
         }
         // from_rgba_speed 需要 &mut（量化原地做）——每帧一次拷贝 ~1.4MB，
-        // 相对量化编码成本可忽略。宽高 u16 cast（同上，≤800 必不溢出）。
+        // 相对量化编码成本可忽略。0.13 的该构造函数直接返回 Self（infallible）。
         let mut rgba = f.rgba.clone();
-        let mut frame =
-            Frame::from_rgba_speed(
-                u16::try_from(f.width).map_err(|_| "GIF 帧宽超出 u16".to_string())?,
-                u16::try_from(f.height).map_err(|_| "GIF 帧高超出 u16".to_string())?,
-                &mut rgba,
-                GIF_SPEED,
-            )
-            .map_err(|e| format!("GIF 帧量化失败（帧 {i}）: {e:?}"))?;
+        let mut frame = Frame::from_rgba_speed(
+            u16::try_from(f.width).map_err(|_| "GIF 帧宽超出 u16".to_string())?,
+            u16::try_from(f.height).map_err(|_| "GIF 帧高超出 u16".to_string())?,
+            &mut rgba,
+            GIF_SPEED,
+        );
         frame.delay = frame_delay_10ms(&pts, i);
         encoder
             .write_frame(&frame)
