@@ -27,7 +27,7 @@ echo "(a) LICENSE"
 if [ -f LICENSE ]; then
   ok "LICENSE 存在（$(wc -c < LICENSE | tr -d ' ') bytes）"
 else
-  bad "LICENSE 缺失——AGPL-3.0-or-later 分发必须随仓库附带完整许可文本"
+  bad "LICENSE 缺失——MIT 分发必须随仓库附带完整许可文本"
 fi
 
 # ---------- (b) 版本 1.0.0 五处一致 ----------
@@ -105,14 +105,14 @@ else
   fi
 fi
 
-# ---------- (f) release job 里有源码归档命令（AGPL §6 对应源码） ----------
+# ---------- (f) release job 里有源码归档命令（随 Release 附对应源码） ----------
 echo
-echo "(f) 源码包（AGPL §6 corresponding source）"
+echo "(f) 源码包（corresponding source）"
 if awk '/^  release:/{inrel=1; next} /^  [a-zA-Z-]+:/{inrel=0} inrel' .github/workflows/ci.yml \
     | grep -q 'git archive'; then
   ok "release job 内含 git archive 源码归档步骤"
 else
-  bad "release job 内未找到 git archive——二进制发布必须附对应源码（AGPL §6）"
+  bad "release job 内未找到 git archive——二进制发布必须附对应源码"
 fi
 
 # ---------- (g) plugin/dist 已 gitignore ----------
@@ -124,17 +124,13 @@ else
   bad "plugin/dist/ 未被 gitignore（构建产物不得入库）"
 fi
 
-# ---------- (h) 第三方声明提及 gifski（AGPL 触发源） ----------
+# ---------- (h) 许可证一致性（MIT：依赖树不得引入 copyleft） ----------
 echo
-echo "(h) LICENSE-THIRD-PARTY.md"
-if [ -f LICENSE-THIRD-PARTY.md ]; then
-  if grep -qi 'gifski' LICENSE-THIRD-PARTY.md && grep -q 'AGPL' LICENSE-THIRD-PARTY.md; then
-    ok "第三方声明含 gifski（AGPL-3.0-or-later 触发源）及其分发义务"
-  else
-    bad "LICENSE-THIRD-PARTY.md 未完整声明 gifski / AGPL（传染性许可必须逐字声明）"
-  fi
+echo "(h) 许可证一致性"
+if [ -f LICENSE ] && grep -q "MIT License" LICENSE && [ -f LICENSE-THIRD-PARTY.md ] && ! grep -qi 'AGPL' LICENSE-THIRD-PARTY.md; then
+  ok "LICENSE = MIT 且第三方声明无 copyleft 组件（gifski 已替换为 gif，MIT/Apache-2.0）"
 else
-  bad "LICENSE-THIRD-PARTY.md 缺失"
+  bad "LICENSE 非 MIT 或 LICENSE-THIRD-PARTY.md 仍含 AGPL 声明/缺失"
 fi
 
 # ---------- 汇总 ----------

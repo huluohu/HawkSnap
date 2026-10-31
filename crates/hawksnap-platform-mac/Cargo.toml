@@ -26,7 +26,9 @@ chrono = "0.4"
 # CGPoint/CGSize 几何类型（core-graphics）。两 crate 均已在依赖树（app Task 4、xcap），
 # 版本一致，不引入新版本解析。
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.25"
+# "window" feature = CGWindowListCopyWindowInfo（windowcap 抓窗 + permissions 实证
+# 探测）。此前靠依赖树 feature unification 隐式可用——显式声明（只增不改版本）。
+core-graphics = { version = "0.25", features = ["window"] }
 core-foundation = "0.10"
 
 # C5 贴图：原生 NSWindow + NSImageView 窗口族（无 webview，G2 预算）。objc2 0.6 /

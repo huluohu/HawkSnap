@@ -171,7 +171,7 @@ fn launch_overlay_flow(app: &AppHandle, intent: CaptureIntent) -> Result<(), Str
         // 提示的快捷键随意图回显（截图=F1，录制选区=F6——用户刚按的那个键）。
         let combo = if intent == CaptureIntent::Capture { "F1" } else { "F6" };
         return Err(format!(
-            "屏幕录制权限未授予：已为你打开系统设置，授权后重新按 {combo} 即可"
+            "屏幕录制权限未授予：请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 HawkSnap（首次失败已自动打开设置）"
         ));
     }
     // Task 11 埋点：热键/托盘共用此入口，首行即触发时刻（stage: hotkey）；

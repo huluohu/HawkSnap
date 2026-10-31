@@ -189,6 +189,12 @@ jobs:
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # 稳定代码签名身份（Ottr 同款方案，2026-10-31）：自签证书锚定 HawkSnapCodesign，
+      # 修复「每次升级 TCC 授权失效」——adhoc 签名的 DR = cdhash，每构建必变，用户授权
+      # 过的旧条目对不上新二进制（系统设置还显示已勾选）。证书锚定后跨版本一致，TCC
+      # 记录永久匹配。bundler 读 APPLE_CERTIFICATE(+PASSWORD) 自动导入签名；secrets
+      # 未配置时 macOS 产物退回 adhoc（有告警）。Win/Linux 忽略证书相关 env。
+      APPLE_SIGNING_IDENTITY: HawkSnapCodesign
     strategy:
       fail-fast: false
       matrix:
@@ -211,7 +217,7 @@ jobs:
             bundles: "appimage deb rpm"
     runs-on: ${{ matrix.os }}
     steps:
-      # fetch-depth: 0 —— 「对应源码包」（AGPL §6）用 `git archive <tag>` 生成，
+      # fetch-depth: 0 —— 「对应源码包」用 `git archive <tag>` 生成，
       # 必须能取到 tag 对象；浅克隆（默认 depth=1）没有 tag 引用。
       - uses: actions/checkout@v4
         with:
@@ -219,6 +225,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
+      # 自签证书导入 + 信任（Ottr 同款，2026-10-31）：bundler 按「有效身份」解析
+      # （security find-identity -v），自签证书不加信任会报 failed to resolve signing
+      # identity。secrets 未配置（APPLE_CERTIFICATE 为空）→ 跳过，退回 adhoc。
+      - name: Import code signing certificate (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "APPLE_CERTIFICATE 未配置 → adhoc 签名（TCC 授权跨版本不持久；配置 secrets 后自动启用稳定签名）"
+            exit 0
+          fi
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_PW=$(openssl rand -hex 16)
+          KEYCHAIN_PATH="$RUNNER_TEMP/build-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          # 防锁定（Ottr 实测）：钥匙串默认策略会在长编译期自动锁定 → codesign 等解锁弹窗假死
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -t 720000 "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security list-keychains -s "$KEYCHAIN_PATH" $(security list-keychains | tr -d '"')
+          openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin env:APPLE_CERTIFICATE_PASSWORD -nokeys -clcerts -out "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -k "$KEYCHAIN_PATH" "$RUNNER_TEMP/cert.pem"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          # 冒烟签名：让签名链路问题在导入步骤即刻失败，而非编译 10 分钟后假死
+          cp /bin/echo "$RUNNER_TEMP/smoke-sign-bin"
+          codesign --force --sign HawkSnapCodesign "$RUNNER_TEMP/smoke-sign-bin"
+          rm -f "$RUNNER_TEMP/smoke-sign-bin"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -324,12 +361,12 @@ jobs:
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
             target/release/bundle/**/*.sig
-      # —— AGPL §6「对应源码」包（0.3.0 合规收口）——
+      # —— 「对应源码」包（随 Release 附源码归档）——
       # 二进制分发必须附对应源码：git archive 该 tag 的**已提交内容**（含 Cargo.lock
       # = 构建脚本与依赖锁定信息），随 Release 一起发布。发布出去的源码包与仓库
-      # 同源同版（tag 即版本），满足 AGPL-3.0-or-later 的源码提供义务。
+      # 同源同版（tag 即版本），二进制发布随附对应源码（透明构建惯例）。
       # 只在 arm64 腿产一次（矩阵去重）。
-      - name: Build source archive (AGPL §6 corresponding source)
+      - name: Build source archive (corresponding source)
         if: matrix.source_archive
         run: |
           mkdir -p dist
@@ -393,7 +430,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --draft \
               --title "HawkSnap $GITHUB_REF_NAME" \
-              --notes "Draft assembled by CI (plan D6). Multi-platform binary release (2026-10-31: macOS arm64/intel + Windows x64 + Linux x64, Ottr-style matrix). Known limitations: macOS dmg is adhoc/自签 signed (no notarization); Windows installers are unsigned (SmartScreen warning); platform feature depth per README platform table. The corresponding source archive (AGPL-3.0-or-later §6) is attached to this release. Controller: review artifacts, finalize release notes, then publish (plan D7)."
+              --notes "Draft assembled by CI (plan D6). Multi-platform binary release (2026-10-31: macOS arm64/intel + Windows x64 + Linux x64, Ottr-style matrix). Known limitations: macOS dmg is adhoc/自签 signed (no notarization); Windows installers are unsigned (SmartScreen warning); platform feature depth per README platform table. The corresponding source archive is attached to this release. Controller: review artifacts, finalize release notes, then publish (plan D7)."
           fi
       # asset 名 = 文件 basename，必须与 make-latest.mjs 写进 feed 的下载 URL 文件名
       # 一致（darwin-aarch64 → HawkSnap.app.tar.gz），否则 updater feed 指向 404。
@@ -444,7 +481,7 @@ jobs:
           #   dist/{nsis,msi}/…         （windows）
           #   dist/{appimage,deb,rpm}/… （linux）
           #   release-source 平铺在 dist 根；latest.json 由 make-latest 写入 dist 根。
-          # REQUIRED = updater feed 与合规相关（缺任一 = feed 404/AGPL 违规 → 硬失败）；
+          # REQUIRED = updater feed 与发布完整性相关（缺任一 = feed 404 → 硬失败）；
           # OPTIONAL = 附加分发件（dmg/msi/deb/rpm）——缺了只警告不阻断（某腿打包
           # 降级不应炸掉整个发布，feed 载荷由 REQUIRED 与 make-latest 双重把守）。
           add "dist/macos/HawkSnap_aarch64.app.tar.gz"
