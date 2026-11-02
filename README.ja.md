@@ -22,8 +22,13 @@
 [English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | [文言](README.classical.md) | **日本語**
 
 <p>
-  <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap メインパネル（ライト）" />
-  <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap メインパネル（ダーク）" />
+  <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap 履歴パネル（ライト）" />
+  <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap 履歴パネル（ダーク）" />
+</p>
+
+<p>
+  <img src="docs/screenshots/settings.png" width="49%" alt="HawkSnap 設定ウィンドウ（ライト）" />
+  <img src="docs/screenshots/settings-dark.png" width="49%" alt="HawkSnap 設定ウィンドウ（ダーク）" />
 </p>
 
 HawkSnap は、無料・完全ローカル動作の軽量スクリーンショット＆画面録画ツールです。アカウント登録不要、クラウド非経由、テレメトリなし。

@@ -22,8 +22,13 @@
 **English** | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | [文言](README.classical.md) | [日本語](README.ja.md)
 
 <p>
-  <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap main panel (light)" />
-  <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap main panel (dark)" />
+  <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap history panel (light)" />
+  <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap history panel (dark)" />
+</p>
+
+<p>
+  <img src="docs/screenshots/settings.png" width="49%" alt="HawkSnap settings (light)" />
+  <img src="docs/screenshots/settings-dark.png" width="49%" alt="HawkSnap settings (dark)" />
 </p>
 
 HawkSnap is a free, fully local, lightweight screen-capture and screen-recording tool — no account, no cloud, no telemetry.

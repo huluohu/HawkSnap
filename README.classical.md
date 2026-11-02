@@ -22,8 +22,13 @@
 [English](README.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-Hant.md) | **文言** | [日本語](README.ja.md)
 
 <p>
-  <img src="docs/screenshots/main.png" width="49%" alt="主面板" />
-  <img src="docs/screenshots/main-dark.png" width="49%" alt="主面板，夜色" />
+  <img src="docs/screenshots/main.png" width="49%" alt="史册之窗" />
+  <img src="docs/screenshots/main-dark.png" width="49%" alt="史册之窗，夜色" />
+</p>
+
+<p>
+  <img src="docs/screenshots/settings.png" width="49%" alt="设置之窗" />
+  <img src="docs/screenshots/settings-dark.png" width="49%" alt="设置之窗，夜色" />
 </p>
 
 獵影者，截屏録屏之輕器也。不設帳籍，不寄雲端，不窺行止，諸事皆辦於君之機，纖毫不外洩。

@@ -22,8 +22,13 @@
 [English](README.md) | [简体中文](README.zh-CN.md) | **繁體中文** | [文言](README.classical.md) | [日本語](README.ja.md)
 
 <p>
-  <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap 主面板（淺色）" />
-  <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap 主面板（深色）" />
+  <img src="docs/screenshots/main.png" width="49%" alt="HawkSnap 歷史面板（淺色）" />
+  <img src="docs/screenshots/main-dark.png" width="49%" alt="HawkSnap 歷史面板（深色）" />
+</p>
+
+<p>
+  <img src="docs/screenshots/settings.png" width="49%" alt="HawkSnap 設定視窗（淺色）" />
+  <img src="docs/screenshots/settings-dark.png" width="49%" alt="HawkSnap 設定視窗（深色）" />
 </p>
 
 HawkSnap（中文名**獵影**）是一款免費、純本地的輕量級截屏 + 錄屏工具——無帳號、無雲端、無遙測。
