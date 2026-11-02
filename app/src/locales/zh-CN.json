@@ -1,4 +1,7 @@
 {
+  "panel.openSettings": "设置",
+  "banner.updateAvailable": "发现新版本 v{version}",
+  "banner.updateGoSettings": "去设置更新",
   "brand.name": "猎影",
   "panel.capture": "截图 ({key})",
   "panel.pin": "贴图 ({key})",

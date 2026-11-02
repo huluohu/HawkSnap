@@ -60,6 +60,19 @@ pub fn show_record_error(app: &AppHandle, msg: String) {
     let _ = tauri::Emitter::emit(app, "hawk://record-error", msg);
 }
 
+/// 打开主面板（设置窗口「历史」分区里的「在主面板查看」入口；托盘「主面板」同款）。
+///
+/// async 命令已在运行时线程（非主线程），建窗合法。必须在非主线程调用。
+#[tauri::command(async)]
+pub fn open_main_panel(app: AppHandle) -> Result<(), String> {
+    std::thread::spawn(move || {
+        if let Err(e) = ensure_main_panel(&app) {
+            eprintln!("[hawksnap] 主面板打开失败: {e}");
+        }
+    });
+    Ok(())
+}
+
 /// 面板入口按钮（C6 最小真实版）：「截图」「贴图」两枚入口与 F1/F2 热键、托盘
 /// 同链路同反馈（失败均 emit hawk://capture-error → 面板横幅）。fire-and-forget：
 /// spawn 后立即返回 Ok，错误经事件通道回流（spec §9 不静默）。

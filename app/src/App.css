@@ -704,6 +704,40 @@ div.hs-thumb {
   background: var(--hs-hover-active);
 }
 
+/* —— 齿轮图标按钮（设置入口）：正方形，与文字按钮同高 —— */
+.hs-btn-icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  border-color: var(--hs-input-border);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.03);
+}
+
+.hs-btn-icon:not(:disabled):hover {
+  background: var(--hs-hover);
+}
+
+.hs-btn-icon:not(:disabled):active {
+  background: var(--hs-hover-active);
+}
+
+/* —— 小号按钮（横幅内的次要动作） —— */
+.hs-btn-sm {
+  padding: 3px 10px;
+  font-size: 12px;
+  margin-left: 10px;
+}
+
+/* —— 横幅内的动作按钮：与横幅文字同一行、垂直居中 —— */
+.hs-banner .hs-btn {
+  vertical-align: middle;
+}
+
 /* —— 原生控件的强调色（radio/checkbox/range 走 accent，焦点环兜底） —— */
 
 .hs-root input[type="radio"],

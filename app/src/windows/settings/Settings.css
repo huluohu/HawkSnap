@@ -1,0 +1,950 @@
+
+
+/* ============================================================================
+   HawkSnap 设置窗口样式（专属，仅 SettingsWindow 渲染时生效）
+   ----------------------------------------------------------------------------
+   设计 token
+   ----------------------------------------------------------------------------
+   色板（浅色为基线；深色整组覆盖，变量语义不变）
+     侧栏底色      --set-sidebar-bg     #f2f2f4 / #232326
+     内容底色      --set-bg             #f7f7f8 / #1b1b1d
+     卡片底        --set-card-bg        #ffffff / #2a2a2d
+     卡片描边      --set-card-border    rgba(0,0,0,.07) / rgba(255,255,255,.09)
+     行分隔线      --set-separator      rgba(0,0,0,.07) / rgba(255,255,255,.08)
+     导航选中底    --set-nav-active     #e8e8ec / #34343a
+     悬停底        --set-hover          rgba(0,0,0,.045) / rgba(255,255,255,.07)
+     正文          --set-text           #1d1d1f / #f5f5f7
+     次要文字      --set-text-2         #6e6e73 / #a1a1a6
+     弱文字/占位   --set-text-3         #98989d / #7c7c81
+     强调蓝        --set-accent         #0a84ff / #409cff
+     强调蓝(按下)  --set-accent-active  #0069d9 / #0a6ede
+     成功绿        --set-green          #34c759 / #30d158
+     成功绿(文字)  --set-green-text     #1d7d33 / #63e08c
+     警告黄        --set-yellow         #f5a623 / #ffd60a
+     危险红        --set-red            #ff3b30 / #ff453a
+     错误条底/描边 --set-red-bg         rgba(255,59,48,.10) / rgba(255,69,58,.16)
+     错误条文字    --set-red-text       #c22a20 / #ff9a93
+     说明框底      --set-info-bg        rgba(0,0,0,.035) / rgba(255,255,255,.06)
+     输入底        --set-input-bg       #ffffff / rgba(255,255,255,.06)
+     输入描边      --set-input-border   rgba(0,0,0,.14) / rgba(255,255,255,.16)
+     按钮底        --set-btn-bg         #ffffff / rgba(255,255,255,.07)
+     轨道底(分段)  --set-track-bg       #e9e9ec / #3a3a3f
+     芯片底        --set-chip-bg        #eeeef1 / #3a3a3f
+     图标方块底    --set-icon-bg        linear-gradient(135deg,#4a4a54,#2b2b31)
+                                    / linear-gradient(135deg,#5a5a66,#3a3a42)
+     导航图标方块  --set-nav-icon-bg    同 --set-icon-bg
+   间距   4 · 6 · 8 · 10 · 12 · 16 · 20 · 24
+   圆角   胶囊 999px · 小钮 7px · 芯片 8px · 控件 9px · 卡片 12px
+          导航项 8px · 图标方块 8px · 圆钮 50%
+   字号   11 版本号 · 12 次要/说明/控件 · 13 正文 · 15 卡片标题 · 17 页面标题
+   阴影   卡片 0 1px 2px rgba(0,0,0,.05), 0 6px 18px rgba(0,0,0,.06)
+          （深色整体加深）；分段控件选中态 0 1px 2px rgba(0,0,0,.14)
+   焦点环 --set-focus-ring  0 0 0 3px rgba(10,132,255,.30)（仅 focus-visible）
+   ----------------------------------------------------------------------------
+   作用域约定（重要）
+   ----------------------------------------------------------------------------
+   1. 本文件经 index.tsx 的静态 import 进入 **所有窗口** 共用的 index.html 产物
+      （vite 把 CSS 打进共享 chunk），因此：
+        · 禁止裸元素选择器（body / button / input …）、禁止裸 :root 覆盖全局变量；
+        · 全部规则必须挂在 .hs-settings 之下。
+   2. 设计 token 声明在 .hs-settings 上（不落在 :root），因此不会污染主面板的
+      --hs-* 变量族；主面板与设置窗口互不影响。
+   3. 深色整组覆盖用三个等价选择器并集，任意一种挂载方式都生效：
+        .hs-settings[data-theme="dark"]   —— 主题属性挂在设置窗口根节点上
+        .hs-settings [data-theme="dark"]  —— 主题属性挂在根节点的后代上
+        [data-theme="dark"] .hs-settings  —— 主题属性挂在祖先（documentElement）上
+      三者都含 .hs-settings，仍满足「规则作用域化」约束。
+   4. body 级规则仅一条，且由窗口级标记限定：body[data-set-window="1"]
+      （index.tsx 挂载时打标，见该文件的 data-set-window 说明）——用于清零 body
+      默认 margin 与铺底色，避免 100vh 布局出现 8px 溢出滚动条。
+   ============================================================================ */
+.hs-settings {
+  /* —— 表面 —— */
+  --set-sidebar-bg: #f2f2f4;
+  --set-bg: #f7f7f8;
+  --set-card-bg: #ffffff;
+  --set-card-border: rgba(0, 0, 0, 0.07);
+  --set-separator: rgba(0, 0, 0, 0.07);
+  --set-nav-active: #e8e8ec;
+  --set-hover: rgba(0, 0, 0, 0.045);
+
+  /* —— 文字 —— */
+  --set-text: #1d1d1f;
+  --set-text-2: #6e6e73;
+  --set-text-3: #98989d;
+
+  /* —— 强调 / 状态 —— */
+  --set-accent: #0a84ff;
+  --set-accent-active: #0069d9;
+  --set-green: #34c759;
+  --set-green-text: #1d7d33;
+  --set-yellow: #f5a623;
+  --set-red: #ff3b30;
+  --set-red-bg: rgba(255, 59, 48, 0.1);
+  --set-red-text: #c22a20;
+
+  /* —— 控件 —— */
+  --set-info-bg: rgba(0, 0, 0, 0.035);
+  --set-input-bg: #ffffff;
+  --set-input-border: rgba(0, 0, 0, 0.14);
+  --set-btn-bg: #ffffff;
+  --set-track-bg: #e9e9ec;
+  --set-chip-bg: #eeeef1;
+  --set-icon-bg: linear-gradient(135deg, #4a4a54, #2b2b31);
+
+  /* —— 阴影 / 焦点环 —— */
+  --set-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05), 0 6px 18px rgba(0, 0, 0, 0.06);
+  --set-focus-ring: 0 0 0 3px rgba(10, 132, 255, 0.3);
+
+  /* —— 字体 —— */
+  --set-font:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "PingFang SC",
+    "Hiragino Sans GB", "Segoe UI", sans-serif;
+  --set-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  box-sizing: border-box;
+  display: flex;
+  align-items: stretch;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--set-bg);
+  color: var(--set-text);
+  font-family: var(--set-font);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.hs-settings *, .hs-settings *::before, .hs-settings *::after {
+  box-sizing: border-box;
+}
+
+.hs-settings button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.hs-settings button:disabled {
+  cursor: default;
+}
+
+/* —— 深色主题整组覆盖（三种挂载方式并集，见文件头注 3） —— */
+
+.hs-settings[data-theme="dark"], .hs-settings [data-theme="dark"], [data-theme="dark"] .hs-settings {
+  --set-sidebar-bg: #232326;
+  --set-bg: #1b1b1d;
+  --set-card-bg: #2a2a2d;
+  --set-card-border: rgba(255, 255, 255, 0.09);
+  --set-separator: rgba(255, 255, 255, 0.08);
+  --set-nav-active: #34343a;
+  --set-hover: rgba(255, 255, 255, 0.07);
+
+  --set-text: #f5f5f7;
+  --set-text-2: #a1a1a6;
+  --set-text-3: #7c7c81;
+
+  --set-accent: #409cff;
+  --set-accent-active: #0a6ede;
+  --set-green: #30d158;
+  --set-green-text: #63e08c;
+  --set-yellow: #ffd60a;
+  --set-red: #ff453a;
+  --set-red-bg: rgba(255, 69, 58, 0.16);
+  --set-red-text: #ff9a93;
+
+  --set-info-bg: rgba(255, 255, 255, 0.06);
+  --set-input-bg: rgba(255, 255, 255, 0.06);
+  --set-input-border: rgba(255, 255, 255, 0.16);
+  --set-btn-bg: rgba(255, 255, 255, 0.07);
+  --set-track-bg: #3a3a3f;
+  --set-chip-bg: #3a3a3f;
+  --set-icon-bg: linear-gradient(135deg, #5a5a66, #3a3a42);
+
+  --set-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 18px rgba(0, 0, 0, 0.35);
+  --set-focus-ring: 0 0 0 3px rgba(10, 132, 255, 0.38);
+}
+
+/* —— 窗口级 body 规则（由 data-set-window="1" 限定，仅设置窗口存在） —— */
+
+body[data-set-window="1"] {
+  margin: 0;
+  background: #f7f7f8;
+}
+
+body[data-set-window="1"][data-theme="dark"] {
+  background: #1b1b1d;
+}
+
+/* —— 左侧栏 —— */
+
+.hs-settings .hs-sidebar {
+  flex: none;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 12px;
+  background: var(--set-sidebar-bg);
+  border-right: 1px solid var(--set-separator);
+  overflow-y: auto;
+}
+
+/* 搜索框：胶囊 + 放大镜 */
+
+.hs-settings .hs-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--set-input-bg);
+  border: 1px solid transparent;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hs-settings .hs-search:focus-within {
+  border-color: var(--set-accent);
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-search-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--set-text-3);
+}
+
+.hs-settings .hs-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--set-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.hs-settings .hs-search input::placeholder {
+  color: var(--set-text-3);
+}
+
+/* 应用资料头：logo + 名称 + 版本 + 状态点 */
+
+.hs-settings .hs-profile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 4px 6px;
+}
+
+.hs-settings .hs-profile-logo {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #0a84ff, #5e5ce6);
+  color: #fff;
+  font-size: 19px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.35),
+    0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.hs-settings .hs-profile-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.hs-settings .hs-profile-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hs-settings .hs-profile-version {
+  font-size: 11px;
+  color: var(--set-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.hs-settings .hs-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--set-green);
+}
+
+/* 导航项列表 */
+
+.hs-settings .hs-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hs-settings .hs-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--set-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  transition: background-color 0.12s ease;
+}
+
+.hs-settings .hs-nav-item:hover {
+  background: var(--set-hover);
+}
+
+.hs-settings .hs-nav-item.is-active {
+  background: var(--set-nav-active);
+  font-weight: 600;
+}
+
+.hs-settings .hs-nav-item:focus-visible {
+  outline: none;
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-nav-icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--set-icon-bg);
+  color: #f2f2f5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+}
+
+.hs-settings .hs-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hs-settings .hs-nav-empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--set-text-3);
+}
+
+/* —— 右侧内容区 —— */
+
+.hs-settings .hs-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hs-settings .hs-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 20px;
+  border-bottom: 1px solid var(--set-separator);
+  background: var(--set-bg);
+}
+
+.hs-settings .hs-head-nav {
+  display: flex;
+  gap: 6px;
+}
+
+.hs-settings .hs-head-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.hs-settings .hs-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hs-settings .hs-saved {
+  font-size: 12px;
+  color: var(--set-green-text);
+}
+
+.hs-settings .hs-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px 28px;
+}
+
+.hs-settings .hs-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 680px;
+}
+
+/* —— 圆钮（前后翻页 / 保存） —— */
+
+.hs-settings .hs-round-btn {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--set-input-border);
+  background: var(--set-btn-bg);
+  color: var(--set-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.hs-settings .hs-round-btn:not(:disabled):hover {
+  background: var(--set-hover);
+}
+
+.hs-settings .hs-round-btn:disabled {
+  opacity: 0.35;
+}
+
+.hs-settings .hs-round-btn:focus-visible {
+  outline: none;
+  border-color: var(--set-accent);
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-round-btn-primary {
+  background: var(--set-accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.hs-settings .hs-round-btn-primary:not(:disabled):hover {
+  background: var(--set-accent-active);
+}
+
+/* —— 卡片 —— */
+
+.hs-settings .hs-card {
+  min-width: 0;
+  padding: 16px 18px;
+  background: var(--set-card-bg);
+  border: 1px solid var(--set-card-border);
+  border-radius: 12px;
+  box-shadow: var(--set-shadow-card);
+}
+
+.hs-settings .hs-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.hs-settings .hs-card-icon {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: var(--set-icon-bg);
+  color: #f2f2f5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
+}
+
+.hs-settings .hs-card-head-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.hs-settings .hs-card-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.hs-settings .hs-card-desc {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--set-text-2);
+}
+
+.hs-settings .hs-card-body {
+  margin-top: 12px;
+}
+
+/* —— 设置行：左标题(+ⓘ) / 右控件，行间细分隔线 —— */
+
+.hs-settings .hs-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.hs-settings .hs-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 10px 0;
+}
+
+.hs-settings .hs-row + .hs-row {
+  border-top: 1px solid var(--set-separator);
+}
+
+.hs-settings .hs-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hs-settings .hs-row-label {
+  font-size: 13px;
+}
+
+.hs-settings .hs-row-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hs-settings .hs-info-btn {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--set-text-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hs-settings .hs-info-btn:hover, .hs-settings .hs-info-btn.is-open {
+  color: var(--set-accent);
+}
+
+.hs-settings .hs-info-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-info-box {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 8px 11px;
+  border-radius: 8px;
+  background: var(--set-info-bg);
+  color: var(--set-text-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* —— 说明清单（不造假开关的说明卡） —— */
+
+.hs-settings .hs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.hs-settings .hs-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 0;
+}
+
+.hs-settings .hs-list-item + .hs-list-item {
+  border-top: 1px solid var(--set-separator);
+}
+
+.hs-settings .hs-list-title {
+  font-size: 13px;
+}
+
+.hs-settings .hs-list-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--set-text-2);
+}
+
+.hs-settings .hs-list-head {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--set-separator);
+}
+
+.hs-settings .hs-list-head + .hs-list-item {
+  border-top: none;
+}
+
+/* —— 分段式单选（macOS segmented 观感） —— */
+
+.hs-settings .hs-segment {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--set-track-bg);
+}
+
+.hs-settings .hs-segment-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--set-text-2);
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.hs-settings .hs-segment-item.is-active {
+  background: var(--set-card-bg);
+  color: var(--set-text);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.14);
+}
+
+.hs-settings .hs-segment-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hs-settings .hs-segment-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--set-text-3);
+}
+
+.hs-settings .hs-segment-item.is-active .hs-segment-dot {
+  border-color: var(--set-accent);
+  background: var(--set-accent);
+  box-shadow: inset 0 0 0 1.5px var(--set-card-bg);
+}
+
+.hs-settings .hs-segment-input:focus-visible + .hs-segment-dot {
+  outline: 2px solid var(--set-accent);
+  outline-offset: 2px;
+}
+
+/* —— macOS 风格开关 —— */
+
+.hs-settings .hs-toggle {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--set-track-bg);
+  transition: background-color 0.18s ease;
+}
+
+.hs-settings .hs-toggle.is-on {
+  background: var(--set-green);
+}
+
+.hs-settings .hs-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s ease;
+}
+
+.hs-settings .hs-toggle.is-on .hs-toggle-knob {
+  transform: translateX(16px);
+}
+
+/* —— 热键胶囊 chip —— */
+
+.hs-settings .hs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--set-card-border);
+  background: var(--set-chip-bg);
+  color: var(--set-text);
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+
+.hs-settings .hs-chip:hover {
+  border-color: var(--set-accent);
+}
+
+.hs-settings .hs-chip:focus-visible {
+  outline: none;
+  border-color: var(--set-accent);
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-key {
+  font-family: var(--set-font-mono);
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 5px;
+  background: var(--set-card-bg);
+  border: 1px solid var(--set-separator);
+  color: var(--set-text);
+}
+
+.hs-settings .hs-chip-hint {
+  font-size: 12px;
+  color: var(--set-accent);
+  padding: 3px 6px;
+}
+
+.hs-settings .hs-chip-empty {
+  font-size: 12px;
+  color: var(--set-text-2);
+  padding: 5px 10px;
+}
+
+/* —— 齿轮等圆形图标钮 —— */
+
+.hs-settings .hs-icon-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--set-input-border);
+  background: var(--set-btn-bg);
+  color: var(--set-text-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.hs-settings .hs-icon-btn:hover {
+  background: var(--set-hover);
+  color: var(--set-text);
+}
+
+.hs-settings .hs-icon-btn:focus-visible {
+  outline: none;
+  border-color: var(--set-accent);
+  box-shadow: var(--set-focus-ring);
+}
+
+/* —— 文本框 / 按钮 —— */
+
+.hs-settings .hs-input {
+  font: inherit;
+  font-size: 12px;
+  color: var(--set-text);
+  padding: 5px 9px;
+  border: 1px solid var(--set-input-border);
+  border-radius: 7px;
+  background: var(--set-input-bg);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hs-settings .hs-input::placeholder {
+  color: var(--set-text-3);
+}
+
+.hs-settings .hs-input:hover {
+  border-color: var(--set-text-3);
+}
+
+.hs-settings .hs-input:focus-visible {
+  outline: none;
+  border-color: var(--set-accent);
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-btn {
+  appearance: none;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 5px 12px;
+  border: 1px solid var(--set-input-border);
+  border-radius: 7px;
+  background: var(--set-btn-bg);
+  color: var(--set-text);
+  white-space: nowrap;
+  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.hs-settings .hs-btn:not(:disabled):hover {
+  background: var(--set-hover);
+}
+
+.hs-settings .hs-btn:disabled {
+  opacity: 0.45;
+}
+
+.hs-settings .hs-btn:focus-visible {
+  outline: none;
+  border-color: var(--set-accent);
+  box-shadow: var(--set-focus-ring);
+}
+
+.hs-settings .hs-btn-primary {
+  background: var(--set-accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.hs-settings .hs-btn-primary:not(:disabled):hover {
+  background: var(--set-accent-active);
+}
+
+.hs-settings .hs-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* —— 滑块 —— */
+
+.hs-settings .hs-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hs-settings .hs-slider input[type="range"] {
+  width: 150px;
+  accent-color: var(--set-accent);
+  cursor: pointer;
+}
+
+.hs-settings .hs-slider-value {
+  min-width: 26px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--set-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— 状态点 / 状态文字 —— */
+
+.hs-settings .hs-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.hs-settings .hs-status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.hs-settings .hs-status-dot-ok {
+  background: var(--set-green);
+}
+
+.hs-settings .hs-status-dot-warn {
+  background: var(--set-yellow);
+}
+
+.hs-settings .hs-status-dot-unknown {
+  background: var(--set-text-3);
+}
+
+.hs-settings .hs-status-text {
+  font-size: 12px;
+  color: var(--set-text-2);
+}
+
+.hs-settings .hs-status-text-ok {
+  color: var(--set-green-text);
+}
+
+.hs-settings .hs-status-text-warn {
+  color: var(--set-yellow);
+}
+
+/* —— 错误条 —— */
+
+.hs-settings .hs-error-bar {
+  max-width: 680px;
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--set-red);
+  background: var(--set-red-bg);
+  color: var(--set-red-text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* —— 说明/空态 —— */
+
+.hs-settings .hs-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--set-text-2);
+}
+
+.hs-settings .hs-mono {
+  font-family: var(--set-font-mono);
+  font-size: 12px;
+}

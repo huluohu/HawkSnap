@@ -25,30 +25,6 @@ interface Settings {
   updateEnabled: boolean; // 自动更新开关（D3；服务端不 sanitize，bool 无脏值）
 }
 
-// 表单态：saveDir 归一为 string（null ↔ "" 双向转换），便于受控输入。
-type SettingsForm = Omit<Settings, "saveDir"> & { saveDir: string };
-
-const DEFAULTS: SettingsForm = {
-  hotkeyCapture: "F1",
-  hotkeyPin: "F2",
-  hotkeyRecord: "F6",
-  outputFormat: "png",
-  jpegQuality: 90,
-  saveDir: "",
-  launchAtLogin: false,
-  appearance: "system",
-  language: "system",
-  updateEnabled: true,
-};
-
-const toForm = (s: Settings): SettingsForm => ({ ...s, saveDir: s.saveDir ?? "" });
-const toPayload = (f: SettingsForm): Settings => ({
-  ...f,
-  saveDir: f.saveDir.trim() === "" ? null : f.saveDir.trim(),
-});
-
-type HotkeySlot = "hotkeyCapture" | "hotkeyPin" | "hotkeyRecord";
-
 // —— 自动更新（D3）—— 与后端 updater.rs 对齐 ——
 interface UpdateInfo {
   version: string;
@@ -56,32 +32,10 @@ interface UpdateInfo {
   currentVersion: string;
 }
 
-// hawk://update-progress 载荷（serde camelCase）：total 可能缺失（Content-Length 未知）。
-interface UpdateProgress {
-  downloaded: number;
-  total: number | null;
-}
-
-// 更新区状态机：idle → checking → latest | available → downloading → installed。
-type UpdateState =
-  | { phase: "idle" }
-  | { phase: "checking" }
-  | { phase: "latest" }
-  | { phase: "available"; info: UpdateInfo }
-  | { phase: "downloading"; progress: UpdateProgress | null }
-  | { phase: "installed" };
-
-// 后端哨兵（updater.rs ERR_NOT_CONFIGURED）：更新通道未配置（占位公钥期常态）——
-// 映射为 i18n 文案而非报错。双端字符串一致由 updater.rs 单测 + i18n.test.ts 兜底。
-const ERR_UPDATER_NOT_CONFIGURED = "updater_not_configured";
-
 // 启动静默检查去重：面板会被 idle_reaper 销毁重建（webview 重挂载），每次重挂载
 // 都打一次更新接口是惊扰——本模块级标记保证每次应用运行（webview 生命周期）只自动
 // 检查一次；用户点「检查更新」不受此限（显式动作）。
 let autoCheckFired = false;
-
-// 字节 → MB 展示（一位小数；进度文本里的数字不是文案，不入词典）。
-const fmtMb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
 
 // 热键注册失败载荷（D0-⑤）：与后端 HotkeyError（serde camelCase）对齐——kind 供横幅
 // 归因，message 为人类可读文案（注册失败原因）。kind 的展示名走
@@ -93,31 +47,6 @@ interface HotkeyErrorPayload {
   message: string;
 }
 
-// 纯修饰键按下（无主键）：不算组合，继续等待。
-const MODIFIER_ONLY_KEYS = new Set([
-  "Meta", "Shift", "Alt", "Control", "CapsLock", "Fn", "FnLock", "Hyper", "Symbol",
-]);
-
-// 组合键 → 插件词汇表字符串（global-hotkey parse_hotkey：修饰键 Cmd/Shift/Alt/Ctrl
-// 在前 + 主键，"+" 连接；主键大小写不敏感，字母统一大写展示）。返回 null = 忽略
-// （纯修饰键）；不认识的键不在此拦截——服务端 set_settings 解析失败即冲突 Err，
-// 服务端是唯一权威。
-function comboFromEvent(e: KeyboardEvent): string | null {
-  if (MODIFIER_ONLY_KEYS.has(e.key)) return null;
-  const mods: string[] = [];
-  if (e.metaKey) mods.push("Cmd");
-  if (e.shiftKey) mods.push("Shift");
-  if (e.altKey) mods.push("Alt");
-  if (e.ctrlKey) mods.push("Ctrl");
-  // 数字键带修饰时 e.key 会变成符号（Shift+1 → "!"），按 e.code 取回数字本键；
-  // 其余单字符统一大写（插件 parse_key 大小写不敏感，展示习惯大写字母）。
-  let key: string;
-  if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
-  else if (e.key === " ") key = "Space";
-  else if (e.key.length === 1) key = e.key.toUpperCase();
-  else key = e.key;
-  return [...mods, key].join("+");
-}
 
 function App() {
   // 订阅 i18n 语言态：语言切换触发本组件重渲染，全部文案即时换新（不重载）。
@@ -125,13 +54,12 @@ function App() {
   const [hotkeyError, setHotkeyError] = useState<HotkeyErrorPayload | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [recordError, setRecordError] = useState<string | null>(null);
-  const [form, setForm] = useState<SettingsForm>(DEFAULTS);
-  const [settingsError, setSettingsError] = useState<string | null>(null);
-  const [capturing, setCapturing] = useState<HotkeySlot | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveOk, setSaveOk] = useState(false);
-  const [updateState, setUpdateState] = useState<UpdateState>({ phase: "idle" });
-  const [updateError, setUpdateError] = useState<string | null>(null);
+  // —— 设置已迁到独立窗口（M3 重做，Snapzy 式侧栏+卡片）——主面板只保留三件事：
+  // ① 热键文案回显（入口按钮上的「截图 (F1)」）② 外观主题跟随 ③ 更新可用性横幅。
+  const [hotkeys, setHotkeys] = useState({ capture: "F1", pin: "F2", record: "F6" });
+  const [appearance, setAppearance] = useState("system");
+  // 发现新版本 → 横幅提示「去设置里更新」（安装流程在设置窗口，主面板不重复实现）。
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   // —— 浏览器插件分区（M4 P1）—— Native Messaging 桥是否就绪（后端监听状态）+
   // 浏览器截图入库后的提示横幅。
   const [nativeReady, setNativeReady] = useState<boolean | null>(null);
@@ -245,19 +173,27 @@ function App() {
     };
   }, []);
 
-  // 挂载即拉取设置填充表单（面板由 idle_reaper 销毁后重建时会重挂载 → 总能拿到最新值）。
-  // 语言（D1）：i18n 模块默认跟随系统，显式设置以此处为准对齐（本窗口与覆盖层窗口同源）。
+  // 挂载即拉取设置（面板由 idle_reaper 销毁后重建时会重挂载 → 总能拿到最新值）。
+  // 主面板只消费三样：语言（对齐本窗口与覆盖层窗口）、外观（主题）、热键（入口回显）。
+  // 设置的编辑面在独立设置窗口——此处只读，不持有表单态。
   useEffect(() => {
     invoke<Settings>("get_settings")
       .then((s) => {
-        setForm(toForm(s));
         setLanguage(s.language as LanguageSetting);
+        setAppearance(s.appearance);
+        setHotkeys({
+          capture: s.hotkeyCapture,
+          pin: s.hotkeyPin,
+          record: s.hotkeyRecord,
+        });
       })
-      .catch((e) => setSettingsError(String(e)));
+      .catch(() => {
+        /* 设置读失败不打扰主面板：入口按钮回显默认热键即可 */
+      });
   }, []);
 
   // —— 外观主题接线（表现层，本次 UI 重设计新增的唯一逻辑）——
-  // form.appearance（system|light|dark）→ documentElement.dataset.theme（light/dark）；
+  // appearance（system|light|dark）→ documentElement.dataset.theme（light/dark）；
   // "跟随系统"经 prefers-color-scheme 解析并订阅其变化实时切换。App.css 全部颜色走
   // CSS 变量，[data-theme="dark"] 整组覆盖。面板 body 打标 hs-panel-body——本样式表
   // 经 main.tsx 打进所有窗口的产物，body 级规则借此只作用主面板。
@@ -268,34 +204,14 @@ function App() {
         : null;
     const apply = () => {
       const dark =
-        form.appearance === "dark" || (form.appearance === "system" && !!mq?.matches);
+        appearance === "dark" || (appearance === "system" && !!mq?.matches);
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     };
     apply();
     document.body.classList.add("hs-panel-body");
     mq?.addEventListener("change", apply);
     return () => mq?.removeEventListener("change", apply);
-  }, [form.appearance]);
-
-  // 热键捕获模式：捕获态挂 window 捕获相 keydown——下一个组合键写入对应槽位；Esc 取消；
-  // 纯修饰键忽略。capture 相 + stopPropagation 避免页面其他快捷逻辑收到该事件。
-  useEffect(() => {
-    if (!capturing) return;
-    const onKey = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape") {
-        setCapturing(null);
-        return;
-      }
-      const combo = comboFromEvent(e);
-      if (!combo) return;
-      setForm((f) => ({ ...f, [capturing]: combo }));
-      setCapturing(null);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [capturing]);
+  }, [appearance]);
 
   // —— 历史分区（M0）—— 搜索输入 250ms 防抖（计划接口）；空查询走 history_list，
   // 非空走 history_search。加载失败入 historyError（分区内横幅，不打扰设置区）。
@@ -343,84 +259,18 @@ function App() {
     );
   };
 
-  // 自动更新（D3）：下载进度 push 通道。仅 downloading 相消费；其他相收到的
-  // 迟到事件（上一次安装的尾巴）直接忽略，防止进度文本串台。
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    listen<UpdateProgress>("hawk://update-progress", (e) => {
-      setUpdateState((s) =>
-        s.phase === "downloading" ? { phase: "downloading", progress: e.payload } : s,
-      );
-    })
-      .then((un) => {
-        if (disposed) un();
-        else unlisten = un;
-      })
-      .catch(() => {});
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   // 启动静默检查（评审 Fix 1：让 update_enabled 真正门控自动检查）。manual=false 时
   // 门控全在命令侧：开关关闭 → Ok(None)；占位公钥 → 同样 Ok(None)——两者都渲染为无。
-  // 只有真的发现新版本才出「发现新版本 vX」状态；失败静默降级（spec §9 精神：不打扰，
-  // 用户可随时手动检查获知失败原因）。挂载即发（命令自读服务端设置，无需等表单水合）。
+  // 只有真的发现新版本才出横幅（安装/重启流程在设置窗口，主面板只做「去设置」引导）。
   useEffect(() => {
     if (autoCheckFired) return;
     autoCheckFired = true;
     invoke<UpdateInfo | null>("check_for_updates", { manual: false })
       .then((info) => {
-        if (info) setUpdateState((s) => (s.phase === "idle" ? { phase: "available", info } : s));
+        if (info) setUpdateInfo(info);
       })
       .catch(() => {});
   }, []);
-
-  // 手动检查更新（manual=true 覆盖 update_enabled 开关——用户显式动作）。
-  const checkForUpdates = () => {
-    setUpdateError(null);
-    setUpdateState({ phase: "checking" });
-    invoke<UpdateInfo | null>("check_for_updates", { manual: true })
-      .then((info) =>
-        setUpdateState(info ? { phase: "available", info } : { phase: "latest" }),
-      )
-      .catch((e) => {
-        setUpdateState({ phase: "idle" });
-        if (String(e) === ERR_UPDATER_NOT_CONFIGURED) {
-          setUpdateError(t("settings.updates.notConfigured"));
-        } else {
-          setUpdateError(t("banner.updateError", { message: String(e) }));
-        }
-      });
-  };
-
-  // 下载并安装：进度经 hawk://update-progress（上方 listener 写入 downloading 相）。
-  // Ok → installed（提示重启，不自动重启）；Err → 横幅 + 回 idle 可重试。
-  const installUpdate = () => {
-    setUpdateError(null);
-    setUpdateState((s) =>
-      s.phase === "available" ? { phase: "downloading", progress: null } : s,
-    );
-    invoke<void>("install_update")
-      .then(() => setUpdateState({ phase: "installed" }))
-      .catch((e) => {
-        setUpdateState({ phase: "idle" });
-        if (String(e) === ERR_UPDATER_NOT_CONFIGURED) {
-          setUpdateError(t("settings.updates.notConfigured"));
-        } else {
-          setUpdateError(t("banner.updateError", { message: String(e) }));
-        }
-      });
-  };
-
-  // 立即重启（AppHandle::restart 不返回，进程直接换成新版本）。
-  const restartApp = () => {
-    invoke<void>("restart_app").catch((e) =>
-      setUpdateError(t("banner.updateError", { message: String(e) })),
-    );
-  };
 
   // 面板入口（C6）：与 F1/F2 热键、托盘同链路（panel_trigger → start_capture_flow /
   // pin_latest），失败经 hawk://capture-error 横幅回流。热键名随设置回显（C7）。
@@ -428,35 +278,10 @@ function App() {
     invoke<void>("panel_trigger", { action }).catch((e) => setCaptureError(String(e)));
   };
 
-  // 保存：客户端只做非空校验，冲突/解析权威在服务端——set_settings Err → 横幅 +
-  // 重新拉取服务端设置回显（Err 不携带设置，且文件保持旧值）。
-  const save = () => {
-    if (
-      form.hotkeyCapture.trim() === "" ||
-      form.hotkeyPin.trim() === "" ||
-      form.hotkeyRecord.trim() === ""
-    ) {
-      setSettingsError(t("settings.error.emptyHotkey"));
-      return;
-    }
-    setSaving(true);
-    invoke<Settings>("set_settings", { s: toPayload(form) })
-      .then((effective) => {
-        setForm(toForm(effective)); // 回显服务端生效值（sanitize 后）
-        setLanguage(effective.language as LanguageSetting); // 语言随保存即时生效
-        setSettingsError(null);
-        setSaveOk(true);
-        window.setTimeout(() => setSaveOk(false), 1600);
-      })
-      .catch((e) => {
-        setSettingsError(String(e));
-        return invoke<Settings>("get_settings").then((s) => setForm(toForm(s)));
-      })
-      .finally(() => setSaving(false));
+  // 打开设置窗口（M3 重做）：主面板只做入口，编辑面在独立窗口（侧栏分区 + 卡片）。
+  const openSettings = () => {
+    invoke<void>("open_settings").catch((e) => setCaptureError(String(e)));
   };
-
-  const setField = <K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) =>
-    setForm((f) => ({ ...f, [key]: value }));
 
   return (
     <main className="hs-root">
@@ -467,10 +292,21 @@ function App() {
         </h1>
         <div className="hs-topbar-actions">
           <button className="hs-btn hs-btn-primary" onClick={() => trigger("capture")}>
-            {t("panel.capture", { key: form.hotkeyCapture })}
+            {t("panel.capture", { key: hotkeys.capture })}
           </button>
           <button className="hs-btn hs-btn-primary" onClick={() => trigger("pin")}>
-            {t("panel.pin", { key: form.hotkeyPin })}
+            {t("panel.pin", { key: hotkeys.pin })}
+          </button>
+          {/* 设置入口：独立窗口（M3 重做，Snapzy 式侧栏+卡片）。齿轮按钮而非文字——
+              主面板是「历史/快速访问」面，设置是低频配置面，两者分工。 */}
+          <button
+            type="button"
+            className="hs-btn hs-btn-icon"
+            onClick={openSettings}
+            title={t("panel.openSettings")}
+            aria-label={t("panel.openSettings")}
+          >
+            <span aria-hidden="true">⚙</span>
           </button>
         </div>
       </header>
@@ -496,14 +332,18 @@ function App() {
             {t("banner.recordError", { message: recordError })}
           </div>
         )}
-        {settingsError && (
-          <div role="alert" className="hs-banner hs-banner-error">
-            {t("banner.settingsError", { message: settingsError })}
-          </div>
-        )}
-        {updateError && (
-          <div role="alert" className="hs-banner hs-banner-error">
-            {updateError}
+        {/* 发现新版本 → 引导去设置窗口安装（安装/重启流程在设置窗口统一实现，
+            主面板不重复一套，避免两处状态机打架）。 */}
+        {updateInfo && (
+          <div role="status" className="hs-banner hs-banner-info">
+            <span>{t("banner.updateAvailable", { version: updateInfo.version })}</span>
+            <button
+              type="button"
+              className="hs-btn hs-btn-secondary hs-btn-sm"
+              onClick={openSettings}
+            >
+              {t("banner.updateGoSettings")}
+            </button>
           </div>
         )}
         {browserCapture && (
@@ -597,231 +437,6 @@ function App() {
               })}
             </div>
           )}
-        </section>
-
-        <section className="hs-card">
-          <h2 className="hs-section-title">{t("settings.title")}</h2>
-
-          <div className="hs-field">
-            <label className="hs-field-label">{t("settings.hotkeyLabel")}</label>
-            <div className="hs-field-control">
-              {([
-                { key: "hotkeyCapture" as const, label: t("settings.slot.capture") },
-                { key: "hotkeyPin" as const, label: t("settings.slot.pin") },
-                { key: "hotkeyRecord" as const, label: t("settings.slot.record") },
-              ]).map(({ key, label }) => (
-                <div key={key} className="hs-slot-row">
-                  <span className="hs-slot-label">{label}</span>
-                  <button
-                    type="button"
-                    className="hs-btn hs-btn-secondary hs-hotkey-btn"
-                    onClick={() => setCapturing(key)}
-                  >
-                    {form[key]}
-                  </button>
-                  {capturing === key && (
-                    <span className="hs-pressing">{t("settings.pressCombo")}</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="hs-field">
-            <label className="hs-field-label">{t("settings.outputFormat")}</label>
-            <div className="hs-field-control">
-              <div className="hs-radio-row">
-                <label className="hs-check">
-                  <input
-                    type="radio"
-                    name="output-format"
-                    checked={form.outputFormat === "png"}
-                    onChange={() => setField("outputFormat", "png")}
-                  />
-                  PNG
-                </label>
-                <label className="hs-check">
-                  <input
-                    type="radio"
-                    name="output-format"
-                    checked={form.outputFormat === "jpeg"}
-                    onChange={() => setField("outputFormat", "jpeg")}
-                  />
-                  JPEG
-                </label>
-                {form.outputFormat === "jpeg" && (
-                  <label className="hs-quality">
-                    {t("settings.quality", { n: form.jpegQuality })}
-                    <input
-                      type="range"
-                      min={1}
-                      max={100}
-                      value={form.jpegQuality}
-                      onChange={(e) => setField("jpegQuality", Number(e.target.value))}
-                    />
-                  </label>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="hs-field">
-            <label className="hs-field-label" htmlFor="save-dir">{t("settings.saveDir")}</label>
-            <div className="hs-field-control">
-              <div className="hs-input-row">
-                <input
-                  id="save-dir"
-                  type="text"
-                  className="hs-input"
-                  placeholder={t("settings.saveDirPlaceholder")}
-                  value={form.saveDir}
-                  onChange={(e) => setField("saveDir", e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="hs-btn hs-btn-secondary"
-                  onClick={() => setField("saveDir", "")}
-                  title={t("settings.restoreDefaultTip")}
-                >
-                  {t("settings.restoreDefault")}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="hs-field">
-            <label className="hs-field-label" htmlFor="launch-at-login">{t("settings.launchAtLogin")}</label>
-            <div className="hs-field-control">
-              <label className="hs-check">
-                <input
-                  id="launch-at-login"
-                  type="checkbox"
-                  checked={form.launchAtLogin}
-                  onChange={(e) => setField("launchAtLogin", e.target.checked)}
-                />
-                {t("settings.launchAtLoginDesc")}
-              </label>
-            </div>
-          </div>
-
-          <div className="hs-field">
-            <span className="hs-field-label">{t("settings.appearance")}</span>
-            <div className="hs-field-control">
-              <div className="hs-radio-row">
-                {(["system", "light", "dark"] as const).map((mode) => (
-                  <label key={mode} className="hs-check">
-                    <input
-                      type="radio"
-                      name="appearance"
-                      checked={form.appearance === mode}
-                      onChange={() => setField("appearance", mode)}
-                    />
-                    {mode === "system"
-                      ? t("settings.appearanceSystem")
-                      : mode === "light"
-                        ? t("settings.appearanceLight")
-                        : t("settings.appearanceDark")}
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="hs-field">
-            <label className="hs-field-label" htmlFor="language">{t("settings.language")}</label>
-            <div className="hs-field-control">
-              {/* D1：语言选择随表单保存生效（保存后回显生效值并即时切换文案）。 */}
-              <select
-                id="language"
-                className="hs-select"
-                value={form.language}
-                onChange={(e) => setField("language", e.target.value)}
-              >
-                <option value="system">{t("settings.langSystem")}</option>
-                <option value="zh-CN">{t("settings.langZh")}</option>
-                <option value="en-US">{t("settings.langEn")}</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="hs-field">
-            <label className="hs-field-label" htmlFor="update-enabled">{t("settings.updates")}</label>
-            <div className="hs-field-control">
-              <label className="hs-check">
-                <input
-                  id="update-enabled"
-                  type="checkbox"
-                  checked={form.updateEnabled}
-                  onChange={(e) => setField("updateEnabled", e.target.checked)}
-                />
-                {t("settings.updatesAutoDesc")}
-              </label>
-              <div className="hs-updates-row">
-                <button
-                  type="button"
-                  className="hs-btn hs-btn-secondary"
-                  onClick={checkForUpdates}
-                  disabled={updateState.phase === "checking" || updateState.phase === "downloading"}
-                >
-                  {t("settings.checkUpdates")}
-                </button>
-                {updateState.phase === "checking" && (
-                  <span className="hs-status-busy">{t("settings.updates.checking")}</span>
-                )}
-                {updateState.phase === "latest" && (
-                  <span className="hs-status-ok">{t("settings.updates.latest")}</span>
-                )}
-                {updateState.phase === "available" && (
-                  <span className="hs-status-ok">
-                    {t("settings.updates.available", { version: updateState.info.version })}
-                  </span>
-                )}
-                {updateState.phase === "downloading" && (
-                  <span className="hs-status-busy">
-                    {updateState.progress == null
-                      ? t("settings.updates.downloading")
-                      : updateState.progress.total != null
-                        ? t("settings.updates.progressKnown", {
-                            a: fmtMb(updateState.progress.downloaded),
-                            b: fmtMb(updateState.progress.total),
-                          })
-                        : t("settings.updates.progressUnknown", {
-                            a: fmtMb(updateState.progress.downloaded),
-                          })}
-                  </span>
-                )}
-                {updateState.phase === "installed" && (
-                  <span className="hs-status-ok">{t("settings.updates.installed")}</span>
-                )}
-                {updateState.phase === "available" && (
-                  <button type="button" className="hs-btn hs-btn-secondary" onClick={installUpdate}>
-                    {t("settings.updates.downloadInstall")}
-                  </button>
-                )}
-                {updateState.phase === "installed" && (
-                  <button type="button" className="hs-btn hs-btn-secondary" onClick={restartApp}>
-                    {t("settings.updates.restart")}
-                  </button>
-                )}
-              </div>
-              {/* 更新说明简版（计划裁定：下载进度级占位，完整 changelog 渲染归 M2）。 */}
-              {updateState.phase === "available" && updateState.info.notes && (
-                <p className="hs-notes">{updateState.info.notes}</p>
-              )}
-            </div>
-          </div>
-
-          <div className="hs-settings-actions">
-            <button
-              type="button"
-              className="hs-btn hs-btn-primary hs-btn-save"
-              onClick={save}
-              disabled={saving}
-            >
-              {saving ? t("settings.saving") : t("settings.save")}
-            </button>
-            {saveOk && <span className="hs-status-ok">{t("settings.saved")}</span>}
-          </div>
         </section>
 
         {/* —— 浏览器插件分区（M4 P1：Native Messaging 桥）——

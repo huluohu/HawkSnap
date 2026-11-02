@@ -1,4 +1,7 @@
 {
+  "panel.openSettings": "Settings",
+  "banner.updateAvailable": "Version {version} is available",
+  "banner.updateGoSettings": "Open settings to update",
   "brand.name": "HawkSnap",
   "panel.capture": "Capture ({key})",
   "panel.pin": "Pin ({key})",

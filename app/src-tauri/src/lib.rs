@@ -29,6 +29,7 @@ mod pins;
 mod recording;
 mod scrollshot;
 mod settings;
+mod settings_window;
 mod single_instance;
 mod updater;
 
@@ -47,6 +48,9 @@ pub fn build_tray_menu(
     // C6 主面板：启动零窗口后唯一的常驻面板入口（热键失败路径会自动拉起，
     // 但用户主动打开面板的常规路径在这里）。
     let panel = MenuItem::with_id(app, "panel", "主面板", true, None::<&str>)?;
+    // M3 设置页重做：独立的设置窗口（侧栏分区 + 卡片）——与主面板分工，见
+    // settings_window.rs 模块注。
+    let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
     let shot_label = format!("截图 ({})", settings.hotkey_capture);
     let shot = MenuItem::with_id(app, "shot", shot_label, true, None::<&str>)?;
     // N5：长截图（滚动捕获 + 拼接）。无独立热键——托盘入口 + 覆盖层选区。
@@ -74,7 +78,16 @@ pub fn build_tray_menu(
     )?;
     Menu::with_items(
         app,
-        &[&panel, &shot, &scrollshot, &scrollshot_stop, &pin_close_all, &delay_menu, &quit],
+        &[
+            &panel,
+            &settings_item,
+            &shot,
+            &scrollshot,
+            &scrollshot_stop,
+            &pin_close_all,
+            &delay_menu,
+            &quit,
+        ],
     )
 }
 
@@ -121,7 +134,10 @@ pub fn run() {
             editor::editor_open, editor::editor_image_dataurl, editor::editor_save,
             pins::pin_latest, pins::pin_from_path, pins::pin_set_opacity, pins::pin_zoom,
             pins::pin_close, pins::pin_close_all, pins::pin_set_image,
-            panel::panel_trigger, panel::open_path,
+            panel::panel_trigger, panel::open_path, panel::open_main_panel,
+            settings_window::open_settings,
+            settings_window::open_permission_settings,
+            settings_window::permission_status, settings_window::open_external,
             ocr::ocr_recognize, ocr::ocr_export_txt,
             recording::record_start, recording::record_pause, recording::record_resume,
             recording::record_stop, recording::record_status, recording::record_start_region,
@@ -234,6 +250,16 @@ pub fn run() {
                             std::thread::spawn(move || {
                                 if let Err(e) = panel::ensure_main_panel(&app) {
                                     eprintln!("[hawksnap] 主面板打开失败: {e}");
+                                }
+                            });
+                        }
+                        // M3 设置页：独立窗口（同 panel 的线程纪律——建 wry webview
+                        // 窗口禁主线程）。
+                        "settings" => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = settings_window::ensure_settings_window(&app) {
+                                    eprintln!("[hawksnap] 设置窗口打开失败: {e}");
                                 }
                             });
                         }
