@@ -789,6 +789,11 @@ body[data-set-window="1"][data-theme="dark"] {
 
 .hs-settings .hs-input {
   font: inherit;
+  /* 行内输入框可伸展：原来输入框被「恢复默认」按钮挤窄，占位符被截断
+     （截图为 "Defaults to ~/Pictures/Haw"）。min-width 0 + flex 1 让它
+     吃掉行内剩余空间，宽度不足时再由 placeholder 省略号兜底。 */
+  min-width: 0;
+  flex: 1 1 auto;
   font-size: 12px;
   color: var(--set-text);
   padding: 5px 9px;
