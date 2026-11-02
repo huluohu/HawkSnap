@@ -191,18 +191,15 @@ body.hs-panel-body {
   color: var(--hs-text);
 }
 
+/* 真应用图标（512×512 PNG）：img 元素——object-fit + 圆角 + 轻微内描边 */
+/* 真应用图标（512×512 PNG）：img 元素——object-fit + 圆角 + 轻投影 */
 .hs-brand-icon {
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 7px;
-  background: linear-gradient(135deg, #0a84ff, #5e5ce6);
-  color: #fff;
-  font-size: 13px;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  object-fit: cover;
+  display: block;
   box-shadow:
     inset 0 0 0 0.5px rgba(255, 255, 255, 0.35),
     0 1px 2px rgba(0, 0, 0, 0.18);

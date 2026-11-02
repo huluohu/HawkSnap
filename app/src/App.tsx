@@ -9,6 +9,8 @@ import {
   type LanguageSetting,
 } from "./lib/i18n";
 import { formatShotDate, shotKind, canReedit, type ShotRow } from "./lib/history";
+// 真应用图标（光圈 + 鹰眼，512×512）——品牌位一律用它，不用 emoji 近似。
+import appIcon from "./assets/app-icon.png";
 import "./App.css";
 
 // —— 设置模型（C7）：与 Rust Settings（serde camelCase）逐字段对齐 ——
@@ -287,7 +289,7 @@ function App() {
     <main className="hs-root">
       <header className="hs-topbar">
         <h1 className="hs-brand">
-          <span className="hs-brand-icon" aria-hidden="true">🦅</span>
+          <img className="hs-brand-icon" src={appIcon} alt="" aria-hidden="true" />
           {t("brand.name")}
         </h1>
         <div className="hs-topbar-actions">

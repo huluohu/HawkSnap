@@ -43,6 +43,8 @@ import {
   type SectionProps,
   type SettingsForm,
 } from "./sections";
+// 真应用图标（光圈 + 鹰眼）——资料头用真图，不用 emoji 近似。
+import appIcon from "../../assets/app-icon.png";
 import "./Settings.css";
 
 // —— 设置模型（与 Rust Settings 的 serde camelCase 对齐）——
@@ -331,9 +333,7 @@ export default function SettingsWindow() {
         </div>
 
         <div className="hs-profile">
-          <span className="hs-profile-logo" aria-hidden="true">
-            🦅
-          </span>
+          <img className="hs-profile-logo" src={appIcon} alt="" aria-hidden="true" />
           <div className="hs-profile-meta">
             <div className="hs-profile-name">{tx("app.name")}</div>
             <div className="hs-profile-version">{version ? `v${version}` : ""}</div>
