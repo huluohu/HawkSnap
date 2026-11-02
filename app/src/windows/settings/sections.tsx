@@ -130,7 +130,7 @@ const zh = {
   "capture.modes.regionTitle": "区域截图",
   "capture.modes.regionDesc": "拖拽选择任意矩形区域。",
   "capture.modes.windowTitle": "窗口截图",
-  "capture.modes.windowDesc": "截取单个窗口，自动带上窗口阴影。",
+  "capture.modes.windowDesc": "悬停高亮目标窗口，单击直接截取。",
   "capture.modes.screenTitle": "全屏截图",
   "capture.modes.screenDesc": "截取当前显示器的整块屏幕。",
   "capture.delay.title": "延时截图",
@@ -215,10 +215,11 @@ const zh = {
   "menubar.item.quit": "退出",
   "menubar.item.quitDesc": "退出猎影 HawkSnap。",
   "menubar.behavior.title": "常驻行为",
-  "menubar.behavior.desc": "猎影常驻菜单栏，不显示 Dock 图标；关闭设置窗口不会退出应用，退出请用菜单栏的「退出」。",
+  "menubar.behavior.desc": "猎影常驻菜单栏（Windows / Linux 为系统托盘），macOS 下不显示 Dock 图标；关闭本窗口不会退出应用，退出请用菜单栏的「退出」。",
   "about.title": "关于",
   "about.app.title": "猎影 HawkSnap",
-  "about.app.desc": "macOS 上的截图、标注与录屏工具。",
+  "about.app.desc": "轻量的截图、标注与录屏工具，支持 macOS / Windows / Linux。",
+  "about.license.label": "许可",
   "about.app.license": "MIT 许可",
   "about.app.version": "版本 {version}",
   "about.links.title": "链接",
@@ -327,7 +328,7 @@ const en: Record<CopyKey, string> = {
   "capture.modes.regionTitle": "Region",
   "capture.modes.regionDesc": "Drag to select any rectangular area.",
   "capture.modes.windowTitle": "Window",
-  "capture.modes.windowDesc": "Capture a single window, shadow included.",
+  "capture.modes.windowDesc": "Hover to highlight a window, click to capture it.",
   "capture.modes.screenTitle": "Full Screen",
   "capture.modes.screenDesc": "Capture the entire display.",
   "capture.delay.title": "Delayed Capture",
@@ -412,10 +413,11 @@ const en: Record<CopyKey, string> = {
   "menubar.item.quit": "Quit",
   "menubar.item.quitDesc": "Quit HawkSnap.",
   "menubar.behavior.title": "Background Behavior",
-  "menubar.behavior.desc": "HawkSnap lives in the menu bar without a Dock icon. Closing this window does not quit the app — use “Quit” in the menu bar instead.",
+  "menubar.behavior.desc": "HawkSnap lives in the menu bar (system tray on Windows / Linux) and shows no Dock icon on macOS. Closing this window does not quit the app — use “Quit” in the menu instead.",
   "about.title": "About",
   "about.app.title": "HawkSnap",
-  "about.app.desc": "A screenshot, annotation and screen recording tool for macOS.",
+  "about.app.desc": "A lightweight screenshot, annotation and screen recording tool for macOS, Windows and Linux.",
+  "about.license.label": "License",
   "about.app.license": "MIT License",
   "about.app.version": "Version {version}",
   "about.links.title": "Links",
@@ -504,6 +506,7 @@ export type IconName =
   | "shield"
   | "menuBar"
   | "folder"
+  | "appMark"
   | "infoCircle";
 
 const ICON_SHAPES: Record<IconName, ReactNode> = {
@@ -536,6 +539,14 @@ const ICON_SHAPES: Record<IconName, ReactNode> = {
   folder: (
     <>
       <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5V18a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18Z" />
+    </>
+  ),
+  appMark: (
+    // 光圈 + 鹰眼（真应用图标的简化线稿：外圈光圈叶片 + 中间金色瞳孔）
+    <>
+      <circle cx="12" cy="12" r="8.2" />
+      <path d="M12 3.8 12 12 18.4 15.9M12 12 7.2 18.1M12 12 5.6 8.1M12 12 16.8 5.9" />
+      <circle cx="12" cy="12" r="3.2" />
     </>
   ),
   external: (
@@ -1597,14 +1608,14 @@ export function AboutSection({ notifyError }: SectionProps) {
 
   return (
     <div className="hs-cards">
-      <Card icon="infoCircle" title={tx("about.app.title")} desc={tx("about.app.desc")}>
+      <Card icon="appMark" title={tx("about.app.title")} desc={tx("about.app.desc")}>
         <Rows>
           <Row label={tx("about.app.title")}>
             <span className="hs-status-text">
               {version ? tx("about.app.version", { version }) : "—"}
             </span>
           </Row>
-          <Row label={tx("about.app.license")}>
+          <Row label={tx("about.license.label")}>
             <span className="hs-status-text">{tx("about.app.license")}</span>
           </Row>
         </Rows>
