@@ -503,6 +503,7 @@ export type IconName =
   | "keyboard"
   | "shield"
   | "menuBar"
+  | "folder"
   | "infoCircle";
 
 const ICON_SHAPES: Record<IconName, ReactNode> = {
@@ -530,6 +531,11 @@ const ICON_SHAPES: Record<IconName, ReactNode> = {
     <>
       <path d="M5 5.5h10.2L19.5 9.8V18a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 18V7A1.5 1.5 0 0 1 6 5.5Z" />
       <path d="M8 5.5v4h6v-4M8 19.5v-5h8v5" />
+    </>
+  ),
+  folder: (
+    <>
+      <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5V18a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18Z" />
     </>
   ),
   external: (
@@ -1398,7 +1404,7 @@ export function PermissionsSection({ notifyError }: SectionProps) {
         setPermError(null);
       })
       .catch((e) => setPermError(tx("error.generic", { message: String(e) })));
-  }, [t]);
+  }, [tx]);
 
   useEffect(() => {
     refresh();

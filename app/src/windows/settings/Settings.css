@@ -325,8 +325,8 @@ body[data-set-window="1"][data-theme="dark"] {
 
 .hs-settings .hs-nav-icon {
   flex: none;
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
   background: var(--set-icon-bg);
   color: #f2f2f5;
