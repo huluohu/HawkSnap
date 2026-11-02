@@ -99,6 +99,8 @@ interface SectionDef {
   labelKey: CopyKey;
   titleKey: CopyKey;
   icon: IconName;
+  /** 侧栏图标色相（每分区一色，参照参考图的彩色圆角块——黑底统一色没有区分度） */
+  hue: string;
   render: (props: SectionProps) => ReactNode;
 }
 
@@ -108,6 +110,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.general",
     titleKey: "general.title",
     icon: "sliders",
+    hue: "#34c759",
     render: (p) => <GeneralSection {...p} />,
   },
   {
@@ -115,6 +118,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.capture",
     titleKey: "capture.title",
     icon: "camera",
+    hue: "#ff9f0a",
     render: (p) => <CaptureSection {...p} />,
   },
   {
@@ -122,6 +126,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.annotate",
     titleKey: "annotate.title",
     icon: "pen",
+    hue: "#5e5ce6",
     render: (p) => <AnnotateSection {...p} />,
   },
   {
@@ -129,6 +134,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.history",
     titleKey: "history.title",
     icon: "clock",
+    hue: "#0a84ff",
     render: (p) => <HistorySection {...p} />,
   },
   {
@@ -136,6 +142,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.shortcuts",
     titleKey: "shortcuts.title",
     icon: "keyboard",
+    hue: "#8e8e93",
     render: (p) => <ShortcutsSection {...p} />,
   },
   {
@@ -143,6 +150,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.permissions",
     titleKey: "permissions.title",
     icon: "shield",
+    hue: "#ff453a",
     render: (p) => <PermissionsSection {...p} />,
   },
   {
@@ -150,6 +158,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.menubar",
     titleKey: "menubar.title",
     icon: "menuBar",
+    hue: "#40c8e0",
     render: (p) => <MenuBarSection {...p} />,
   },
   {
@@ -157,6 +166,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.about",
     titleKey: "about.title",
     icon: "infoCircle",
+    hue: "#5ac8fa",
     render: (p) => <AboutSection {...p} />,
   },
 ];
@@ -350,7 +360,7 @@ export default function SettingsWindow() {
               aria-current={s.id === active ? "page" : undefined}
               onClick={() => setActive(s.id)}
             >
-              <span className="hs-nav-icon">
+              <span className="hs-nav-icon" data-sec={s.id} style={{ ["--nav-hue" as string]: s.hue }}>
                 <Icon name={s.icon} />
               </span>
               <span className="hs-nav-label">{tx(s.labelKey)}</span>

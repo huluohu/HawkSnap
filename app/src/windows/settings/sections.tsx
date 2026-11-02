@@ -168,7 +168,7 @@ const zh = {
   "history.limit.desc": "只保留最近的记录，超出上限后自动淘汰最旧的条目。",
   "history.limit.value": "当前上限：{count} 条",
   "history.storage.title": "存储位置",
-  "history.storage.desc": "历史条目与缩略图保存在应用数据目录；图片文件本身保存在「通用」分区设置的目录中。",
+  "history.storage.desc": "历史索引保存在应用数据目录；截图文件与缩略图保存在「通用」分区设置的目录中（缩略图位于其 thumbs/ 子目录）。",
   "history.search.title": "文本搜索",
   "history.search.desc": "截图中的文字经 OCR 识别后进入全文索引，可在主面板直接搜索画面里的文字。",
   "history.openPanel": "在主面板中打开历史记录",
@@ -206,8 +206,12 @@ const zh = {
   "menubar.item.captureDesc": "立即开始一次截图。",
   "menubar.item.delay": "延时截图",
   "menubar.item.delayDesc": "倒计时结束后自动截图。",
-  "menubar.item.pin": "贴图",
-  "menubar.item.pinDesc": "把截图钉在桌面最上层。",
+  "menubar.item.scrollshot": "长截图",
+  "menubar.item.scrollshotDesc": "拖选区域后滚动页面，自动拼接成长图。",
+  "menubar.item.scrollshotStop": "停止长截图",
+  "menubar.item.scrollshotStopDesc": "结束当前的长截图拼接。",
+  "menubar.item.pinCloseAll": "关闭全部贴图",
+  "menubar.item.pinCloseAllDesc": "一次性收起所有钉在桌面的贴图。",
   "menubar.item.panel": "主面板",
   "menubar.item.panelDesc": "打开历史记录与快捷操作面板。",
   "menubar.item.settings": "设置",
@@ -366,7 +370,7 @@ const en: Record<CopyKey, string> = {
   "history.limit.desc": "Only the most recent entries are kept; older ones are dropped automatically.",
   "history.limit.value": "Current limit: {count} entries",
   "history.storage.title": "Storage Location",
-  "history.storage.desc": "History entries and thumbnails live in the app data folder; the image files themselves are saved to the folder set in General.",
+  "history.storage.desc": "The history index lives in the app data folder; captures and their thumbnails are saved to the folder set in General (thumbnails in its thumbs/ subfolder).",
   "history.search.title": "Text Search",
   "history.search.desc": "Recognized text is indexed with OCR, so you can search the words inside a capture from the main panel.",
   "history.openPanel": "Open History in the main panel",
@@ -624,6 +628,10 @@ export function Icon({ name }: { name: IconName }) {
     </svg>
   );
 }
+
+
+// 编辑器快捷键的修饰键随平台（与编辑器实现一致：mac 走 metaKey，其余走 ctrlKey）。
+const MOD_KEY = /Mac|iP(hone|ad|od)/.test(navigator.platform) ? "⌘" : "Ctrl";
 
 // —— 共用 UI 原子 ——
 
@@ -1278,20 +1286,20 @@ export function AnnotateSection(_props: SectionProps) {
         <Rows>
           <Row label={tx("annotate.shortcuts.undo")}>
             <span className="hs-chip">
-              <kbd className="hs-key">⌘</kbd>
+              <kbd className="hs-key">{MOD_KEY}</kbd>
               <kbd className="hs-key">Z</kbd>
             </span>
           </Row>
           <Row label={tx("annotate.shortcuts.redo")}>
             <span className="hs-chip">
-              <kbd className="hs-key">⌘</kbd>
+              <kbd className="hs-key">{MOD_KEY}</kbd>
               <kbd className="hs-key">⇧</kbd>
               <kbd className="hs-key">Z</kbd>
             </span>
           </Row>
           <Row label={tx("annotate.shortcuts.save")}>
             <span className="hs-chip">
-              <kbd className="hs-key">⌘</kbd>
+              <kbd className="hs-key">{MOD_KEY}</kbd>
               <kbd className="hs-key">S</kbd>
             </span>
           </Row>
@@ -1537,7 +1545,9 @@ export function MenuBarSection(_props: SectionProps) {
         <List>
           <ListItem title={tx("menubar.item.capture")} desc={tx("menubar.item.captureDesc")} />
           <ListItem title={tx("menubar.item.delay")} desc={tx("menubar.item.delayDesc")} />
-          <ListItem title={tx("menubar.item.pin")} desc={tx("menubar.item.pinDesc")} />
+          <ListItem title={tx("menubar.item.scrollshot")} desc={tx("menubar.item.scrollshotDesc")} />
+          <ListItem title={tx("menubar.item.scrollshotStop")} desc={tx("menubar.item.scrollshotStopDesc")} />
+          <ListItem title={tx("menubar.item.pinCloseAll")} desc={tx("menubar.item.pinCloseAllDesc")} />
           <ListItem title={tx("menubar.item.panel")} desc={tx("menubar.item.panelDesc")} />
           <ListItem title={tx("menubar.item.settings")} desc={tx("menubar.item.settingsDesc")} />
           <ListItem title={tx("menubar.item.quit")} desc={tx("menubar.item.quitDesc")} />
