@@ -25,7 +25,14 @@ pub fn ensure_settings_window(app: &AppHandle) -> Result<WebviewWindow, String> 
         let _ = w.set_focus();
         return Ok(w);
     }
-    WebviewWindowBuilder::new(app, SETTINGS_LABEL, WebviewUrl::App("?window=settings".into()))
+    // URL 形式与既有窗口一致（overlay?window=overlay / editor?window=editor …）：
+    // 路径段 + query 里的 window 标记，前端按 query 分发渲染。dev 模式下 vite
+    // dev server 对未知路径回退 index.html；生产端 custom-protocol 同理。
+    WebviewWindowBuilder::new(
+        app,
+        SETTINGS_LABEL,
+        WebviewUrl::App("settings?window=settings".into()),
+    )
         .title("HawkSnap 设置")
         .inner_size(900.0, 620.0)
         .min_inner_size(760.0, 520.0)
