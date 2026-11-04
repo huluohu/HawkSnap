@@ -30,3 +30,20 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# dev profile：依赖不生成调试符号（2026-11-04）
+#
+# 实测（arm64 macOS）：debug/deps 里 750 个 rlib 实际只对应不到 200 个不同 crate
+# ——cargo 的 metadata hash 含依赖图哈希链，改一个传递依赖的 feature 就让整条下游
+# 链换哈希，新代写盘、旧代原地留存（libobjc2_app_kit 一家就有 4 代 × 180MB）。
+# 而单个 rlib 的对象文件里 __DWARF 占 85%（objc2-app-kit：31.3MB DWARF vs 5.7MB
+# 真代码）——调试符号是 debug 缓存里最容易砍掉又最不影响使用的一块。
+#
+# rlib 里最大的那块是 .rmeta（objc2-app-kit 单个 114MB），那是泛型 metadata，
+# **debug 设置改不动**，故本项只针对 DWARF。
+#
+# `"*"` 按 cargo 语义只作用于**非 workspace 成员**的依赖；本地四个 crate 仍带完整
+# 调试信息——调试自己的代码时变量/类型照样可见。代价：panic 回溯里依赖 crate 没有
+# 行号（不影响本地 crate）。
+[profile.dev.package."*"]
+debug = 0
