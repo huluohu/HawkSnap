@@ -157,17 +157,32 @@ def parse_lock(path: Path) -> set[tuple[str, str]]:
     return pairs
 
 
+def run_utf8(cmd: list[str], **kw) -> str:
+    """跑子进程并按 UTF-8 解码输出。
+
+    Windows 默认 locale 是 cp1252/GBK：text=True 不指定 encoding 时用 locale
+    编码解码——cargo/rustc 输出里的任何非 ASCII 字节（0x8f 等）都会在 reader
+    线程抛 UnicodeDecodeError，把整个脚本带崩（v1.1.3 发布流水线 Windows 腿
+    实挂，run 41884590662）。所有子进程一律走这里。
+    """
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **kw,
+    ).stdout or ""
+
+
 def resolve_target_dir(repo: Path) -> Path:
     """用 cargo metadata 权威解析 target 目录（与 check-size.sh 同款口径）。"""
     try:
-        out = subprocess.run(
+        out = run_utf8(
             ["cargo", "metadata", "--format-version", "1", "--no-deps"],
             cwd=repo,
-            capture_output=True,
-            text=True,
             timeout=120,
-            check=True,
-        ).stdout
+        )
         import json
 
         return Path(json.loads(out)["target_directory"])
@@ -177,9 +192,7 @@ def resolve_target_dir(repo: Path) -> Path:
 
 def host_triple() -> str:
     try:
-        out = subprocess.run(
-            ["rustc", "-vV"], capture_output=True, text=True, timeout=30, check=True
-        ).stdout
+        out = run_utf8(["rustc", "-vV"], timeout=30)
         m = re.search(r"^host:\s*(\S+)$", out, re.M)
         if m:
             return m.group(1)
@@ -516,12 +529,14 @@ def build_in_progress(repo: Path, target_dir: Path) -> list[str]:
 
     判据是路径而非进程名：别的目录的构建（比如另一个工作副本）不该拦住这里
     的清理——曾经被一个跑了七天的、别的会话遗留的 `cargo test` 误伤过。
+    Windows 无 `ps`（msys 的 ps 也看不到 win32 进程）→ 返回空，守卫降级为不拦：
+    Windows 用户手动跑清理时需自行确认没有构建在进行。
     """
     try:
-        out = subprocess.run(
-            ["ps", "-axo", "pid=,args="], capture_output=True, text=True, timeout=30
-        ).stdout
+        out = run_utf8(["ps", "-axo", "pid=,args="], timeout=30)
     except Exception:
+        return []
+    if not out:
         return []
     needles = (str(repo), str(target_dir))
     hits: list[str] = []
@@ -538,19 +553,34 @@ def build_in_progress(repo: Path, target_dir: Path) -> list[str]:
     return hits
 
 
+def walk_size_bytes(root: Path) -> int:
+    """os.walk 量目录字节（du 不可用时的回退，Windows 主路径）。"""
+    total = 0
+    for base, _dirs, files in os.walk(root, onerror=lambda e: None):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(base, name)).st_size
+            except OSError:
+                continue
+    return total
+
+
 def target_size_gb(target_dir: Path) -> float:
-    """target 目录磁盘占用（GB）。用 du -sk——尊重硬链接计数，与 du -sh 一致。"""
+    """target 目录磁盘占用（GB）。
+
+    首选 `du -sk`（尊重硬链接计数，与 du -sh 口径一致）；`du` 不存在（Windows
+    裸机）或失败时回退 os.walk——**绝不能返回 0.0 了事**：阈值模式靠这个数
+    决定是否清理，量成 0 会让守护在 Windows 上永远静默跳过。
+    """
     try:
-        out = subprocess.run(
-            ["du", "-sk", str(target_dir)],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=True,
-        ).stdout
-        return int(out.split()[0]) / (1024 * 1024)
+        out = run_utf8(["du", "-sk", str(target_dir)], timeout=600)
+        if out.strip():
+            return int(out.split()[0]) / (1024 * 1024)
     except Exception:
-        return 0.0
+        pass
+    if target_dir.is_dir():
+        return walk_size_bytes(target_dir) / (1024 * 1024 * 1024)
+    return 0.0
 
 
 def main() -> int:
@@ -667,4 +697,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Windows 默认 console 编码是 cp1252/GBK：打印脚本里的中文与「≤」会直接
+    # UnicodeEncodeError 崩掉（v1.1.3 发布流水线 Windows 腿实挂）。强制 stdout/
+    # stderr 走 UTF-8、无法映射的字符替换而不是崩。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())
