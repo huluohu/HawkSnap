@@ -187,6 +187,24 @@ if [ "$H_OK" -eq 1 ]; then
   ok "LICENSE = MIT，第三方声明口径在位，依赖树无 copyleft（gifski → gif）"
 fi
 
+# ---------- (i) 本地构建缓存有界（防无端占用存储） ----------
+# 2026-11-04：target/ 一度涨到 36GB（.rcgu.o 中间文件 26.5GB + incremental 旧代
+# 12GB + 旧代依赖产物 8.8GB）。构建缓存不该无端占用用户存储——这里设一道硬门：
+# 超过上限即 FAIL，并给出修复命令。
+#
+# 上限 20GB：正常稳态（release 缓存 + 一次 dev 构建 + 少量多代残留）约 3~6GB，
+# 20GB 留了足够余量给大改动，但拦得住「放着不管几个月」的膨胀。
+echo
+echo "(i) 构建缓存体积（target/ 上限 20GB）"
+CACHE_GB=$(du -sk target 2>/dev/null | awk '{printf "%.1f", $1/1048576}')
+if [ -z "$CACHE_GB" ]; then
+  skip "target/ 不存在（本机未构建过）"
+elif awk "BEGIN{exit !($CACHE_GB > 20)}"; then
+  bad "target/ 达 ${CACHE_GB}GB（上限 20GB）——构建缓存无端膨胀：npm run clean:target:apply"
+else
+  ok "target/ = ${CACHE_GB}GB（上限 20GB）"
+fi
+
 # ---------- 汇总 ----------
 echo
 echo "== 结果：$PASS 项通过，$FAIL 项失败 =="

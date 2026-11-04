@@ -11,6 +11,7 @@
     "check:i18n": "node ../scripts/check-i18n.mjs",
     "clean:target": "python3 ../scripts/clean-target.py",
     "clean:target:apply": "python3 ../scripts/clean-target.py --apply",
+    "pretauri": "python3 ../scripts/clean-target.py --auto 12",
     "tauri": "tauri"
   },
   "dependencies": {

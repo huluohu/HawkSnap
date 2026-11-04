@@ -538,6 +538,21 @@ def build_in_progress(repo: Path, target_dir: Path) -> list[str]:
     return hits
 
 
+def target_size_gb(target_dir: Path) -> float:
+    """target 目录磁盘占用（GB）。用 du -sk——尊重硬链接计数，与 du -sh 一致。"""
+    try:
+        out = subprocess.run(
+            ["du", "-sk", str(target_dir)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=True,
+        ).stdout
+        return int(out.split()[0]) / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
 def main() -> int:
     global repo_root
 
@@ -551,6 +566,15 @@ def main() -> int:
         action="store_true",
         help="额外剪掉同一编译单元的旧代产物（多回收数 GB，但下次构建会重编那批 crate）",
     )
+    ap.add_argument(
+        "--auto",
+        type=float,
+        metavar="GB",
+        help=(
+            "阈值模式：target/ 超过该 GB 数就自动清理（剪代，保留活代），"
+            "否则什么都不做。供构建前钩子调用——构建缓存不得无端占用存储。"
+        ),
+    )
     ap.add_argument("--repo", default=None, help="仓库根目录（默认取脚本所在目录的上一级）")
     args = ap.parse_args()
 
@@ -558,6 +582,20 @@ def main() -> int:
     prune_generations = args.prune_generations
 
     target_dir = resolve_target_dir(repo_root)
+
+    # 阈值模式：超了才动，且用「剪代」模式（那才是大头）；没超就安静退出——
+    # 这是给构建前钩子用的，不能每次构建都刷屏或误删。
+    if args.auto is not None:
+        gb = target_size_gb(target_dir)
+        if gb <= args.auto:
+            print(f"[cache-guard] target/ {gb:.1f}GB ≤ 阈值 {args.auto:g}GB，跳过清理")
+            return 0
+        print(
+            f"[cache-guard] target/ {gb:.1f}GB > 阈值 {args.auto:g}GB —— 自动清理"
+            "（剪掉旧代产物，保留活代；本次构建会重编被剪掉的那批 crate）"
+        )
+        args.apply = True
+        prune_generations = True
 
     # 本仓库正在构建就别动——删掉正在用的产物会让这次构建失败
     busy = build_in_progress(repo_root, target_dir)
