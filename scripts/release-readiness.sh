@@ -30,41 +30,59 @@ else
   bad "LICENSE 缺失——MIT 分发必须随仓库附带完整许可文本"
 fi
 
-# ---------- (b) 版本 1.0.0 五处一致 ----------
-# 注意：本检查**不覆盖** plugin/manifest.json 与 plugin/package.json 的 "version"
-# （终审修复轮 F2 已手改为 1.0.0 与产品对齐，但门脚本未纳入 grep 站点）——
-# 若将来升版本，这两处需人工同步，或把它们加进 check_grep 清单。
+# ---------- (b) 版本一致性 ----------
+# 期望版本**不再硬编码**：单一权威取 app/src-tauri/tauri.conf.json 的 version
+# （scripts/make-latest.mjs 组装 updater feed 时会拿它与 tag 交叉校验，不一致即
+# CI 红）。硬编码 1.0.0 让本门禁在 v1.1.x 之后全部失效（2026-11-04 修复）。
+#
+# 产品版本（app crate + tauri.conf + package.json + package-lock + Cargo.lock 的
+# hawksnap）必须 == 期望版本；三个库 crate（hawksnap-core / hawksnap-ocr /
+# hawksnap-platform-mac）走**自己的**版本线，对齐 Cargo.toml [workspace.package]。
 echo
-echo "(b) 版本一致性（期望 1.0.0，5 处 + Cargo.lock 的 4 个 workspace crate）"
-check_grep() { # file pattern label
-  if grep -qE "$2" "$1" 2>/dev/null; then
-    ok "$3 = 1.0.0"
-  else
-    bad "$3 不是 1.0.0（$1 未匹配 /$2/）"
-  fi
-}
-check_grep Cargo.toml                    '^version = "1\.0\.0"'            "Cargo.toml [workspace.package]"
-check_grep app/src-tauri/Cargo.toml      '^version = "1\.0\.0"'            "app/src-tauri/Cargo.toml [package]"
-check_grep app/src-tauri/tauri.conf.json '"version": "1\.0\.0"'           "app/src-tauri/tauri.conf.json"
-check_grep app/package.json              '"version": "1\.0\.0"'           "app/package.json"
-
-# (c) app/package-lock.json 根版本（顶层 "version" 与 packages[""].version 两处都必须是 1.0.0）
-if grep -qE '^  "version": "1\.0\.0",' app/package-lock.json \
-  && grep -qE '^      "version": "1\.0\.0",' app/package-lock.json; then
-  ok "app/package-lock.json 根版本（顶层 + packages[\"\"]）= 1.0.0"
-else
-  bad "app/package-lock.json 根版本不是 1.0.0（需同时改顶层与 packages[\"\"] 两处）"
+EXPECT_VERSION=$(sed -nE 's/^[[:space:]]*"version":[[:space:]]*"([^"]+)".*/\1/p' app/src-tauri/tauri.conf.json | head -1)
+WORKSPACE_VERSION=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -1)
+echo "(b) 版本一致性（期望产品版本 ${EXPECT_VERSION}，库 crate 期望 ${WORKSPACE_VERSION}）"
+if [ -z "$EXPECT_VERSION" ]; then
+  bad "读不到 app/src-tauri/tauri.conf.json 的 version"
+  EXPECT_VERSION="__UNKNOWN__"
 fi
 
-# Cargo.lock：hawksnap / hawksnap-core / hawksnap-ocr / hawksnap-platform-mac 四个 crate
-for crate in hawksnap hawksnap-core hawksnap-ocr hawksnap-platform-mac; do
-  if awk -v crate="$crate" '
-      $1 == "name" && $3 == "\""crate"\"" { seen=1; next }
-      seen && $1 == "version" { print ($3 == "\"1.0.0\"") ? "yes" : "no"; exit }
-      seen && $1 == "name" { print "no"; exit }' Cargo.lock | grep -q yes; then
-    ok "Cargo.lock: $crate = 1.0.0"
+check_ver() { # file pattern label expected
+  if grep -qE "$2" "$1" 2>/dev/null; then
+    ok "$3 = $4"
   else
-    bad "Cargo.lock: $crate 不是 1.0.0（手改 name/version 相邻两行）"
+    bad "$3 不是 $4（$1 未匹配 /$2/）"
+  fi
+}
+check_ver app/src-tauri/Cargo.toml      "^version = \"$EXPECT_VERSION\""  "app/src-tauri/Cargo.toml [package]" "$EXPECT_VERSION"
+check_ver app/src-tauri/tauri.conf.json "\"version\": \"$EXPECT_VERSION\"" "app/src-tauri/tauri.conf.json" "$EXPECT_VERSION"
+check_ver app/package.json              "\"version\": \"$EXPECT_VERSION\"" "app/package.json" "$EXPECT_VERSION"
+
+# (c) app/package-lock.json 根版本（顶层 "version" 与 packages[""].version 两处都必须是期望版本）
+if grep -qE "^  \"version\": \"$EXPECT_VERSION\"," app/package-lock.json \
+  && grep -qE "^      \"version\": \"$EXPECT_VERSION\"," app/package-lock.json; then
+  ok "app/package-lock.json 根版本（顶层 + packages[\"\"]）= $EXPECT_VERSION"
+else
+  bad "app/package-lock.json 根版本不是 ${EXPECT_VERSION}（需同时改顶层与 packages[\"\"] 两处）"
+fi
+
+# Cargo.lock：hawksnap 跟产品版本；三个库 crate 跟 workspace 版本
+lock_version() { # crate -> version 或空
+  awk -v crate="$1" '
+      $1 == "name" && $3 == "\""crate"\"" { seen=1; next }
+      seen && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
+      seen && $1 == "name" { exit }' Cargo.lock
+}
+if [ "$(lock_version hawksnap)" = "$EXPECT_VERSION" ]; then
+  ok "Cargo.lock: hawksnap = $EXPECT_VERSION"
+else
+  bad "Cargo.lock: hawksnap 不是 ${EXPECT_VERSION}（手改 name/version 相邻两行）"
+fi
+for crate in hawksnap-core hawksnap-ocr hawksnap-platform-mac; do
+  if [ "$(lock_version "$crate")" = "$WORKSPACE_VERSION" ]; then
+    ok "Cargo.lock: $crate = $WORKSPACE_VERSION"
+  else
+    bad "Cargo.lock: $crate 不是 ${WORKSPACE_VERSION}（手改 name/version 相邻两行）"
   fi
 done
 
@@ -106,12 +124,21 @@ else
 fi
 
 # ---------- (f) release job 里有源码归档命令（随 Release 附对应源码） ----------
+# workflow 文件名：主工作流是 pipeline.yml（ci.yml 是旧名，保留兼容）——
+# 2026-11-04 修复：门禁只查 ci.yml → 文件改名后这项恒红、形同虚设。
 echo
 echo "(f) 源码包（corresponding source）"
-if awk '/^  release:/{inrel=1; next} /^  [a-zA-Z-]+:/{inrel=0} inrel' .github/workflows/ci.yml \
-    | grep -q 'git archive'; then
-  ok "release job 内含 git archive 源码归档步骤"
-else
+FOUND_ARCHIVE=0
+for wf in .github/workflows/pipeline.yml .github/workflows/ci.yml; do
+  [ -f "$wf" ] || continue
+  if awk '/^  release:/{inrel=1; next} /^  [a-zA-Z-]+:/{inrel=0} inrel' "$wf" \
+      | grep -q 'git archive'; then
+    FOUND_ARCHIVE=1
+    ok "release job 内含 git archive 源码归档步骤（${wf}）"
+    break
+  fi
+done
+if [ "$FOUND_ARCHIVE" -eq 0 ]; then
   bad "release job 内未找到 git archive——二进制发布必须附对应源码"
 fi
 
@@ -125,12 +152,39 @@ else
 fi
 
 # ---------- (h) 许可证一致性（MIT：依赖树不得引入 copyleft） ----------
+# 2026-11-04 修复：原实现是「LICENSE-THIRD-PARTY.md 里不能出现 AGPL 字样」——
+# 但那份文件**必须**记录「原 gifski 是 AGPL-3.0、已替换为 gif」，于是恒红、形同
+# 虚设（且真有人重新引入 copyleft 依赖时它也不报警）。
+#
+# 改成真正有意义的把守：
+#   1. LICENSE = MIT；
+#   2. 第三方声明文件在，且写明了「无 copyleft 组件」的口径；
+#   3. **依赖树里真的没有 copyleft 触发源**——Cargo.lock 中不含 gifski，
+#      且替代品 gif 在册。谁把 gifski 加回来，这项就红。
 echo
 echo "(h) 许可证一致性"
-if [ -f LICENSE ] && grep -q "MIT License" LICENSE && [ -f LICENSE-THIRD-PARTY.md ] && ! grep -qi 'AGPL' LICENSE-THIRD-PARTY.md; then
-  ok "LICENSE = MIT 且第三方声明无 copyleft 组件（gifski 已替换为 gif，MIT/Apache-2.0）"
-else
-  bad "LICENSE 非 MIT 或 LICENSE-THIRD-PARTY.md 仍含 AGPL 声明/缺失"
+H_OK=1
+if [ ! -f LICENSE ] || ! grep -q "MIT License" LICENSE; then
+  bad "LICENSE 缺失或不是 MIT"
+  H_OK=0
+fi
+if [ ! -f LICENSE-THIRD-PARTY.md ]; then
+  bad "LICENSE-THIRD-PARTY.md 缺失"
+  H_OK=0
+elif ! grep -q "无 copyleft 组件" LICENSE-THIRD-PARTY.md; then
+  bad "LICENSE-THIRD-PARTY.md 未声明「无 copyleft 组件」口径"
+  H_OK=0
+fi
+if grep -q 'name = "gifski"' Cargo.lock 2>/dev/null; then
+  bad "Cargo.lock 里仍有 copyleft 触发源 gifski（AGPL-3.0）——MIT 分发口径被破坏"
+  H_OK=0
+fi
+if ! grep -q 'name = "gif"' Cargo.lock 2>/dev/null; then
+  bad "Cargo.lock 里缺少替代品 gif（MIT/Apache-2.0）"
+  H_OK=0
+fi
+if [ "$H_OK" -eq 1 ]; then
+  ok "LICENSE = MIT，第三方声明口径在位，依赖树无 copyleft（gifski → gif）"
 fi
 
 # ---------- 汇总 ----------
