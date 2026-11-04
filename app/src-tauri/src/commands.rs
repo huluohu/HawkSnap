@@ -61,11 +61,81 @@ pub fn save_path_for(dir: &std::path::Path, app_name: &str, ext: &str) -> std::p
     dir.join(format!("{name}.{ext}"))
 }
 
+/// 抓帧缓存目录（`$CACHE/hawksnap/grabs`）——冻结帧的落盘位置。
+///
+/// 冻结帧是**整屏原始物理 RGBA**（6K 屏单帧约 24MB），不是缩略图：这个目录每
+/// 1MB 都是用户硬盘。
+///
+/// 【2026-11-04 泄漏修复】历史实现在每轮抓帧时只删「同一 display 的上一轮帧」，
+/// 而那张待删清单来自**内存里的 `CAPTURES` 映射**——进程一退出映射就没了，退出
+/// 前写的最后一帧永远留在盘上；下一次启动映射又是空的，没人删它 → **每启动
+/// 一次泄漏一个整帧**。2026-10-14~10-24 的开发期反复重启累计 107 个孤儿帧 =
+/// 1.7GB；卸载器把 bundle 与缓存一并计入，HawkSnap 因此显示成「1.86GB」。
+///
+/// 现在三道闸（任一条独立成立即保证目录有界）：
+///   1. **启动清空**（lib.rs setup，拿到单实例锁之后）——上一次残留一律作废；
+///   2. **退出清空**（lib.rs `RunEvent::Exit`，仅主实例）——本次不留尾巴；
+///   3. **过期清扫**（每轮抓帧后按 mtime 删 TTL 以上的帧）——兜住「长会话内显
+///      示器热插拔 / 异常多轮」造成的目录膨胀。
+///
+/// 冻结帧的生命周期只在**本进程内**有效（内存 `CAPTURES` 与前端帧缓存同生命
+/// 周期），跨进程复用反而会读到过期画面——故启动清空是语义正确的，不是清理。
+pub fn grabs_cache_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().cache_dir().ok().map(|d| d.join("hawksnap/grabs"))
+}
+
+/// 抓帧文件最长保留时长（秒）。一轮抓帧只活到「用户框选完」那几秒，10 分钟
+/// 还没被消费的帧一定是残留。TTL 取值远大于人工框选耗时，不误删在途帧。
+const GRAB_FRAME_TTL_SECS: u64 = 600;
+
+/// 清空抓帧缓存目录下的所有文件（不动目录本身）。
+///
+/// 幂等；目录不存在 / 无权限不算错——缓存丢了只影响一次抓帧的帧读取，不该因此
+/// 阻断启动或退出。
+fn purge_grab_files(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_file() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// 清空抓帧缓存（启动 / 退出时调用）。
+pub fn purge_grab_cache(app: &AppHandle) {
+    if let Some(dir) = grabs_cache_dir(app) {
+        purge_grab_files(&dir);
+    }
+}
+
+/// 按 mtime 清掉 TTL 以上的抓帧文件，返回删除个数（供测试断言）。
+///
+/// `duration_since` 在 mtime 领先于 now 时返回 Err（时钟回拨 / 未来时间戳），
+/// 此时按「年龄 0」处理——宁可留着也不误删在途帧。
+fn sweep_expired_grabs(dir: &std::path::Path, now: std::time::SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut removed = 0usize;
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        let age = now.duration_since(modified).map(|d| d.as_secs()).unwrap_or(0);
+        if age >= GRAB_FRAME_TTL_SECS && std::fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[tauri::command]
 pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, String> {
     let mut grabber = hawksnap_platform_mac::XcapGrabber::new();
     let frames = grabber.grab_all().map_err(|e| e.to_string())?;
-    let cache = app.path().cache_dir().map_err(|e| e.to_string())?.join("hawksnap/grabs");
+    let cache = grabs_cache_dir(&app).ok_or("无法定位缓存目录")?;
     std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(frames.len());
     let mut captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
@@ -73,22 +143,14 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
         // Plan B Task 1 cache-bust：覆盖层窗口常驻复用后页面不再重载，同路径覆盖写会命中
         // Webview 的 URL 缓存而显示上一轮旧帧，故文件名带毫秒时间戳强制每轮重新加载
         // （asset 协议对 query 参数不可靠，版本化文件名是确定性方案；仍在 $CACHE/** scope 内）。
-        // 写入前删除上一轮同 display 的冻结帧，缓存目录不随轮数增长。
+        // 写入前删除上一轮同 display 的冻结帧——**这只覆盖「同一进程内」**：待删清单
+        // 来自内存 `CAPTURES`，进程退出即丢失，退出前写的最后一帧会永远留在盘上。
+        // 跨进程的残留由启动/退出清空 + TTL 清扫兜住（见 grabs_cache_dir 注记）。
         if let Some(prev) = captures.get(&f.display_id) {
             let _ = std::fs::remove_file(&prev.frame_path);
         }
-        // Task 2b 一次性兼容：清掉 Task 2a 及之前版本化方案写入的遗留 {id}-*.png，
-        // 前端已不再经 asset 协议加载 PNG，留着只会占缓存目录。
-        let legacy_prefix = format!("{}-", f.display_id);
-        if let Ok(entries) = std::fs::read_dir(&cache) {
-            for e in entries.flatten() {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with(&legacy_prefix) && name.ends_with(".png") {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
+        // Task 2b 遗留 {id}-*.png（Task 2a 及更早版本化方案写入）不再单独清扫：
+        // 启动清空已把整个目录抹平，遗留件一律作废。
         // Task 2b（前端原始帧直通）：冻结帧不再编码 PNG，直接落盘整帧物理 RGBA，
         // 前端 fetch 后经 putImageData 画出——省掉整帧 PNG 编码 + asset 协议侧 PNG 解码，
         // h2o（created→shown）从 ~108ms 量级再砍一截。grabber 层的 ScreenFrame.png 编码
@@ -120,6 +182,10 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
             intent: "capture", // 占位：flow 侧按本轮 CaptureIntent 覆写（N1）
         });
     }
+    // 过期清扫（第三道闸）：把 TTL 以上的残留帧按 mtime 清掉——目录规模与轮数
+    // 解耦，「长会话 + 显示器热插拔 + 异常多轮」也不会膨胀。放在写帧之后：本轮
+    // 新帧的 mtime 就是「现在」，年龄 0，不会被误删。
+    sweep_expired_grabs(&cache, std::time::SystemTime::now());
     Ok(out)
 }
 
@@ -540,6 +606,57 @@ mod tests {
             assert_eq!(meta.frame_path, std::path::PathBuf::from("/tmp/hs-test.raw"));
         }
         CAPTURES.lock().unwrap().remove(&42);
+    }
+
+    #[test]
+    fn sweep_removes_expired_frames_and_keeps_fresh_ones() {
+        // 2026-11-04 泄漏修复（闸三）：TTL 以上的残留帧必须被清掉，TTL 以内的
+        // 在途帧必须留下——误删在途帧会让覆盖层拿不到冻结帧。
+        let dir = std::env::temp_dir().join(format!("hs-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = dir.join("1-fresh.raw");
+        let stale = dir.join("1-stale.raw");
+        std::fs::write(&fresh, b"fresh").unwrap();
+        std::fs::write(&stale, b"stale").unwrap();
+        // 把 stale 的 mtime 拨到 TTL 之外（set_times 稳定于 Rust 1.75，无需额外依赖）
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(GRAB_FRAME_TTL_SECS + 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let removed = sweep_expired_grabs(&dir, std::time::SystemTime::now());
+        assert_eq!(removed, 1, "只应删掉过期的那一个");
+        assert!(fresh.exists(), "在途帧不得被误删");
+        assert!(!stale.exists(), "过期帧必须被删");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn purge_grab_files_empties_the_cache_dir() {
+        // 2026-11-04 泄漏修复（闸一/闸二）：启动与退出都要把抓帧缓存抹平——
+        // 「删上一轮」依赖内存映射，进程一退出就失效，孤儿帧就是这么攒出来的。
+        let dir = std::env::temp_dir().join(format!("hs-purge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1-100.raw"), b"x").unwrap();
+        std::fs::write(dir.join("3-200.raw"), b"y").unwrap();
+        std::fs::write(dir.join("1.png"), b"legacy").unwrap();
+
+        purge_grab_files(&dir);
+
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert!(left.is_empty(), "清空后目录里不该剩任何文件，实际剩 {:?}", left.len());
+        assert!(dir.exists(), "目录本身保留（只清文件，不动目录）");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_is_a_noop_on_missing_dir() {
+        // 目录不存在时清扫不得 panic——启动/退出路径上它随时可能被外部清掉。
+        let dir = std::env::temp_dir().join(format!("hs-missing-{}", std::process::id()));
+        assert_eq!(sweep_expired_grabs(&dir, std::time::SystemTime::now()), 0);
     }
 
     #[test]

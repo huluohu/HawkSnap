@@ -6,6 +6,24 @@
 //! 锁因此覆盖进程全生命周期。
 
 use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// 本进程是否为主实例（拿到 flock 的那个）。第二实例拿不到锁 → 恒 false。
+///
+/// 用途：退出钩子要清抓帧缓存，但**第二实例也会走到退出钩子**（拿不到锁后
+/// `app.exit(0)` → `RunEvent::Exit`）——无差别清空会删掉正在运行的主实例的
+/// 当前帧。故清空前先问「我是主实例吗」。
+static PRIMARY: AtomicBool = AtomicBool::new(false);
+
+/// 标记本进程为主实例（setup 拿到锁后调用）。
+pub fn mark_primary() {
+    PRIMARY.store(true, Ordering::SeqCst);
+}
+
+/// 本进程是否为主实例。
+pub fn is_primary() -> bool {
+    PRIMARY.load(Ordering::SeqCst)
+}
 
 /// 持锁守卫：持有的 fd 不关闭则锁不释放。进程内由 setup 泄漏，永不 drop。
 pub struct LockGuard {

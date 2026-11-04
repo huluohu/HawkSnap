@@ -153,13 +153,24 @@ pub fn run() {
             // 守卫泄漏为 'static，锁覆盖进程全生命周期（进程退出由内核释放）。
             // 第二实例拿不到锁 → 提示并立即退出，不再初始化任何窗口/托盘。
             match single_instance::acquire_lock_at(&std::env::temp_dir().join("hawksnap.lock")) {
-                Ok(guard) => std::mem::forget(guard),
+                Ok(guard) => {
+                    std::mem::forget(guard);
+                    single_instance::mark_primary();
+                }
                 Err(_) => {
                     eprintln!("[hawksnap] 另一实例正在运行");
                     app.handle().exit(0);
                     return Ok(());
                 }
             }
+
+            // 抓帧缓存清空（2026-11-04 泄漏修复，闸一）：上一进程遗留的冻结帧
+            // 一律作废——冻结帧只在本进程内有效（内存 CAPTURES 与前端帧缓存同
+            // 生命周期），跨进程复用反而会读到过期画面。
+            //
+            // **必须放在单实例守卫之后**：守卫失败说明已有主实例在跑，此时清空
+            // 会删掉它的当前帧。
+            crate::commands::purge_grab_cache(app.handle());
 
             // G3 基准模式（bench_mode）：单实例守卫之后第一时间接管。环境变量
             // HAWKSNAP_BENCH 缺席时零成本返回，正常启动路径不受任何影响。
@@ -400,6 +411,12 @@ pub fn run() {
         // 被上面的 prevent_exit 拦下 → 进程还活着 → 配置保留（正确：桌面端还在跑）。
         tauri::RunEvent::Exit => {
             crate::native_messaging::cleanup_host_config();
+            // 抓帧缓存清空（2026-11-04 泄漏修复，闸二）：本次运行写下的冻结帧
+            // 不留尾巴。**仅主实例**——第二实例拿不到锁后走 app.exit(0) 也会
+            // 到达 Exit，无差别清空会删掉正在运行的主实例的当前帧。
+            if single_instance::is_primary() {
+                crate::commands::purge_grab_cache(_app);
+            }
         }
         _ => {}
     });
