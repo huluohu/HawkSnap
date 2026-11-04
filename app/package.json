@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "check:i18n": "node ../scripts/check-i18n.mjs",
+    "clean:target": "python3 ../scripts/clean-target.py",
+    "clean:target:apply": "python3 ../scripts/clean-target.py --apply",
     "tauri": "tauri"
   },
   "dependencies": {
