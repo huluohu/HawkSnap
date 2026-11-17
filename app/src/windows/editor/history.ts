@@ -53,6 +53,9 @@ export function useEditorHistory(initial: Shape[] = []) {
   const undo = useCallback(() => setState(undoState), []);
   const redo = useCallback(() => setState(redoState), []);
   const reset = useCallback((shapes: Shape[]) => setState((s) => resetState(s, shapes)), []);
+  // 整体恢复（v1.2 裁剪撤销用）：裁剪前的快照 { past, present, future } 原样写回——
+  // reset 只能清栈，无法把裁剪前的撤销历史一并还原。
+  const restore = useCallback((s: EditorHistoryState) => setState(s), []);
   return {
     ...state,
     canUndo: state.past.length > 0,
@@ -61,5 +64,6 @@ export function useEditorHistory(initial: Shape[] = []) {
     undo,
     redo,
     reset,
+    restore,
   };
 }

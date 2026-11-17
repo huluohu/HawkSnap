@@ -27,6 +27,7 @@ import {
   withWidth,
   type BBox,
   type MeasureFn,
+  type MosaicMode,
   type Shape,
 } from "./shapes";
 import { t } from "../../lib/i18n";
@@ -35,13 +36,18 @@ export type Tool =
   | "select" | "crop" | "rect" | "ellipse" | "arrow" | "pen" | "highlighter"
   | "mosaic" | "step" | "text";
 
-export interface EditorStyle { color: string; width: number; size: number }
+/** 编辑器样式记忆：mosaicMode（v1.2，遮蔽模式）随色/粗细/字号一起持久化。 */
+export interface EditorStyle { color: string; width: number; size: number; mosaicMode?: MosaicMode }
 
-/** 马赛克块尺寸（px @图片自然尺度）——计划口径 ~10px。 */
+/** 遮蔽块尺寸（px @图片自然尺度）——计划口径 ~10px。 */
 export const MOSAIC_BLOCK_SIZE = 10;
 
+/** 画布缩放范围（v1.2 画布缩放）：25%–400%，与 100% 双击复位。 */
+export const ZOOM_MIN = 0.25;
+export const ZOOM_MAX = 4;
+
 interface EditorCanvasProps {
-  /** 位图（index.tsx 装载的 Image 元素；马赛克采样与导出同源）。 */
+  /** 位图（index.tsx 装载的 Image 元素；遮蔽采样与导出同源）。 */
   image: HTMLImageElement | null;
   shapes: Shape[];
   tool: Tool;
@@ -50,6 +56,12 @@ interface EditorCanvasProps {
   selected: number | null;
   /** 选中形状的样式实时预览（滑杆拖动期间未提交）：非 null 时按此覆盖选中形状样式。 */
   previewStyle: EditorStyle | null;
+  /** 画布缩放（v1.2）：null = 适应窗口（默认），数值 = CSS 宽 = 自然宽 × zoom。 */
+  zoom: number | null;
+  onZoomChange: (zoom: number | null) => void;
+  /** OCR 结果高亮框（v1.2「文本框浮层」联动，§3.3）：行 hover 时画半透明框。
+   * 坐标 = 识别源图像素（= 画布自然坐标，WYSIWYS 识别下 1:1）。 */
+  ocrHighlight: BBox | null;
   onSelect: (index: number | null) => void;
   onCommit: (s: Shape) => void;
   /** 拖动选中形状（pointerup 一次一档历史）。 */
@@ -90,13 +102,17 @@ function drawSelection(ctx: CanvasRenderingContext2D, b: { x: number; y: number;
 }
 
 export default function EditorCanvas({
-  image, shapes, tool, style, selected, previewStyle,
+  image, shapes, tool, style, selected, previewStyle, zoom, onZoomChange, ocrHighlight,
   onSelect, onCommit, onMoveShape, onReplaceText, onCrop,
 }: EditorCanvasProps) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const vecRef = useRef<HTMLCanvasElement>(null);
   // 内层 stack div（文本内联输入的包含块；评审修复 1）
   const stackRef = useRef<HTMLDivElement>(null);
+  // 裁剪框草稿镜像（Esc 分层消费用，声明在下方 cropDraft 之后赋值）：窗口级 Esc
+  // 监听读取；有框时吞掉 Esc（取消裁剪框优先于 index.tsx 的取消选中/收 OCR 面板
+  // ——监听注册顺序恒在本组件先于父组件，stopImmediatePropagation 可靠拦截）。
+  const cropDraftRef = useRef<BBox | null>(null);
   // 绘制草稿：state 驱动矢量层实时预览（每 move 全量重绘——M2 规模仍可接受：
   // 重绘成本 ~几十个形状的矢量指令；马赛克的临时画布降采样只在含 mosaic 时发生）
   const [draft, setDraft] = useState<Shape | null>(null);
@@ -104,6 +120,8 @@ export default function EditorCanvas({
   const [moveDraft, setMoveDraft] = useState<{ index: number; start: Pt; dx: number; dy: number } | null>(null);
   // 裁剪选框草稿（M3 第 10 工具）：down 建框 → move 归一化 → up 提交 onCrop（<4px² 丢弃）
   const [cropDraft, setCropDraft] = useState<BBox | null>(null);
+  // 镜像赋值（渲染期同步，供 Esc 监听读取——见上方 cropDraftRef 注）
+  cropDraftRef.current = cropDraft;
   // 文本内联输入：落锚 + 草稿值 + 编辑目标（editIndex=null = 新建）
   const [textDraft, setTextDraft] = useState<{ x: number; y: number; value: string; editIndex: number | null } | null>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
@@ -160,6 +178,18 @@ export default function EditorCanvas({
       drawShape(ctx, s, image);
     }
     if (draft) drawShape(ctx, draft, image);
+    // OCR 结果高亮框（v1.2 文本框浮层联动，§3.3）：行 hover 时按 box 的外接框画
+    // 半透明琥珀框（编辑器 UI chrome，不进导出）。WYSIWYS 识别下 box 坐标 = 画布
+    // 自然坐标 1:1。
+    if (ocrHighlight) {
+      ctx.save();
+      ctx.strokeStyle = "#FFB020";
+      ctx.lineWidth = 2;
+      ctx.fillStyle = "rgba(255,176,32,0.12)";
+      ctx.fillRect(ocrHighlight.x, ocrHighlight.y, ocrHighlight.w, ocrHighlight.h);
+      ctx.strokeRect(ocrHighlight.x, ocrHighlight.y, ocrHighlight.w, ocrHighlight.h);
+      ctx.restore();
+    }
     // 裁剪选框（编辑器 UI chrome）：与选择框同款虚线 + 把手（不进导出）。
     if (cropDraft) drawSelection(ctx, cropDraft);
     if (selected != null && shapes[selected]) {
@@ -168,7 +198,7 @@ export default function EditorCanvas({
         : shapes[selected];
       drawSelection(ctx, bboxOf(s, measure));
     }
-  }, [shapes, draft, moveDraft, cropDraft, selected, previewStyle, image]);
+  }, [shapes, draft, moveDraft, cropDraft, selected, previewStyle, image, ocrHighlight]);
 
   /** 事件坐标 → 画布物理坐标（CSS 缩放比换算）。 */
   const toCanvas = useCallback((e: { clientX: number; clientY: number }): Pt => {
@@ -203,6 +233,36 @@ export default function EditorCanvas({
     flushText();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅工具变化时结转
   }, [tool]);
+
+  // Esc 分层消费（v1.2 审计修复，§4）：进行中的裁剪选框最先被取消——窗口级监听
+  // 注册于挂载期（先于 index.tsx 的窗口级快捷键监听：子组件 effect 先跑），
+  // cropDraftRef 有框时 stopImmediatePropagation 吞掉事件，父组件的 Esc 链
+  // （收 OCR 面板 → 取消选中）不再触发。挂载一次、读 ref，无需随草稿重挂。
+  useEffect(() => {
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || !cropDraftRef.current) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      setCropDraft(null);
+      dragRef.current = false;
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, []);
+
+  // Ctrl/⌘+滚轮缩放（v1.2 画布缩放）：视口坐标下 e.deltaY<0 = 放大。preventDefault
+  // 阻止浏览器/WKWebView 的页面缩放接管。zoom 为 null（适应窗口）时先按图片在当前
+  // 窗口内的实际显示比折算成数值缩放再进退，避免从 null 直接跳 100% 的跳变。
+  const onWheelZoom = (e: React.WheelEvent) => {
+    if (!e.ctrlKey && !e.metaKey) return; // 普通滚轮留给滚动
+    e.preventDefault();
+    const vec = vecRef.current;
+    if (!vec || !image) return;
+    const fitScale = vec.width ? vec.getBoundingClientRect().width / vec.width : 1;
+    const cur = zoom ?? fitScale;
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cur * (e.deltaY < 0 ? 1.1 : 0.9)));
+    onZoomChange(next);
+  };
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (!image) return;
@@ -243,7 +303,7 @@ export default function EditorCanvas({
         setDraft({ kind: tool, x: p.x, y: p.y, w: 0, h: 0, color: style.color, width: style.width });
         break;
       case "mosaic":
-        setDraft({ kind: "mosaic", x: p.x, y: p.y, w: 0, h: 0, blockSize: MOSAIC_BLOCK_SIZE });
+        setDraft({ kind: "mosaic", x: p.x, y: p.y, w: 0, h: 0, blockSize: MOSAIC_BLOCK_SIZE, mode: style.mosaicMode ?? "pixelate" });
         break;
       case "arrow":
         setDraft({ kind: "arrow", x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: style.color, width: style.width });
@@ -367,19 +427,31 @@ export default function EditorCanvas({
     return {
       left: rect.left - stackRect.left + (textDraft.x * rect.width) / (vec.width || 1),
       top: rect.top - stackRect.top + (textDraft.y * rect.height) / (vec.height || 1),
+      // 显示缩放比（v1.2 文字输入字号修正）：画布被 CSS 缩放显示（适应窗口/手动
+      // 缩放）时，input 的字号/最小宽必须乘同一比例——否则输入框字形与提交后
+      // 渲染的字形大小不一致（缩窄显示时输入框远大于实际渲染）。
+      dispScale: rect.width / (vec.width || 1),
     };
   })();
 
   const cursor = tool === "select" ? "default" : tool === "text" ? "text" : "crosshair";
 
   return (
-    <div style={{ position: "relative", flex: 1, overflow: "auto", background: "#2b2b2b" }}>
+    <div
+      style={{ position: "relative", flex: 1, overflow: "auto", background: "#2b2b2b" }}
+      onWheel={onWheelZoom}
+    >
       <div
         ref={stackRef}
         style={{ position: "relative", margin: "0 auto", width: "fit-content" }}
         data-testid="editor-canvas-stack"
       >
-        <canvas ref={baseRef} style={{ display: "block", maxWidth: "100%" }} />
+        <canvas
+          ref={baseRef}
+          style={zoom != null && image
+            ? { display: "block", width: image.naturalWidth * zoom }
+            : { display: "block", maxWidth: "100%" }}
+        />
         <canvas
           ref={vecRef}
           data-testid="editor-vector-canvas"
@@ -410,9 +482,11 @@ export default function EditorCanvas({
             }}
             style={{
               position: "absolute", left: textPos.left, top: textPos.top,
-              font: `${style.size}px sans-serif`, color: style.color,
+              font: `${Math.max(8, style.size * textPos.dispScale)}px sans-serif`,
+              color: style.color,
               background: "rgba(255,255,255,0.85)", border: "1px dashed #888",
-              minWidth: 120, padding: "0 2px", outline: "none",
+              minWidth: Math.max(48, 120 * textPos.dispScale),
+              padding: "0 2px", outline: "none",
             }}
           />
         )}

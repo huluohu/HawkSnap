@@ -137,5 +137,15 @@
   "overlay.ocrTip": "Recognize text in the selection and open the editor",
   "overlay.frameError": "Failed to load frozen frame: {message} (press Esc, then trigger capture again)",
   "countdown.hint": "Click to cancel",
-  "countdown.aria": "Delayed capture countdown {secs} seconds"
+  "countdown.aria": "Delayed capture countdown {secs} seconds",
+  "editor.pngReadFailed": "Failed to read PNG data",
+  "editor.decodeFailed": "Failed to decode image",
+  "editor.mosaic.pixelate": "Pixelate",
+  "editor.mosaic.blur": "Blur",
+  "editor.zoom.in": "Zoom in (Ctrl/⌘+wheel)",
+  "editor.zoom.out": "Zoom out (Ctrl/⌘+wheel)",
+  "editor.zoom.reset": "Reset to 100%",
+  "editor.zoom.fit": "Fit window",
+  "editor.ocr.modelsDir": "Open models folder",
+  "editor.ocr.exportedTo": "Exported: {path}"
 }

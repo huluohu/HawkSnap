@@ -17,6 +17,9 @@
  * 的包装，纯函数层不持有 canvas 依赖；未注入时走估算回退（0.6em 字宽 / 1.2em 行高）。 */
 export type MeasureFn = (text: string, size: number) => { width: number; height: number };
 
+/** 马赛克模式（v1.2）：像素化（硬块）/ 模糊（柔化）。可选字段 = 旧数据零迁移。 */
+export type MosaicMode = "pixelate" | "blur";
+
 export type Shape =
   | { kind: "rect"; x: number; y: number; w: number; h: number; color: string; width: number }
   | { kind: "ellipse"; x: number; y: number; w: number; h: number; color: string; width: number }
@@ -24,8 +27,11 @@ export type Shape =
   | { kind: "pen"; points: Array<{ x: number; y: number }>; color: string; width: number }
   | { kind: "highlighter"; points: Array<{ x: number; y: number }>; color: string; width: number }
   | { kind: "text"; x: number; y: number; text: string; color: string; size: number }
-  /** 像素化方块：渲染 = 底图区域按 blockSize 分块降采样再放大（draw.ts drawMosaic） */
-  | { kind: "mosaic"; x: number; y: number; w: number; h: number; blockSize: number }
+  /** 遮蔽块：渲染 = 底图区域按 blockSize 分块降采样再放大（draw.ts drawMosaic）。
+   * mode（v1.2，§3.3「马赛克（像素化/模糊）」）：pixelate = 硬边像素块（默认，
+   * 旧形状缺字段按此回退）；blur = 降采样后**开平滑**放大（柔化模糊，无硬块）。
+   * blockSize 对 blur 同义复用为「模糊粒度」（值越大越糊）。 */
+  | { kind: "mosaic"; x: number; y: number; w: number; h: number; blockSize: number; mode?: MosaicMode }
   /** 序号气泡：实心圆 + 白字序号；n 在创建时按 nextStepNumber(shapes) 计算 */
   | { kind: "step"; x: number; y: number; n: number; color: string };
 
@@ -249,15 +255,20 @@ export function applyCrop(shapes: Shape[], rect: BBox): Shape[] {
 }
 
 /** 样式替换（选中态改色/改粗细/改字号 = 不可变拷贝替换 + 一次历史提交）：
- * 形状没有对应字段时原样返回（mosaic 无 color/width；step 无 width/size；非 text 无 size）。 */
+ * 形状没有对应字段时原样返回（mosaic 无 color/width；step 无 width/size；非 text 无
+ * size）；**值相同也原样返回同引用**（v1.2：调用方据引用判等跳过 no-op 历史档——
+ * 重复点击同色不再产生空撤销步）。 */
 export function withColor(shape: Shape, color: string): Shape {
-  return "color" in shape ? ({ ...shape, color } as Shape) : shape;
+  if (!("color" in shape) || shape.color === color) return shape;
+  return { ...shape, color } as Shape;
 }
 
 export function withWidth(shape: Shape, width: number): Shape {
-  return "width" in shape ? ({ ...shape, width } as Shape) : shape;
+  if (!("width" in shape) || shape.width === width) return shape;
+  return { ...shape, width } as Shape;
 }
 
 export function withSize(shape: Shape, size: number): Shape {
-  return shape.kind === "text" ? { ...shape, size } : shape;
+  if (shape.kind !== "text" || shape.size === size) return shape;
+  return { ...shape, size };
 }

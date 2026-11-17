@@ -167,6 +167,29 @@ pub fn ocr_recognize(app: AppHandle, path: String) -> Result<Vec<OcrLineDto>, St
     Ok(lines)
 }
 
+/// 识别前端栅格化的当前画布（v1.2「所见即所识」审计修复）：编辑器把**当前画布**
+/// （裁剪后位图 + 全部标注形状，经 exportToPng 编码）以 PNG base64 传上来。此前
+/// ocr_recognize 读磁盘原图：裁剪后结果错位；更严重的是马赛克遮蔽的敏感文字会被
+/// 结果面板明文列出并可一键全部复制——隐私面直接被打穿。无 path → 不做历史回填
+/// （画布栅格不是历史库里的文件）。
+#[tauri::command(async)]
+pub fn ocr_recognize_png(app: AppHandle, png_base64: String) -> Result<Vec<OcrLineDto>, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| format!("PNG 数据解码失败: {e}"))?;
+    let (rgba, w, h) =
+        hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| format!("截图文件解码失败: {e}"))?;
+    with_engine(&app, |engine| engine.recognize(&rgba, w, h))
+}
+
+/// 模型目录路径（v1.2 手动下载兜底，§9「内置重试 + 手动下载入口」）：模型下载
+/// 失败时，前端「打开模型目录」按钮的落点——用户手动放置模型文件后重试即可
+/// （ensure_models 幂等校验天然支持手动放置：SHA256 对得上就不重下）。
+#[tauri::command(async)]
+pub fn ocr_models_dir(app: AppHandle) -> Result<String, String> {
+    Ok(models_dir(&app)?.to_string_lossy().into_owned())
+}
+
 /// 识别结果导出 txt：写 `<png_stem>.txt` 到源图旁（M4：复用 editor_save 的
 /// 「写回源文件所在目录」口径）。源必须是已存在的 .png（防任意路径写入）。
 #[tauri::command(async)]

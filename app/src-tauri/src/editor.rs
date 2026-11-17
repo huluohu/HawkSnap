@@ -39,6 +39,11 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 /// 编辑器窗口 label（与 capabilities/editor.json 的 `windows: ["editor"]` 对应）。
 pub const EDITOR_LABEL: &str = "editor";
 
+/// 编辑器装载尺寸门（v1.2）：长边上限（px）。6K Retina 全屏 ≈ 6016px 物理宽仍有
+/// 余量；WebKit 画布单边 >16384 直接失败——取 8192 留 2× 安全边。历史网格的
+/// canReedit 前端门控之外，这里是**所有装载入口**的统一咽喉（入口新增时不漏防）。
+const EDITOR_MAX_EDGE_PX: u32 = 8192;
+
 /// 编辑器来源（M2 Task M3，见模块注「来源契约」）。serde：`{"kind":"pin","pinId":7}`
 /// / `{"kind":"capture"}`（tag=kind；字段 camelCase 对齐前端 invoke 载荷）。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -79,7 +84,20 @@ pub fn editor_open(
         return Err("路径为空".into());
     }
     let png = std::fs::read(&path).map_err(|e| format!("读取截图文件失败: {e}"))?;
-    hawksnap_core::crop::png_to_rgba(&png).map_err(|e| format!("截图文件解码失败: {e}"))?;
+    let (rgba, w, h) =
+        hawksnap_core::crop::png_to_rgba(&png).map_err(|e| format!("截图文件解码失败: {e}"))?;
+    // 尺寸统一门（v1.2 审计修复，§3.3 画布承载边界）：所有入口（历史重新编辑/贴图
+    // 双击/覆盖层标注）在编辑器门前一站设防。WebKit 画布单边 >16384px 直接失败，
+    // 巨幅位图会让全画布重绘与导出路径内存尖峰——超限一律拒绝并指路（长截图产物
+    // 用「打开目录」查看）。语义等同于历史网格 canReedit 门控的 Rust 侧兜底：
+    // 前端漏网（未来新入口）也进不来。长边 8192 = 6K Retina 全屏（6016px）仍有余量。
+    if w.max(h) > EDITOR_MAX_EDGE_PX {
+        return Err(format!(
+            "图片长边 {}px 超出编辑器上限（{}px）：长截图等巨幅图片请在历史中用「打开目录」查看",
+            w.max(h), EDITOR_MAX_EDGE_PX
+        ));
+    }
+    let _ = rgba; // 尺寸门只需要维度；解码本身即校验
 
     // M2 Task M3：贴图/标注来源装载的是 $TMPDIR 临时文件——静态 asset scope 只有
     // `$CACHE/**`（tauri.conf），save_dir 由 M0 运行期放行，临时目录刻意不整段放行
@@ -179,16 +197,19 @@ const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 /// 路径安全裁定（上下文预授权）：path 只来自编辑器装载过的历史/临时文件路径
 /// （hawk://editor-load 原样传回），属第一方受控输入——不做目录白名单校验，仅校验
 /// 「文件已存在 + 扩展名 .png（大小写不敏感）」，杜绝借编辑器写任意路径/任意格式。
+/// 返回值（v1.2）：本次保存**最终落盘**的文件路径。origin=Capture 时 = save_dir 里
+/// 新建的入库副本——前端拿到后把后续保存切到该路径 + origin=null（重复 ⌘S 只覆盖
+/// 同一文件，不再每次新建时间戳副本、重复入库，见前端 savedCapturePath 契约）。
 #[tauri::command(async)]
 pub fn editor_save(
     app: AppHandle,
     path: String,
     png_base64: String,
     origin: Option<EditorOrigin>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let (rgba, w, h) = save_png_bytes(&path, &png_base64)?;
     match origin {
-        None => {} // 历史重新编辑：只覆盖原文件（路径已在 save_dir，无重复入库）
+        None => Ok(path), // 历史重新编辑：只覆盖原文件（路径已在 save_dir，无重复入库）
         Some(EditorOrigin::Pin { pin_id }) => {
             // 贴图回写（主线程交付在 pins.rs）：贴图已被关闭 → pin_set_image_rgba
             // 静默 Ok；platform/交付失败 eprintln 降级（保存本身已成功，编辑器不因
@@ -196,18 +217,16 @@ pub fn editor_save(
             if let Err(e) = crate::pins::pin_set_image_rgba(&app, pin_id, rgba, w, h) {
                 eprintln!("[hawksnap] 贴图回写失败（忽略）: {e}");
             }
+            Ok(path)
         }
         Some(EditorOrigin::Capture) => {
             // 裁定：来源=截图 → 自动复制到剪贴板（用户面核心语义，失败向上报错）。
             crate::commands::copy_rgba_to_clipboard(&rgba, w, h)?;
             // 另存 save_dir + 入库（与普通截图同一产品模型）。历史是旁路：失败
             // eprintln 降级，不回滚剪贴板、不影响保存成败（与 finish_capture 同口径）。
-            if let Err(e) = save_annotate_to_history(&app, &rgba, w, h) {
-                eprintln!("[hawksnap] 标注截图入库失败（忽略）: {e}");
-            }
+            save_annotate_to_history(&app, &rgba, w, h)
         }
     }
-    Ok(())
 }
 
 /// editor_save 的纯落盘半程（AppHandle-free，可测）：校验路径/扩展名/魔数 → 原子
@@ -263,7 +282,7 @@ fn save_annotate_to_history(
     rgba: &[u8],
     w: u32,
     h: u32,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let settings = crate::settings::Settings::load(app);
     let dir = crate::commands::resolve_save_dir(&settings).ok_or("no picture dir")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -277,7 +296,8 @@ fn save_annotate_to_history(
         &dir,
         rgba,
         &hawksnap_core::geometry::Rect { x: 0, y: 0, w, h },
-    )
+    )?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

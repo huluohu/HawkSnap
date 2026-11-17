@@ -31,10 +31,16 @@ export function canvasMeasure(ctx: CanvasRenderingContext2D): MeasureFn {
 }
 
 /**
- * 马赛克渲染：底图区域按 blockSize 分块像素化。
- * 路径（预览/导出同款）：位图区域 → 临时画布降到 ~1/blockSize 尺寸 → 关平滑放大回
- * 原尺寸贴回。临时画布由工厂注入（jsdom/测试可桩）；位图缺席时半透明灰块兜底
- * （理论不可达：绘制前必已装载位图——保留以防御并让无图测试可断言）。
+ * 遮蔽块渲染（v1.2 拆双模式，§3.3「马赛克（像素化/模糊）」）：
+ * - pixelate：底图区域 → 临时画布降到 ~1/blockSize 尺寸 → **关平滑**放大回原尺寸
+ *   贴回（硬边像素块）。
+ * - blur：同一降采样，但放大时**开平滑**（双线性插值把块糊开）——柔化遮蔽，无硬块。
+ *   刻意不走 ctx.filter = "blur()"：WKWebView（macOS 12.3+ 覆盖 Safari 15/16.0-16.3）
+ *   不支持 CanvasRenderingContext2D.filter（16.4 才进），静默 no-op 会让「模糊」
+ *   变成无遮蔽——降采样放大是三平台一致的可移植实现。blockSize 对 blur 同义复用
+ *   为模糊粒度（值越大越糊）。
+ * 路径（预览/导出同款）。临时画布由工厂注入（jsdom/测试可桩）；位图缺席时半透明
+ * 灰块兜底（理论不可达：绘制前必已装载位图——保留以防御并让无图测试可断言）。
  * 源矩形与位图边界求交（负源坐标/越界的 drawImage 行为跨浏览器不一致）。
  */
 export function drawMosaic(
@@ -50,6 +56,7 @@ export function drawMosaic(
     return;
   }
   const blockSize = Math.max(2, Math.round(shape.blockSize));
+  const smooth = shape.mode === "blur";
   const { w: bw, h: bh } = bitmapSize(bitmap);
   const x0 = Math.max(0, b.x);
   const y0 = Math.max(0, b.y);
@@ -58,8 +65,10 @@ export function drawMosaic(
   const sw = x1 - x0;
   const sh = y1 - y0;
   if (sw <= 0 || sh <= 0) return; // 完全在位图外：无可采样区域
-  const cols = Math.max(1, Math.round(sw / blockSize));
-  const rows = Math.max(1, Math.round(sh / blockSize));
+  // blur 粒度放大 2 倍（降采样更狠）让柔化更明显，与 pixelate 的视觉强度对齐
+  const grain = smooth ? blockSize * 2 : blockSize;
+  const cols = Math.max(1, Math.round(sw / grain));
+  const rows = Math.max(1, Math.round(sh / grain));
   const tmp = newTempCanvas();
   if (!tmp) return;
   tmp.width = cols;
@@ -68,7 +77,7 @@ export function drawMosaic(
   if (!tctx) return;
   tctx.drawImage(bitmap, x0, y0, sw, sh, 0, 0, cols, rows); // 降采样（每块取均值色）
   const prev = ctx.imageSmoothingEnabled;
-  ctx.imageSmoothingEnabled = false; // 放大关平滑 = 硬边像素块
+  ctx.imageSmoothingEnabled = smooth; // 关 = 硬边像素块；开 = 柔化模糊
   ctx.drawImage(tmp, 0, 0, cols, rows, b.x, b.y, b.w, b.h);
   ctx.imageSmoothingEnabled = prev;
 }

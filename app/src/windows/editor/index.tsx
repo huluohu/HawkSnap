@@ -15,11 +15,11 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t, subscribe, getLanguage } from "../../lib/i18n";
-import EditorCanvas, { type EditorStyle, type Tool } from "./EditorCanvas";
+import EditorCanvas, { ZOOM_MAX, ZOOM_MIN, type EditorStyle, type Tool } from "./EditorCanvas";
 import { exportToPng } from "./export";
 import { useEditorHistory } from "./history";
 import { createLoadGuard } from "./loadGuard";
-import { applyCrop, translate, withColor, withSize, withWidth, type BBox, type Shape } from "./shapes";
+import { applyCrop, translate, withColor, withSize, withWidth, type BBox, type MosaicMode, type Shape } from "./shapes";
 
 // 样式记忆（计划接口）：color/width/size 持久化 localStorage，挂载时恢复。
 const STYLE_KEY = "hawksnap.editor.style";
@@ -44,6 +44,12 @@ const TOOLS: Tool[] = [
   "select", "crop", "rect", "ellipse", "arrow", "pen", "highlighter", "mosaic", "step", "text",
 ];
 
+// 单键工具切换（v1.2）：与主流标注工具一致的字母位；文本输入聚焦时不接管。
+const TOOL_KEYS: Record<string, Tool> = {
+  v: "select", c: "crop", r: "rect", e: "ellipse", a: "arrow",
+  p: "pen", h: "highlighter", m: "mosaic", n: "step", t: "text",
+};
+
 function loadStyle(): EditorStyle {
   try {
     const raw = localStorage.getItem(STYLE_KEY);
@@ -53,6 +59,10 @@ function loadStyle(): EditorStyle {
       color: typeof s.color === "string" ? s.color : DEFAULT_STYLE.color,
       width: typeof s.width === "number" ? s.width : DEFAULT_STYLE.width,
       size: typeof s.size === "number" ? s.size : DEFAULT_STYLE.size,
+      // 遮蔽模式（v1.2）：脏值不炸窗口，非法值回退默认像素化
+      mosaicMode: s.mosaicMode === "blur" ? "blur"
+        : s.mosaicMode === "pixelate" ? "pixelate"
+        : undefined,
     };
   } catch {
     return DEFAULT_STYLE; // 脏值不炸窗口
@@ -68,7 +78,9 @@ function blobToBase64(blob: Blob): Promise<string> {
       const i = s.indexOf(",");
       resolve(i >= 0 ? s.slice(i + 1) : s);
     };
-    reader.onerror = () => reject(new Error("PNG 数据读取失败"));
+    // v1.2 i18n（G6）：此前硬编码中文漏出到 saveError/ocrError 的 {message} 槽，
+    // en-US 用户看到外语环境里的中文串——错误文案统一走词典。
+    reader.onerror = () => reject(new Error(t("editor.pngReadFailed")));
     reader.readAsDataURL(blob);
   });
 }
@@ -78,7 +90,7 @@ export default function EditorWindow() {
   useSyncExternalStore(subscribe, getLanguage);
   // 动作回调是稳定 useCallback——解构持有，避免 effect 随渲染重挂（hook 返回对象
   // 本身每帧新建，不可作为依赖）。
-  const { present, canUndo, canRedo, commit, undo, redo, reset } = useEditorHistory([]);
+  const { present, canUndo, canRedo, commit, undo, redo, reset, restore, past, future } = useEditorHistory([]);
   const [tool, setTool] = useState<Tool>("rect");
   const [style, setStyle] = useState<EditorStyle>(DEFAULT_STYLE);
   // 位图元素 + 来源路径 + 来源（导出保存副作用用）。element/path/origin 同生同灭
@@ -105,6 +117,27 @@ export default function EditorWindow() {
   const ocrFlashTimer = useRef<number | undefined>(undefined);
   // 装载代数守卫（评审修复 2）：useRef 惰性持有（每渲染新建的备用实例被丢弃）
   const loadGuardRef = useRef(createLoadGuard());
+  // —— 画布缩放（v1.2）：null = 适应窗口（默认）；Ctrl/⌘+滚轮与工具栏按钮调节 ——
+  const [zoom, setZoom] = useState<number | null>(null);
+  // —— OCR 结果高亮（v1.2 文本框浮层联动，§3.3）：行 hover 时该行的外接框 ——
+  const [ocrHighlight, setOcrHighlight] = useState<BBox | null>(null);
+  // OCR 导出落点（v1.2）：flash 显示具体路径（此前只闪「已导出」，落点用户不可见）
+  const [ocrExportPath, setOcrExportPath] = useState<string | null>(null);
+  // —— 自动 OCR（v1.2 动作浮条「OCR」）：装载载荷 runOcr=true → 位图就绪自动识别 ——
+  const [autoOcr, setAutoOcr] = useState(false);
+  // 会话内只自动跑一次（补发事件不会反复触发；applyImage 换图时复位）
+  const autoOcrFiredRef = useRef(false);
+  // —— Capture 来源首次保存的落盘副本（v1.2 保存去重）：首次 ⌘S 得到 save_dir
+  // 副本路径后，后续保存切到该路径 + origin=null——重复 ⌘S 只覆盖同一文件，
+  // 不再每次新建时间戳副本、重复入库（审计 P2 修复）——
+  const [savedCapturePath, setSavedCapturePath] = useState<string | null>(null);
+  // —— 裁剪撤销（v1.2，§3.3「撤销无步数限制」的裁剪补全）：裁剪前的完整会话快照
+  // （位图 + 形状 + 双栈）。形状撤销栈耗尽后 ⌘Z 逐级恢复裁剪（多层裁剪多层回退）；
+  // 裁剪本身不进重做（单向恢复）。count 是触发重渲染的镜像（undo 按钮可用态含它）。
+  const cropUndoRef = useRef<Array<{
+    img: HTMLImageElement; shapes: Shape[]; past: Shape[][]; future: Shape[][];
+  }>>([]);
+  const [cropUndoCount, setCropUndoCount] = useState(0);
 
   // 挂载恢复样式记忆
   useEffect(() => {
@@ -168,28 +201,47 @@ export default function EditorWindow() {
     }
   }, []);
 
+  // 打开 OCR 模型目录（§9 手动下载兜底，v1.2）：目录路径来自 ocr_models_dir，
+  // 打开复用主面板同款 open_path（访达/资源管理器）。
+  const openModelsDir = useCallback(async () => {
+    try {
+      const dir = await invoke<string>("ocr_models_dir");
+      await invoke("open_path", { path: dir });
+    } catch (e) {
+      setOcrError(String(e));
+    }
+  }, []);
+
   // 图片装载：asset 协议优先，onerror 降级 dataURL（editor_image_dataurl）。
   // 代数守卫（评审修复 2）：×3 补发使旧事件的 Image 探测必然迟到（A 的补发可落
   // 在 B 的事件后）——每个事件分配新代数，探测完成时仅最新代可应用 image/path/
   // reset/loadError，迟到旧探测自弃；未守卫时最终显示的是「最后完成 onload 的图」
   // 而非「最后请求的 path」。装载成功 = 新会话：撤销栈清空 + 取消选中（旧图的
-  // 选中下标对新图无意义）。
-  const applyImage = useCallback((img: HTMLImageElement, path: string, org: EditorOrigin | null) => {
+  // 选中下标对新图无意义）+ 裁剪撤销栈/保存副本/自动 OCR/OCR 高亮全部复位。
+  const applyImage = useCallback((img: HTMLImageElement, path: string, org: EditorOrigin | null, runOcr: boolean) => {
     reset([]); // 换图生效 = 清空撤销栈（新会话）
     setSelected(null);
     setLoadError(null);
     setImage(img);
     setImagePath(path);
     setOrigin(org);
+    setAutoOcr(runOcr);
+    autoOcrFiredRef.current = false; // 新会话重新允许自动识别
+    setSavedCapturePath(null);
+    cropUndoRef.current = [];
+    setCropUndoCount(0);
+    setOcrHighlight(null);
+    setOcrExportPath(null);
+    setOcrLines(null);
   }, [reset]);
 
-  const loadFromPath = useCallback((path: string, org: EditorOrigin | null) => {
+  const loadFromPath = useCallback((path: string, org: EditorOrigin | null, runOcr: boolean) => {
     const myGen = loadGuardRef.current.begin();
     const url = convertFileSrc(path);
     const probe = new Image();
     probe.onload = () => {
       if (!loadGuardRef.current.isCurrent(myGen)) return;
-      applyImage(probe, path, org);
+      applyImage(probe, path, org, runOcr);
     };
     probe.onerror = () => {
       if (!loadGuardRef.current.isCurrent(myGen)) return;
@@ -199,10 +251,10 @@ export default function EditorWindow() {
           if (!loadGuardRef.current.isCurrent(myGen)) return;
           const img = new Image();
           img.onload = () => {
-            if (loadGuardRef.current.isCurrent(myGen)) applyImage(img, path, org);
+            if (loadGuardRef.current.isCurrent(myGen)) applyImage(img, path, org, runOcr);
           };
           img.onerror = () => {
-            if (loadGuardRef.current.isCurrent(myGen)) setLoadError("decode failed");
+            if (loadGuardRef.current.isCurrent(myGen)) setLoadError(t("editor.decodeFailed"));
           };
           img.src = dataUrl;
         })
@@ -220,8 +272,10 @@ export default function EditorWindow() {
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    listen<{ path: string; origin: EditorOrigin | null }>("hawk://editor-load", (e) => {
-      if (!disposed) loadFromPath(e.payload.path, e.payload.origin ?? null);
+    // runOcr（v1.2）：动作浮条「OCR」入口（annotate_crop runOcr=true）——装载后
+    // 自动跑一次识别（见 autoOcr effect）。
+    listen<{ path: string; origin: EditorOrigin | null; runOcr?: boolean }>("hawk://editor-load", (e) => {
+      if (!disposed) loadFromPath(e.payload.path, e.payload.origin ?? null, e.payload.runOcr === true);
     }).then((un) => {
       if (disposed) un();
       else unlisten = un;
@@ -256,32 +310,56 @@ export default function EditorWindow() {
 
   const pickColor = useCallback((c: string) => {
     setStyle((s) => ({ ...s, color: c }));
-    // 选中形状无 color 字段（mosaic）时不入历史（替换拷贝为原样 = 空档）
-    if (selected != null && present[selected] && "color" in present[selected]) {
-      commit(present.map((s, i) => (i === selected ? withColor(s, c) : s)));
+    // 选中形状无 color 字段（mosaic）时不入历史；**值相同也不入**（v1.2：同色
+    // 重复点击不再产生 no-op 空档——withColor 值未变时返回原对象引用可判等）
+    if (selected != null && present[selected]) {
+      const replaced = withColor(present[selected], c);
+      if (replaced !== present[selected]) {
+        commit(present.map((s, i) => (i === selected ? replaced : s)));
+      }
+    }
+  }, [commit, present, selected]);
+
+  // 遮蔽模式切换（v1.2，§3.3 像素化/模糊）：记忆进样式（持久化）；选中的遮蔽块
+  // 同步换模式（一档历史；值相同则跳过——与 pickColor 同款 no-op 防线）。
+  const pickMosaicMode = useCallback((m: MosaicMode) => {
+    setStyle((s) => ({ ...s, mosaicMode: m }));
+    if (selected != null && present[selected]?.kind === "mosaic") {
+      const s0 = present[selected];
+      if (s0.mode !== m) {
+        commit(present.map((s, i) => (i === selected && s.kind === "mosaic" ? { ...s, mode: m } : s)));
+      }
     }
   }, [commit, present, selected]);
 
   const commitWidthRestyle = useCallback(() => {
     setRestyle(false);
-    // 同上：width 只对描边类形状有意义，其余不入历史
-    if (selected != null && present[selected] && "width" in present[selected]) {
-      const w = styleRef.current.width;
-      commit(present.map((s, i) => (i === selected ? withWidth(s, w) : s)));
+    // width 只对描边类形状有意义；值相同不入历史（v1.2 no-op 空档防线）
+    if (selected != null && present[selected]) {
+      const replaced = withWidth(present[selected], styleRef.current.width);
+      if (replaced !== present[selected]) {
+        commit(present.map((s, i) => (i === selected ? replaced : s)));
+      }
     }
   }, [commit, present, selected]);
 
   const commitSizeRestyle = useCallback(() => {
     setRestyle(false);
     if (selected != null && present[selected]?.kind === "text") {
-      const z = styleRef.current.size;
-      commit(present.map((s, i) => (i === selected ? withSize(s, z) : s)));
+      const replaced = withSize(present[selected], styleRef.current.size);
+      if (replaced !== present[selected]) {
+        commit(present.map((s, i) => (i === selected ? replaced : s)));
+      }
     }
   }, [commit, present, selected]);
 
   // —— 裁剪工具（M3 N0 第 10 工具，前端单路径）：把位图裁到选框 → 形状平移/丢弃
-  // （applyCrop 纯函数）→ 撤销栈重置（裁剪 = 新会话基线）+ 工具复位 select（防
-  // 误二次裁）。Rust 侧零改动：imagePath/origin 不变，⌘S 时 editor_save 写回的就是
+  // （applyCrop 纯函数）→ 工具复位 select（防误二次裁）。v1.2（审计修复，§3.3
+  // 「撤销无步数限制」）：裁剪前的完整会话（位图 + 形状 + 撤销双栈）压入
+  // cropUndoRef——形状撤销栈耗尽后 ⌘Z 继续逐级撤销裁剪（多层裁剪多层回退）；
+  // 裁剪不再是一个无法回头的「新会话」。重做不跨裁剪（单向恢复，⌘⇧Z 不恢复裁剪
+  // ——重做链在裁剪时已随快照保存，恢复裁剪后原重做链不适用新位图）。
+  // Rust 侧零改动：imagePath/origin 不变，⌘S 时 editor_save 写回的就是
   // 裁后尺寸的 PNG（前端发什么写什么）；Pin 回写按新尺寸 set_image，Capture 来源走
   // record_history 同链。同步换图（setImage）使画布/导出的 internal dims 自然更新
   // （naturalWidth/Height 读自新 Image）。 ——
@@ -304,6 +382,13 @@ export default function EditorWindow() {
       const url = canvas.toDataURL("image/png");
       const img = new Image();
       img.onload = () => {
+        // 裁剪撤销快照：裁剪**生效前**的完整会话（含撤销/重做栈——恢复裁剪时原样
+        // 写回，裁前的标注编辑历史一个不少）。
+        cropUndoRef.current = [
+          ...cropUndoRef.current,
+          { img: image, shapes: present, past, future },
+        ];
+        setCropUndoCount(cropUndoRef.current.length);
         setImage(img);
         reset(applyCrop(present, { x: cx, y: cy, w: cw, h: ch }));
         setSelected(null);
@@ -311,20 +396,44 @@ export default function EditorWindow() {
       };
       img.src = url;
     },
-    [image, present, reset],
+    [image, present, past, future, reset],
   );
 
-  // —— 导出保存（F5：经 exportToPng 单路径栅格化 → editor_save 写回原路径 + origin
+  // 撤销一次裁剪（⌘Z 在形状栈耗尽后的延续）：恢复快照的位图 + 形状 + 双栈，
+  // 弹出该快照。多层裁剪逐级回退；无快照时 no-op。
+  const undoCrop = useCallback(() => {
+    const snap = cropUndoRef.current[cropUndoRef.current.length - 1];
+    if (!snap) return false;
+    cropUndoRef.current = cropUndoRef.current.slice(0, -1);
+    setCropUndoCount(cropUndoRef.current.length);
+    setImage(snap.img);
+    restore({ past: snap.past, present: snap.shapes, future: snap.future });
+    setSelected(null);
+    return true;
+  }, [restore]);
+
+  // —— 导出保存（F5：经 exportToPng 单路径栅格化 → editor_save 写回 + origin
   // 副作用（M3 契约：pin 回写贴图 / capture 剪贴板+入库 / null 无））——
+  // v1.2 保存去重（审计修复）：Capture 来源首次 ⌘S 落盘 save_dir 副本后记住该
+  // 路径（editor_save 现返回最终落盘路径），后续 ⌘S 切到「覆盖该副本 + origin=null」
+  // ——重复保存不再每次新建时间戳文件、重复入库。
 
   const save = useCallback(async () => {
     if (!image || !imagePath || saving) return;
+    const target = savedCapturePath ?? imagePath;
     setSaving(true);
     setSaveError(null);
     try {
       const blob = await exportToPng(image, present, image.naturalWidth, image.naturalHeight);
       const pngBase64 = await blobToBase64(blob);
-      await invoke("editor_save", { path: imagePath, pngBase64, origin });
+      const savedTo = await invoke<string>("editor_save", {
+        path: target,
+        pngBase64,
+        origin: savedCapturePath ? null : origin,
+      });
+      if (origin?.kind === "capture" && !savedCapturePath && savedTo) {
+        setSavedCapturePath(savedTo);
+      }
       setSavedFlash(true);
       window.clearTimeout(flashTimer.current);
       flashTimer.current = window.setTimeout(() => setSavedFlash(false), 2000);
@@ -333,19 +442,25 @@ export default function EditorWindow() {
     } finally {
       setSaving(false);
     }
-  }, [image, imagePath, present, saving, origin]);
+  }, [image, imagePath, present, saving, origin, savedCapturePath]);
 
   // —— OCR（M4）：识别 → 结果浮层（单块复制/全部复制/导出 txt/关闭）。首次调用
-  // 触发模型下载（Rust 侧经 hawk://ocr-model-progress 推进度，此处转内联横幅）。 ——
+  // 触发模型下载（Rust 侧经 hawk://ocr-model-progress 推进度，此处转内联横幅）。
+  // v1.2「所见即所识」（审计修复）：识别**当前画布**（裁剪后位图 + 全部标注形状，
+  // exportToPng 栅格化）而非磁盘原图——裁剪后结果不再错位，马赛克遮蔽的敏感文字
+  // 不会被结果面板明文暴露。box 坐标 = 画布自然坐标（画布内 1:1 高亮联动）。
 
   const runOcr = useCallback(async () => {
-    if (!image || !imagePath || ocrRunning) return;
+    if (!image || ocrRunning) return;
     setOcrRunning(true);
     setOcrError(null);
     setOcrProgress(null);
     setOcrFlash(null);
+    setOcrHighlight(null);
     try {
-      const lines = await invoke<OcrLine[]>("ocr_recognize", { path: imagePath });
+      const blob = await exportToPng(image, present, image.naturalWidth, image.naturalHeight);
+      const pngBase64 = await blobToBase64(blob);
+      const lines = await invoke<OcrLine[]>("ocr_recognize_png", { pngBase64 });
       setOcrLines(lines);
     } catch (e) {
       setOcrError(String(e));
@@ -354,7 +469,25 @@ export default function EditorWindow() {
       setOcrRunning(false);
       setOcrProgress(null);
     }
-  }, [image, imagePath, ocrRunning]);
+  }, [image, present, ocrRunning]);
+
+  // 自动 OCR（v1.2）：动作浮条「OCR」入口的 runOcr 载荷 → 位图就绪即跑一次。
+  useEffect(() => {
+    if (!autoOcr || autoOcrFiredRef.current) return;
+    if (!image || ocrRunning) return;
+    autoOcrFiredRef.current = true;
+    setAutoOcr(false);
+    void runOcr();
+  }, [autoOcr, image, ocrRunning, runOcr]);
+
+  /** OCR 行 box（4 点）→ 外接框（高亮联动用）。 */
+  const lineToBox = (line: OcrLine): BBox => {
+    const xs = line.box.map((p) => p.x);
+    const ys = line.box.map((p) => p.y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+  };
 
   const ocrAllText = ocrLines?.map((l) => l.text).join("\n") ?? "";
 
@@ -378,17 +511,22 @@ export default function EditorWindow() {
   const exportOcrTxt = useCallback(async () => {
     if (!imagePath) return;
     try {
-      await invoke("ocr_export_txt", { path: imagePath, text: ocrAllText });
+      const out = await invoke<string>("ocr_export_txt", { path: imagePath, text: ocrAllText });
+      // v1.2：flash 显示具体落点（此前只闪「已导出」——capture/pin 来源的落盘
+      // 位置在 $TMPDIR，用户根本找不到导出的 txt）。
+      setOcrExportPath(out);
       setOcrFlash("exported");
       window.clearTimeout(ocrFlashTimer.current);
-      ocrFlashTimer.current = window.setTimeout(() => setOcrFlash(null), 2000);
+      ocrFlashTimer.current = window.setTimeout(() => setOcrFlash(null), 4000);
     } catch (e) {
       setOcrError(String(e));
     }
   }, [imagePath, ocrAllText]);
 
-  // 快捷键：⌘Z/⌘⇧Z（撤销重做）、Delete/Backspace（删除选中）、Esc（取消选中）、
-  // ⌘S（保存）。文本输入聚焦时不接管（内联输入的字符编辑优先；其自身的
+  // 快捷键：⌘Z/⌘⇧Z（撤销重做）、Delete/Backspace（删除选中）、Esc（分层取消：
+  // 收 OCR 浮层 → 取消选中；进行中的裁剪框由 EditorCanvas 的先注册监听优先吞掉）、
+  // ⌘S（保存）、单键工具切换（v1.2：V/R/E/A/P/H/M/N/T/C——与主流标注器一致；
+  // 文本输入聚焦时不接管）。文本输入聚焦时不接管（内联输入的字符编辑优先；其自身的
   // stopPropagation 亦兜底）。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -400,7 +538,9 @@ export default function EditorWindow() {
         const key = e.key.toLowerCase();
         if (key === "z" && !e.shiftKey) {
           e.preventDefault();
-          undo();
+          // 撤销分层（v1.2）：形状栈耗尽后 ⌘Z 继续逐级撤销裁剪
+          if (canUndo) undo();
+          else undoCrop();
         } else if ((key === "z" && e.shiftKey) || key === "y") {
           e.preventDefault();
           redo();
@@ -415,13 +555,28 @@ export default function EditorWindow() {
           e.preventDefault();
           deleteSelected();
         }
-      } else if (e.key === "Escape") {
-        setSelected(null);
+        return;
+      }
+      if (e.key === "Escape") {
+        // Esc 分层消费（v1.2 审计修复）：裁剪框（EditorCanvas 吞掉）→ OCR 浮层 →
+        // 选中态。窗体不随 Esc 关闭（编辑中的成果不因误按丢失——关闭走「关闭」按钮）。
+        if (ocrLines !== null) {
+          setOcrLines(null);
+          setOcrHighlight(null);
+        } else {
+          setSelected(null);
+        }
+        return;
+      }
+      // 单键工具切换（v1.2）：无修饰键的单字母，命中工具表即切（不抢占系统键）
+      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const tool = TOOL_KEYS[e.key.toLowerCase()];
+        if (tool) setTool(tool);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, save, selected, deleteSelected]);
+  }, [undo, redo, save, selected, deleteSelected, undoCrop, ocrLines, canUndo]);
 
   // 工具文案（G6 字面量 key：全部 t() 调用都是字面量，检查器可扫；随语言态重渲染换新）
   const toolLabels: Record<Tool, string> = {
@@ -495,8 +650,40 @@ export default function EditorWindow() {
             />
           </label>
         )}
+        {(tool === "mosaic" || (selected != null && present[selected]?.kind === "mosaic")) && (
+          // 遮蔽模式分段开关（v1.2，§3.3「马赛克（像素化/模糊）」）：记忆进样式 +
+          // 选中的遮蔽块同步换模式（pickMosaicMode）
+          <div role="group" aria-label={t("editor.tool.mosaic")} style={{ display: "flex", border: "1px solid #444", borderRadius: 4, overflow: "hidden" }}>
+            {([
+              { id: "pixelate" as const, label: t("editor.mosaic.pixelate") },
+              { id: "blur" as const, label: t("editor.mosaic.blur") },
+            ]).map(({ id, label }) => (
+              <button key={id} type="button" aria-pressed={(style.mosaicMode ?? "pixelate") === id}
+                onClick={() => pickMosaicMode(id)}
+                style={{ padding: "3px 8px", fontSize: 12, lineHeight: "16px", cursor: "pointer",
+                  border: "none",
+                  background: (style.mosaicMode ?? "pixelate") === id ? "#223047" : "transparent",
+                  color: (style.mosaicMode ?? "pixelate") === id ? "#fff" : "#ccc" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         <span style={sep} />
-        <button type="button" style={btn} disabled={!canUndo} title={t("editor.undo")} onClick={undo}>
+        {/* 画布缩放（v1.2）：− / 百分比（点击 = 100%）/ + / 适应窗口；Ctrl/⌘+滚轮同效。
+            大图（高 DPI 截图/竖长图）上做细部标注、核对遮蔽覆盖的必备。 */}
+        <button type="button" style={btn} title={t("editor.zoom.out")}
+          onClick={() => setZoom((z) => Math.max(ZOOM_MIN, (z ?? 1) * 0.8))}>−</button>
+        <button type="button" style={btn} title={t("editor.zoom.reset")}
+          onClick={() => setZoom(1)}>{zoom == null ? t("editor.zoom.fit") : `${Math.round(zoom * 100)}%`}</button>
+        <button type="button" style={btn} title={t("editor.zoom.in")}
+          onClick={() => setZoom((z) => Math.min(ZOOM_MAX, (z ?? 1) * 1.25))}>+</button>
+        <button type="button" style={{ ...btn, ...(zoom == null ? btnActive : {}) }}
+          title={t("editor.zoom.fit")}
+          onClick={() => setZoom(null)}>{t("editor.zoom.fit")}</button>
+        <span style={sep} />
+        <button type="button" style={btn} disabled={!canUndo && cropUndoCount === 0}
+          title={t("editor.undo")} onClick={() => (canUndo ? undo() : undoCrop())}>
           {t("editor.undo")}
         </button>
         <button type="button" style={btn} disabled={!canRedo} title={t("editor.redo")} onClick={redo}>
@@ -536,8 +723,13 @@ export default function EditorWindow() {
         </div>
       )}
       {ocrError && (
-        <div role="alert" style={errorBanner}>
-          {t("editor.ocr.failed", { message: ocrError })}
+        <div role="alert" style={{ ...errorBanner, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ flex: 1 }}>{t("editor.ocr.failed", { message: ocrError })}</span>
+          {/* §9「手动下载入口」（v1.2）：模型下载失败/校验失败时可打开模型目录手动
+              放置文件后重试（ensure_models 幂等——SHA256 对得上就不重下）。 */}
+          <button type="button" style={btn} onClick={() => void openModelsDir()}>
+            {t("editor.ocr.modelsDir")}
+          </button>
         </div>
       )}
       {ocrRunning && ocrProgress && (
@@ -560,6 +752,9 @@ export default function EditorWindow() {
           style={style}
           selected={selected}
           previewStyle={restyle && selected != null ? style : null}
+          zoom={zoom}
+          onZoomChange={setZoom}
+          ocrHighlight={ocrHighlight}
           onSelect={setSelected}
           onCommit={commitShape}
           onMoveShape={moveShape}
@@ -575,7 +770,10 @@ export default function EditorWindow() {
                 style={btn}
                 aria-label={t("editor.ocr.close")}
                 title={t("editor.ocr.close")}
-                onClick={() => setOcrLines(null)}
+                onClick={() => {
+                  setOcrLines(null);
+                  setOcrHighlight(null);
+                }}
               >
                 ✕
               </button>
@@ -592,6 +790,11 @@ export default function EditorWindow() {
                       style={ocrLineBtn}
                       title={t("editor.ocr.copyLine")}
                       onClick={() => copyOcrLine(line)}
+                      // 行 hover ↔ 画布内该行外接框高亮（v1.2 文本框浮层联动，§3.3）
+                      onMouseEnter={() => setOcrHighlight(lineToBox(line))}
+                      onMouseLeave={() => setOcrHighlight(null)}
+                      onFocus={() => setOcrHighlight(lineToBox(line))}
+                      onBlur={() => setOcrHighlight(null)}
                     >
                       <span style={ocrScore}>{Math.round(line.score * 100)}%</span>
                       <span style={ocrTextSpan}>{line.text}</span>
@@ -600,8 +803,11 @@ export default function EditorWindow() {
                 </div>
                 <div style={ocrPanelFoot}>
                   {ocrFlash && (
-                    <span style={ocrFlashText}>
-                      {ocrFlash === "copied" ? t("editor.ocr.copied") : t("editor.ocr.exported")}
+                    <span style={ocrFlashText}
+                      title={ocrFlash === "exported" ? (ocrExportPath ?? "") : undefined}>
+                      {ocrFlash === "copied"
+                        ? t("editor.ocr.copied")
+                        : t("editor.ocr.exportedTo", { path: ocrExportPath ?? "" })}
                     </span>
                   )}
                   <span style={{ flex: 1 }} />
@@ -772,4 +978,9 @@ const ocrEmpty: CSSProperties = {
 const ocrFlashText: CSSProperties = {
   color: "#8ff0c0",
   fontSize: 12,
+  // 导出落点路径可长（$TMPDIR 深处）——面板宽 300px 内截断，完整路径在 title
+  maxWidth: 170,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 };
