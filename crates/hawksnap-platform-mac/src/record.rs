@@ -285,7 +285,8 @@ impl StreamOpts {
 pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut fs: libc::statfs_t = unsafe { std::mem::zeroed() };
+    // libc 0.2 的 macOS 命名是 `statfs`（statfs_t 是 Linux 名）；调用同名 C 函数 statfs(2)。
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: c 指向合法 C 串；fs 为本函数栈上的可写缓冲（libc::statfs 只写该缓冲）。
     let rc = unsafe { libc::statfs(c.as_ptr(), &mut fs) };
     if rc == 0 {
