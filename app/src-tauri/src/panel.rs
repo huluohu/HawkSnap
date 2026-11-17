@@ -114,7 +114,7 @@ pub fn open_path(path: String) -> Result<(), String> {
         return Err(crate::errcode::coded("path_empty"));
     }
     let mut cmd = reveal_command(&std::path::PathBuf::from(&path))?;
-    let out = cmd.output().map_err(|e| format!("启动文件管理器失败: {e}"))?;
+    let out = cmd.output().map_err(|e| crate::errcode::coded_kv("file_manager_open_failed", &[("detail", &e.to_string())]))?;
     if out.status.success() {
         Ok(())
     } else {

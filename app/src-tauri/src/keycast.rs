@@ -516,7 +516,7 @@ pub(crate) fn spawn_tap(on_key: KeyHandler) -> Result<TapHandle, String> {
             drop(tap);
             clear_handler_if_mine(gen);
         })
-        .map_err(|e| format!("keycast tap 线程启动失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("keycast_thread_failed", &[("detail", &e.to_string())]))?;
 
     match rx.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(runloop)) => Ok(TapHandle {

@@ -300,9 +300,9 @@ fn open_pin_editor(
 ) -> Result<(), String> {
     let app = app.ok_or_else(|| crate::errcode::coded("apphandle_missing"))?;
     let png = hawksnap_core::crop::rgba_to_png(&rgba, w_px, h_px)
-        .map_err(|e| format!("贴图帧编码失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("pin_frame_encode_failed", &[("detail", &e.to_string())]))?;
     let path = pin_temp_path(id);
-    std::fs::write(&path, &png).map_err(|e| format!("临时文件写入失败: {e}"))?;
+    std::fs::write(&path, &png).map_err(|e| crate::errcode::coded_kv("tmp_write_failed", &[("detail", &e.to_string())]))?;
     crate::editor::editor_open(
         app,
         path.to_string_lossy().into_owned(),
@@ -476,9 +476,9 @@ fn do_pin_list() -> Vec<PinInfo> {
 fn decode_pin_png(png_base64: &str) -> Result<(Vec<u8>, u32, u32), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(png_base64.trim())
-        .map_err(|e| format!("PNG 数据解码失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("png_decode_failed", &[("detail", &e.to_string())]))?;
     let (rgba, w, h) =
-        hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| format!("截图文件解码失败: {e}"))?;
+        hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     if w == 0 || h == 0 {
         return Err(crate::errcode::coded("file_empty_image"));
     }

@@ -121,7 +121,7 @@ pub fn set_settings(app: AppHandle, s: Settings) -> Result<Settings, String> {
     // async 命令跑在 tokio 线程，安全）。注销本身失败同样视为注册侧失败 → Err 不落盘。
     app.global_shortcut()
         .unregister_all()
-        .map_err(|e| format!("注销旧热键失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("hotkey_unbind_failed", &[("detail", &e.to_string())]))?;
     let path = settings_path(&app);
     // 保存管线（可测内核）：sanitize → 按序注册热键（任一失败 → Err 且不落盘，文件保持
     // 旧值）→ 自启切换（best-effort，仅在与文件旧值不同时执行）→ 落盘 → 返回生效设置。

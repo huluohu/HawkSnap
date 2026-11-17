@@ -20,7 +20,7 @@ fn models_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("无法定位应用数据目录: {e}"))?
+        .map_err(|e| crate::errcode::coded_kv("models_dir_missing", &[("detail", &e.to_string())]))?
         .join("models"))
 }
 
@@ -210,7 +210,7 @@ pub fn ocr_export_txt(path: String, text: String) -> Result<String, String> {
         return Err(crate::errcode::coded_kv("ocr_source_missing", &[("path", &path)]));
     }
     let txt_path = p.with_extension("txt");
-    std::fs::write(&txt_path, text.as_bytes()).map_err(|e| format!("写入文本文件失败: {e}"))?;
+    std::fs::write(&txt_path, text.as_bytes()).map_err(|e| crate::errcode::coded_kv("txt_write_failed", &[("detail", &e.to_string())]))?;
     Ok(txt_path.to_string_lossy().into_owned())
 }
 

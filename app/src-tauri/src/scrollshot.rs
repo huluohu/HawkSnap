@@ -472,7 +472,7 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
             stitched.height,
         )
         .map_err(|e| e.to_string())?;
-        std::fs::write(&path, &png).map_err(|e| format!("保存失败: {e}"))?;
+        std::fs::write(&path, &png).map_err(|e| crate::errcode::coded_kv("scrollshot_save_failed", &[("detail", &e.to_string())]))?;
         // 缩略图 = **首帧**（plan 契约：thumb 取首帧——它是长图顶部，网格里一眼能认出）。
         // **旁路语义**：缩略图失败**不影响**主产物（长图已落盘）——记日志、缩略图
         // 留空（前端有占位块分支），绝不因缩略图把整次长截图判为失败。

@@ -186,5 +186,15 @@
   "err.perm_deep_link_macos_only": "System Settings deep links are macOS-only",
   "err.open_url_invalid": "Only http/https URLs are allowed",
   "err.perm_settings_open_failed": "Failed to open System Settings: {detail}",
-  "err.open_url_failed": "Failed to open the link: {detail}"
+  "err.open_url_failed": "Failed to open the link: {detail}",
+  "err.pin_frame_encode_failed": "Failed to encode the pin frame: {detail}",
+  "err.models_dir_missing": "Cannot locate the app data directory: {detail}",
+  "err.txt_write_failed": "Failed to write the text file: {detail}",
+  "err.gif_file_create_failed": "Failed to create the GIF output file: {path} ({detail})",
+  "err.gif_dim_exceeds": "GIF frame size exceeds the encoder limit (u16)",
+  "err.gif_encoder_init_failed": "Failed to initialize the GIF encoder: {detail}",
+  "err.gif_loop_set_failed": "Failed to set the GIF loop setting: {detail}",
+  "err.gif_frame_write_failed": "Failed to write GIF frame {frame}: {detail}",
+  "err.keycast_thread_failed": "Failed to start the keycast thread: {detail}",
+  "err.file_manager_open_failed": "Failed to launch the file manager: {detail}"
 }

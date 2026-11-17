@@ -186,5 +186,15 @@
   "err.perm_deep_link_macos_only": "系统设置深链仅 macOS 支持",
   "err.open_url_invalid": "仅支持 http/https 链接",
   "err.perm_settings_open_failed": "打开系统设置失败：{detail}",
-  "err.open_url_failed": "打开链接失败：{detail}"
+  "err.open_url_failed": "打开链接失败：{detail}",
+  "err.pin_frame_encode_failed": "贴图帧编码失败：{detail}",
+  "err.models_dir_missing": "无法定位应用数据目录：{detail}",
+  "err.txt_write_failed": "写入文本文件失败：{detail}",
+  "err.gif_file_create_failed": "创建 GIF 输出文件失败：{path}（{detail}）",
+  "err.gif_dim_exceeds": "GIF 帧尺寸超出编码上限（u16）",
+  "err.gif_encoder_init_failed": "GIF 编码器初始化失败：{detail}",
+  "err.gif_loop_set_failed": "GIF 循环设置失败：{detail}",
+  "err.gif_frame_write_failed": "GIF 帧写入失败（第 {frame} 帧）：{detail}",
+  "err.keycast_thread_failed": "按键显示线程启动失败：{detail}",
+  "err.file_manager_open_failed": "启动文件管理器失败：{detail}"
 }

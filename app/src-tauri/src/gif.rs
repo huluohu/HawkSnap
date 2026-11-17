@@ -88,15 +88,15 @@ pub(crate) fn encode_gif(frames: &[GifFrame], out: &Path) -> Result<GifOutcome, 
     let first_pts = first.pts;
 
     let file = std::fs::File::create(out)
-        .map_err(|e| format!("创建 GIF 输出文件 {} 失败: {e}", out.display()))?;
+        .map_err(|e| crate::errcode::coded_kv("gif_file_create_failed", &[("path", &out.display().to_string()), ("detail", &e.to_string())]))?;
     // gif crate 的宽高是 u16（抽帧通道已钳最长边 ≤800，必不溢出）
-    let (w16, h16) = (u16::try_from(w).map_err(|_| "GIF 宽度超出 u16".to_string())?,
-                     u16::try_from(h).map_err(|_| "GIF 高度超出 u16".to_string())?);
+    let (w16, h16) = (u16::try_from(w).map_err(|_| crate::errcode::coded("gif_dim_exceeds"))?,
+                     u16::try_from(h).map_err(|_| crate::errcode::coded("gif_dim_exceeds"))?);
     let mut encoder = Encoder::new(std::io::BufWriter::new(file), w16, h16, &[])
-        .map_err(|e| format!("GIF 编码器初始化失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("gif_encoder_init_failed", &[("detail", &e.to_string())]))?;
     encoder
         .set_repeat(Repeat::Infinite)
-        .map_err(|e| format!("GIF 循环设置失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("gif_loop_set_failed", &[("detail", &e.to_string())]))?;
     let deadline = Instant::now() + GIF_ENCODE_DEADLINE;
 
     // PTS 全序列归零一次（delay 映射 + 时长共用），避免逐帧 O(n²) 重建。
@@ -113,15 +113,15 @@ pub(crate) fn encode_gif(frames: &[GifFrame], out: &Path) -> Result<GifOutcome, 
         // 相对量化编码成本可忽略。0.13 的该构造函数直接返回 Self（infallible）。
         let mut rgba = f.rgba.clone();
         let mut frame = Frame::from_rgba_speed(
-            u16::try_from(f.width).map_err(|_| "GIF 帧宽超出 u16".to_string())?,
-            u16::try_from(f.height).map_err(|_| "GIF 帧高超出 u16".to_string())?,
+            u16::try_from(f.width).map_err(|_| crate::errcode::coded("gif_dim_exceeds"))?,
+            u16::try_from(f.height).map_err(|_| crate::errcode::coded("gif_dim_exceeds"))?,
             &mut rgba,
             GIF_SPEED,
         );
         frame.delay = frame_delay_10ms(&pts, i);
         encoder
             .write_frame(&frame)
-            .map_err(|e| format!("GIF 帧写入失败（帧 {i}）: {e}"))?;
+            .map_err(|e| crate::errcode::coded_kv("gif_frame_write_failed", &[("frame", &i.to_string()), ("detail", &e.to_string())]))?;
     }
 
     let last = frames.last().expect("frames 非空已验");
