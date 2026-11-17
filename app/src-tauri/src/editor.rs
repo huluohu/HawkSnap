@@ -52,11 +52,14 @@ pub enum EditorOrigin {
     Capture,
 }
 
-/// hawk://editor-load 载荷（serde camelCase 对齐前端 `e.payload.path/origin`）。
+/// hawk://editor-load 载荷（serde camelCase 对齐前端 `e.payload.path/origin/runOcr`）。
+/// run_ocr（v1.2）：动作浮条「OCR」入口经 annotate_crop 传入 true——编辑器装载后
+/// 自动跑一次识别（结果面板即开），用户少点一次按钮；贴图/历史入口恒 false。
 #[derive(Clone, serde::Serialize)]
 struct EditorLoadPayload {
     path: String,
     origin: Option<EditorOrigin>,
+    run_ocr: bool,
 }
 
 /// M2 Task M1：打开标注编辑器装载指定 PNG。流程：校验（存在 + 可解码）→ 建窗或
@@ -64,7 +67,12 @@ struct EditorLoadPayload {
 /// overlay-ready 同款冷加载竞态契约）：首建的 webview 冷加载期早于前端 listen 注册
 /// 时首条 emit 必丢，前端以**收到的最后一条**为准；补发在独立线程，命令立即返回。
 #[tauri::command(async)]
-pub fn editor_open(app: AppHandle, path: String, origin: Option<EditorOrigin>) -> Result<(), String> {
+pub fn editor_open(
+    app: AppHandle,
+    path: String,
+    origin: Option<EditorOrigin>,
+    run_ocr: bool,
+) -> Result<(), String> {
     // 校验：文件存在 + PNG 可解码（ Hawksnap 编辑器只吃自家保存的 PNG；解码顺带
     // 验证非空/非损坏。几 MB 级解码在命令线程，不卡事件循环）。
     if path.trim().is_empty() {
@@ -86,7 +94,7 @@ pub fn editor_open(app: AppHandle, path: String, origin: Option<EditorOrigin>) -
 
     // emit 三连发：首条 + 独立线程 2 条补发 @150ms（覆盖层同款，无代数守卫——编辑器
     // 无流程代数概念，最后到的 path 即生效，重复 emit 同 path 幂等）。
-    let payload = EditorLoadPayload { path, origin };
+    let payload = EditorLoadPayload { path, origin, run_ocr };
     let app2 = app.clone();
     let repeats = payload.clone();
     std::thread::spawn(move || {
@@ -111,7 +119,13 @@ fn ensure_editor_window(app: &AppHandle) -> Result<(), String> {
         EDITOR_LABEL,
         WebviewUrl::App("editor?window=editor".into()),
     )
-    .title("HawkSnap 编辑器") // 窗口标题静态（原生 titlebar 不走 t()；G6 范围外，注记）
+    // 窗口标题随设置语言（v1.2 i18n 修复——Dock/调度器可见的用户可见文案，不再
+    // 以「原生 titlebar 不走 t()」豁免：硬编码中文对 en-US 用户同样是外语）。
+    .title(if crate::rust_lang_zh(&crate::settings::Settings::load(app)) {
+        "HawkSnap 编辑器"
+    } else {
+        "HawkSnap Editor"
+    })
     .inner_size(960.0, 640.0)
     .min_inner_size(720.0, 480.0)
     .resizable(true)

@@ -67,8 +67,7 @@
   "overlay.annotate": "标注",
   "overlay.ocr": "OCR",
   "overlay.gif": "GIF",
-  "overlay.comingSoon": "即将推出",
-  "overlay.picker.hint": "拾色中 · 点击复制 HEX，Esc 退出",
+  "overlay.picker.hint": "拾色中 · 点击复制 HEX，Shift+点击复制 RGB，Esc 退出",
   "overlay.picker.copied": "已复制 {color}",
   "overlay.record.hint": "拖选要录制的区域，Enter 全屏",
   "editor.toolbar": "编辑器工具栏",
@@ -133,5 +132,10 @@
   "plugin.status.unknown": "检测中…",
   "plugin.extIdLabel": "扩展 ID",
   "plugin.extIdPlaceholder": "<填入扩展 ID>",
-  "plugin.installHint": "安装：先运行 scripts/install-native-host.sh 注册宿主，再把扩展 ID 填入插件清单的 allowed_origins。"
+  "plugin.installHint": "安装：先运行 scripts/install-native-host.sh 注册宿主，再把扩展 ID 填入插件清单的 allowed_origins。",
+  "overlay.settings": "更多设置",
+  "overlay.ocrTip": "识别选区中的文字并进入编辑器",
+  "overlay.frameError": "冻结帧加载失败：{message}（按 Esc 退出后重按截图键重试）",
+  "countdown.hint": "点击此处取消",
+  "countdown.aria": "延时截图倒计时 {secs} 秒"
 }

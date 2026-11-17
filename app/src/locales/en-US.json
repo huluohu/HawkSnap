@@ -67,8 +67,7 @@
   "overlay.annotate": "Annotate",
   "overlay.ocr": "OCR",
   "overlay.gif": "GIF",
-  "overlay.comingSoon": "Coming soon",
-  "overlay.picker.hint": "Picking color · click to copy HEX, Esc to exit",
+  "overlay.picker.hint": "Picking color · click to copy HEX, Shift+click for RGB, Esc to exit",
   "overlay.picker.copied": "Copied {color}",
   "overlay.record.hint": "Drag to select the area to record, Enter for full screen",
   "editor.toolbar": "Editor toolbar",
@@ -133,5 +132,10 @@
   "plugin.status.unknown": "Checking…",
   "plugin.extIdLabel": "Extension ID",
   "plugin.extIdPlaceholder": "<extension ID>",
-  "plugin.installHint": "Setup: run scripts/install-native-host.sh to register the host, then put the extension ID into the manifest's allowed_origins."
+  "plugin.installHint": "Setup: run scripts/install-native-host.sh to register the host, then put the extension ID into the manifest's allowed_origins.",
+  "overlay.settings": "More settings",
+  "overlay.ocrTip": "Recognize text in the selection and open the editor",
+  "overlay.frameError": "Failed to load frozen frame: {message} (press Esc, then trigger capture again)",
+  "countdown.hint": "Click to cancel",
+  "countdown.aria": "Delayed capture countdown {secs} seconds"
 }

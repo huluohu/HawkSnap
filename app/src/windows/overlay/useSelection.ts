@@ -34,12 +34,28 @@ export function useSelection(opts: {
   // reset() 也必须清掉本标志——否则上一轮失败/中断的在途守卫会砖死下一轮确认。
   const confirmingRef = useRef(false);
 
+  // 拖拽中间态即取整（0.1 hotfix 的彻底版）：缩放屏 clientX/Y 可为小数，此前只在
+  // confirm/annotate 出口取整，「标注」按钮漏修导致 serde 在 IPC 层拒绝浮点。取整
+  // 下沉到 norm()——rect 全链恒为整数，所有出口（confirm/annotate/pin/GIF）天然
+  // 安全；渲染期的亚像素损失不可感知（选区描边本来落在整数物理像素上）。
   const norm = (a: Point, b: Point): SelRect => ({
-    x: Math.max(0, Math.min(a.clientX, b.clientX)),
-    y: Math.max(0, Math.min(a.clientY, b.clientY)),
-    w: Math.abs(a.clientX - b.clientX),
-    h: Math.abs(a.clientY - b.clientY),
+    x: Math.round(Math.max(0, Math.min(a.clientX, b.clientX))),
+    y: Math.round(Math.max(0, Math.min(a.clientY, b.clientY))),
+    w: Math.round(Math.abs(a.clientX - b.clientX)),
+    h: Math.round(Math.abs(a.clientY - b.clientY)),
   });
+
+  // 拖拽磁吸（§3.1「边缘 8px 磁吸」）：鼠标主路径此前完全没有磁吸（只在方向键微调
+  // 分支生效）。move 的 norm 结果过一遍 snapRect（最近单边 8px），再夹回 bounds——
+  // 与键盘分支同一套几何语义。选区超出 display（指针拖到邻屏）或过小时跳过磁吸：
+  // nudgeRect 对 w>bounds.w 的夹取会产生负 x（钳位公式的前提是 w ≤ bounds.w）。
+  const dragRect = (raw: SelRect): SelRect => {
+    const bounds = opts.bounds;
+    if (bounds && raw.w >= 2 && raw.h >= 2 && raw.w <= bounds.w && raw.h <= bounds.h) {
+      return nudgeRect(snapRect(raw, opts.candidatesRef?.current ?? [], 8), 0, 0, bounds);
+    }
+    return raw;
+  };
 
   const pointerHandlers = {
     // down 不清 rect：保留既有选区，dblclick（down#2→up#2 后触发）才能确认；
@@ -47,7 +63,7 @@ export function useSelection(opts: {
     onPointerDown: (e: Point) => { start.current = e; setPhase("dragging"); },
     onPointerMove: (e: Point) => {
       if (phase !== "dragging" || !start.current) return;
-      setRect(norm(start.current, e));
+      setRect(dragRect(norm(start.current, e)));
     },
     onPointerUp: (_: Point) => {
       if (phase !== "dragging") return;

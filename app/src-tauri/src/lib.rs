@@ -35,45 +35,119 @@ mod updater;
 
 use tauri::AppHandle;
 
+/// Rust 侧用户可见文案（托盘/窗口标题）的语言解析：settings.language 显式
+/// zh-CN/en-US 直接生效；"system" 做 best-effort 探测——读 LC_ALL/LC_MESSAGES/LANG
+/// 环境变量（zh* 前缀 → 中文），其余（含 Windows：通常无这三个变量）回退英文。
+/// 中文 Windows 用户在设置页显式选「简体中文」后即恒为中文（set_settings 重建
+/// 托盘菜单的管线已存在）。刻意不为此引入 sys-locale 依赖：Cargo.lock 无法在本机
+/// 刷新（开发机禁跑构建），依赖变更必须整批走 CI 验证——文案语言不值得担这个风险。
+pub(crate) fn rust_lang_zh(settings: &settings::Settings) -> bool {
+    if settings.language == "zh-CN" {
+        return true;
+    }
+    if settings.language == "en-US" {
+        return false;
+    }
+    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(v) = std::env::var(key) {
+            if v.to_ascii_lowercase().starts_with("zh") {
+                return true;
+            }
+            if !v.trim().is_empty() {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// 托盘菜单文案表（v1.2 i18n 修复）：此前 10 项全部硬编码中文——en-US 用户的托盘
+/// 全中文，违反 §3.7「所有 UI 文案走 key」。Rust 侧不走前端词典（webview localStorage
+/// 不可达），按 rust_lang_zh 二选一；菜单项 **id 恒定**（分派与文案解耦，重建后
+/// 同一处理器继续命中），语言切换 = set_settings 重建菜单（管线已在）。
+struct TrayTexts {
+    panel: &'static str,
+    settings: &'static str,
+    shot: &'static str,
+    fullscreen: &'static str,
+    scrollshot: &'static str,
+    scrollshot_stop: &'static str,
+    quit: &'static str,
+    pin_close_all: &'static str,
+    delay: &'static str,
+    delay_cancel: &'static str,
+    sec_suffix: &'static str,
+}
+
+const TRAY_ZH: TrayTexts = TrayTexts {
+    panel: "主面板",
+    settings: "设置…",
+    shot: "截图",
+    fullscreen: "全屏截图",
+    scrollshot: "长截图",
+    scrollshot_stop: "停止长截图",
+    quit: "退出猎影 HawkSnap",
+    pin_close_all: "关闭全部贴图",
+    delay: "延时截图",
+    delay_cancel: "取消倒计时",
+    sec_suffix: " 秒",
+};
+
+const TRAY_EN: TrayTexts = TrayTexts {
+    panel: "Main Panel",
+    settings: "Settings…",
+    shot: "Capture",
+    fullscreen: "Full-Screen Capture",
+    scrollshot: "Scrolling Capture",
+    scrollshot_stop: "Stop Scrolling Capture",
+    quit: "Quit HawkSnap",
+    pin_close_all: "Close All Pins",
+    delay: "Delayed Capture",
+    delay_cancel: "Cancel Countdown",
+    sec_suffix: "s",
+};
+
 /// 托盘菜单构建（M3 继承项⑦）：setup 与 set_settings 共用的**单一代码路径**。
 /// 菜单项文案随 settings 动态——热键组合变更后菜单即时反映（如「截图 (F1)」→
 /// 「截图 (F9)」）；恒定项（主面板/关闭全部贴图/延时子菜单/退出）不依赖设置。
-/// 菜单项 **id 恒定**（panel/shot/pin-close-all/delay-*/quit）——on_menu_event 的
-/// 分派挂在 TrayIcon 上、与菜单本体解耦，重建后同一处理器继续命中。
 pub fn build_tray_menu(
     app: &AppHandle,
     settings: &settings::Settings,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, Submenu};
+    let t = if rust_lang_zh(settings) { TRAY_ZH } else { TRAY_EN };
     // C6 主面板：启动零窗口后唯一的常驻面板入口（热键失败路径会自动拉起，
     // 但用户主动打开面板的常规路径在这里）。
-    let panel = MenuItem::with_id(app, "panel", "主面板", true, None::<&str>)?;
+    let panel = MenuItem::with_id(app, "panel", t.panel, true, None::<&str>)?;
     // M3 设置页重做：独立的设置窗口（侧栏分区 + 卡片）——与主面板分工，见
     // settings_window.rs 模块注。
-    let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
-    let shot_label = format!("截图 ({})", settings.hotkey_capture);
+    let settings_item = MenuItem::with_id(app, "settings", t.settings, true, None::<&str>)?;
+    let shot_label = format!("{} ({})", t.shot, settings.hotkey_capture);
     let shot = MenuItem::with_id(app, "shot", shot_label, true, None::<&str>)?;
+    // v1.2：全屏截图一键入口（§3.1 三模式之「全屏」——此前只能靠「悬停空白→整屏
+    // 高亮→单击」的隐藏交互）。多显示器每屏分别落盘入库，剪贴板取主显示器。
+    let fullscreen = MenuItem::with_id(app, "fullscreen", t.fullscreen, true, None::<&str>)?;
     // N5：长截图（滚动捕获 + 拼接）。无独立热键——托盘入口 + 覆盖层选区。
-    let scrollshot = MenuItem::with_id(app, "scrollshot", "长截图", true, None::<&str>)?;
+    let scrollshot = MenuItem::with_id(app, "scrollshot", t.scrollshot, true, None::<&str>)?;
     // N5：停止长截图（I4：⌘S 注册失败 / 用户想提前结束时的托盘出口）。
     // 恒显示（与「取消倒计时」同款口径）：无会话时调用返回 Err → 横幅提示。
-    let scrollshot_stop = MenuItem::with_id(app, "scrollshot-stop", "停止长截图", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出猎影 HawkSnap", true, None::<&str>)?;
+    let scrollshot_stop = MenuItem::with_id(app, "scrollshot-stop", t.scrollshot_stop, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", t.quit, true, None::<&str>)?;
     // C5 贴图：关闭全部贴图恒可用（无贴图时调用为空操作，不做动态
     // enable/disable——省去菜单项状态的跨线程同步，与延时子菜单同口径）。
     let pin_close_all =
-        MenuItem::with_id(app, "pin-close-all", "关闭全部贴图", true, None::<&str>)?;
+        MenuItem::with_id(app, "pin-close-all", t.pin_close_all, true, None::<&str>)?;
     // spec §3.1：延时截图 1/2/3/5 秒可选 + 「取消倒计时」恒可用（非活动期
     // 调用返回 Err，调用方 eprintln 吞掉——不做动态 enable/disable，省去
     // 菜单项状态的跨线程同步）。
-    let delay_1 = MenuItem::with_id(app, "delay-1", "1 秒", true, None::<&str>)?;
-    let delay_2 = MenuItem::with_id(app, "delay-2", "2 秒", true, None::<&str>)?;
-    let delay_3 = MenuItem::with_id(app, "delay-3", "3 秒", true, None::<&str>)?;
-    let delay_5 = MenuItem::with_id(app, "delay-5", "5 秒", true, None::<&str>)?;
+    let delay_1 = MenuItem::with_id(app, "delay-1", format!("1{}", t.sec_suffix), true, None::<&str>)?;
+    let delay_2 = MenuItem::with_id(app, "delay-2", format!("2{}", t.sec_suffix), true, None::<&str>)?;
+    let delay_3 = MenuItem::with_id(app, "delay-3", format!("3{}", t.sec_suffix), true, None::<&str>)?;
+    let delay_5 = MenuItem::with_id(app, "delay-5", format!("5{}", t.sec_suffix), true, None::<&str>)?;
     let delay_cancel =
-        MenuItem::with_id(app, "delay-cancel", "取消倒计时", true, None::<&str>)?;
+        MenuItem::with_id(app, "delay-cancel", t.delay_cancel, true, None::<&str>)?;
     let delay_menu = Submenu::with_id_and_items(
-        app, "delay-submenu", "延时截图", true,
+        app, "delay-submenu", t.delay, true,
         &[&delay_1, &delay_2, &delay_3, &delay_5, &delay_cancel],
     )?;
     Menu::with_items(
@@ -82,6 +156,7 @@ pub fn build_tray_menu(
             &panel,
             &settings_item,
             &shot,
+            &fullscreen,
             &scrollshot,
             &scrollshot_stop,
             &pin_close_all,
@@ -123,7 +198,8 @@ pub fn run() {
         // 兜底（检查返回「未配置」语义）。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            commands::capture_screens, commands::finish_capture, commands::annotate_crop,
+            commands::capture_screens, commands::capture_fullscreen, commands::finish_capture,
+            commands::annotate_crop, commands::pin_from_selection,
             commands::hide_overlays_after_annotate,
             overlay::cancel_capture, overlay::emit_capture_done,
             overlay::hotkey_error, overlay::snap_candidates,
@@ -290,6 +366,22 @@ pub fn run() {
                                 }
                             });
                         }
+                        // v1.2 全屏截图：线程派发同 shot（抓帧链禁主线程）。async 命令从
+                        // 独立线程直呼需 block_on（与 start_capture_flow 内部同款纪律）；
+                        // 失败走 capture-error 横幅（与 shot 同口径，不静默）。
+                        "fullscreen" => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if crate::bench_mode::is_running() {
+                                    return;
+                                }
+                                if let Err(e) =
+                                    tauri::async_runtime::block_on(commands::capture_fullscreen(app.clone()))
+                                {
+                                    panel::show_capture_error(&app, e);
+                                }
+                            });
+                        }
                         // N5 长截图入口：线程派发同 shot（建覆盖层禁主线程）；
                         // 失败走 capture-error 横幅（与 shot 同口径，不静默）。
                         "scrollshot" => {
@@ -330,14 +422,15 @@ pub fn run() {
                             });
                         }
                         // 延时入口：线程派发同 shot（start_delayed_capture 建窗禁主线程）；
-                        // 失败（门闩占用/建窗失败）与 shot 同口径走 capture-error。
+                        // 失败（门闩占用/建窗失败）与 shot 同口径走 capture-error。此前直接
+                        // emit——主面板不存在时 push 事件无窗可显，错误静默丢失（审计修复：
+                        // 改 show_capture_error，先懒拉面板再 emit，与托盘 shot 同口径）。
                         id @ ("delay-1" | "delay-2" | "delay-3" | "delay-5") => {
                             let secs = id.trim_start_matches("delay-").parse::<u64>().unwrap_or(0);
                             let app = app.clone();
                             std::thread::spawn(move || {
                                 if let Err(e) = overlay::start_delayed_capture(app.clone(), secs) {
-                                    let _ =
-                                        tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                                    panel::show_capture_error(&app, e);
                                 }
                             });
                         }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { listen } from "@tauri-apps/api/event";
@@ -55,7 +55,9 @@ async function fetchRaw(url: string): Promise<ArrayBuffer> {
 export default function OverlayWindow() {
   // 语言（D1 + 评审修正）：订阅 i18n 语言态——面板保存新语言后，此处的 setLanguage
   // 触发本组件重渲染，下一轮捕获的动作浮条文案即新语言（覆盖层常驻复用、无挂载时机）。
-  useSyncExternalStore(subscribe, getLanguage);
+  // 返回值（当前语言）供浮条实测定位的 effect 依赖：语言切换 → 按钮文案长度变化 →
+  // 必须重测浮条宽度，否则右缘选区的浮条按旧宽度夹取会越出屏幕。
+  const lang = useSyncExternalStore(subscribe, getLanguage);
   const [display, setDisplay] = useState<Display | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // 覆盖层窗口常驻复用（Plan B Task 1）：页面生命周期跨越多轮捕获，此标志每轮 payload
@@ -68,8 +70,13 @@ export default function OverlayWindow() {
   // 已见最大 payload 代数（终审 wave）：Rust 每轮流程分配单调递增的 flow 写入 payload，
   // 300ms 补发线程可能在新一轮已启动后才发射旧代 payload——旧代迟到补发若放行，会用
   // raw 文件已被新一轮删除的陈旧 payload 重绘（画布冻结）并 reset() 杀掉在途拖拽。
-  // payload.flow < maxFlow 直接丢弃；等值（同代补发）放行（首发射丢时的补显仍依赖它）。
+  // payload.flow < maxFlow 直接丢弃。
   const maxFlowRef = useRef(0);
+  // 已完成「新一轮初始化」的最大代数：同代补发（+150/+300ms）在首轮已处理后整段跳过
+  // ——补发的职责只是「首发射丢失时的补显」，首轮已 reset/setDisplay 过，再走一遍会把
+  // phase 拉回 idle、清掉 start/rect：快速用户（<300ms 就开始拖拽，正是 ≤150ms 产品
+  // 指标的目标人群）刚开始的拖拽会被补发冻结、选区凭空消失。
+  const shownFlowRef = useRef(0);
   // Task 4 磁吸候选（display 本地坐标）：每轮 payload 到达时经 snap_candidates 拉取一次
   // （窗口在两轮之间会变化，必须逐轮刷新），首帧置空避免用到上一轮的陈旧候选。
   const candidatesRef = useRef<Rect[]>([]);
@@ -89,6 +96,9 @@ export default function OverlayWindow() {
   // 提示横幅文案、确认路由到 scrollshot_start（进入滚动采集会话）、动作浮条缺席。
   const scrollshotMode = display?.intent === "scrollshot";
   const [recordError, setRecordError] = useState<string | null>(null);
+  // 冻结帧装载失败的行内错误（§9 失败不静默）：此前仅 console.error——画布为空 =
+  // 透明窗，用户对着「未冻结的实时桌面」框选，所见与裁剪结果不一致且毫无提示。
+  const [frameError, setFrameError] = useState<string | null>(null);
   // N2 输出格式（录制横幅分段开关，默认 MP4）。**每轮选区流程复位**（终审 review
   // wave I3）：覆盖层窗口常驻复用 → 该 state 跨轮存活；旧实现把它留到下一轮，
   // 导致「上一轮选过的格式」无声地套用到本次录制——尤其在长截图轮里用户**根本
@@ -278,18 +288,21 @@ export default function OverlayWindow() {
   // 复制剪贴板 + 存 save_dir 入库，契约在 Rust editor.rs「来源契约」）。
   // 评审 Finding 1：hide 从命令侧拆出——annotate_crop 只裁剪+落盘+开编辑器，成功返回
   // 且本轮未被新流程作废（flowRef 守卫，与 emit_capture_done 同款、权威在前端）后才
-  // invoke hide_overlays_after_annotate；否则旧链迟到的 hide 会藏掉新一轮刚 show 的
-  // 覆盖层并 release 新一轮 CAPTURES（冷编辑器建窗 ~100-600ms 的窗口期）。
+  // invoke hide_overlays_after_annotate；否则旧链迟到的 hide 会藏掉新一轮刚 show
+  // 的覆盖层并 release 新一轮 CAPTURES（冷编辑器建窗 ~100-600ms 的窗口期）。
   // 评审 Minor 2：在途守卫（confirm 同款 ref 模式）——标注在途时拒绝第二次 invoke。
   // 失败路径：capture-error 横幅，覆盖层保持可重试（不 hide）。
+  // §3.1 动作浮条「OCR」：复用标注链（编辑器内 OCR 面板已交付），runOcr=true 让
+  // 编辑器装载后自动跑一次识别——不进编辑器就看不到结果，这个折中比把 OCR 管线
+  // 再铺一份到覆盖层便宜得多，语义仍是「对选区出文字」。
   const annotateInFlightRef = useRef(false);
-  const annotate = async () => {
+  const annotate = async (runOcr = false) => {
     if (!display || !rect || annotateInFlightRef.current) return;
     annotateInFlightRef.current = true;
     const myFlow = flowRef.current;
     try {
       await invoke("annotate_crop", {
-        req: { displayId: display.displayId, rect, copy: false, save: false },
+        req: { displayId: display.displayId, rect, copy: false, save: false, runOcr },
       });
       if (flowRef.current !== myFlow) return; // 已被新一轮作废：hide 权归新流程
       await invoke("hide_overlays_after_annotate");
@@ -300,6 +313,54 @@ export default function OverlayWindow() {
     } finally {
       annotateInFlightRef.current = false;
     }
+  };
+
+  // §3.1 动作浮条「贴图」：当前选区裁剪直建贴图窗口（pin_from_selection，RGBA 直通
+  // 不落盘）→ 成功且本轮未被作废后收口覆盖层（与 annotate 同款 hide 半程）。
+  const pinSelection = async () => {
+    if (!display || !rect || annotateInFlightRef.current) return;
+    annotateInFlightRef.current = true;
+    const myFlow = flowRef.current;
+    try {
+      await invoke("pin_from_selection", {
+        req: { displayId: display.displayId, rect, copy: false, save: false },
+      });
+      if (flowRef.current !== myFlow) return;
+      await invoke("hide_overlays_after_annotate");
+    } catch (err) {
+      if (flowRef.current !== myFlow) return;
+      console.error("pin_from_selection failed", err);
+      void emit("hawk://capture-error", String(err));
+    } finally {
+      annotateInFlightRef.current = false;
+    }
+  };
+
+  // §3.1 动作浮条「录 GIF」：按当前选区直接以 GIF 格式开始录制（record_start_region
+  // 与录制模式确认同链；成功由 Rust 收口隐藏覆盖层，失败覆盖层保留 + 横幅）。
+  const gifFromSelection = async () => {
+    if (!display || !rect || annotateInFlightRef.current) return;
+    annotateInFlightRef.current = true;
+    const myFlow = flowRef.current;
+    try {
+      await invoke("record_start_region", {
+        req: { displayId: display.displayId, rect, format: "gif" },
+      });
+    } catch (err) {
+      if (flowRef.current !== myFlow) return;
+      console.error("record_start_region (gif) failed", err);
+      void emit("hawk://capture-error", String(err));
+    } finally {
+      annotateInFlightRef.current = false;
+    }
+  };
+
+  // §3.1 动作浮条「更多设置」：打开独立设置窗口（主面板同款入口）。
+  const openSettingsFromBar = () => {
+    invoke("open_settings").catch((err) => {
+      console.error("open_settings failed", err);
+      void emit("hawk://capture-error", String(err));
+    });
   };
 
   useEffect(() => {
@@ -315,9 +376,13 @@ export default function OverlayWindow() {
           .then((s) => setLanguage(s.language as LanguageSetting))
           .catch(() => {});
         // 代数守卫（终审 wave）：旧代迟到 payload 直接丢弃（见 maxFlowRef 注），
-        // 绝不 setDisplay / reset。等值放行：同代的三连发补显仍生效。
+        // 绝不 setDisplay / reset。
         if (mine.flow < maxFlowRef.current) return;
         maxFlowRef.current = mine.flow;
+        // 同代补发判重：首轮已做过「新一轮初始化」就整段跳过（见 shownFlowRef 注），
+        // 补发只剩「首发射丢失」时的兜底职责。
+        if (shownFlowRef.current === mine.flow) return;
+        shownFlowRef.current = mine.flow;
         setDisplay(mine);          // 新对象身份必触发重绘 effect
         reset();                   // 新一轮捕获：清选区与 in-flight 守卫
         setHoverRect(null);        // 新一轮：清上一轮的悬停框（否则 idle 态会画陈旧高亮）
@@ -325,6 +390,8 @@ export default function OverlayWindow() {
         setPickerMode(false);
         pickerDownRef.current = null;
         setCopied(null);
+        // 新一轮：清上一轮的冻结帧加载错误（本轮重试装载）
+        setFrameError(null);
         // N1：清上一轮的录制启动错误（新一轮 payload 到达 = 覆盖层复活，横幅回到提示态）
         setRecordError(null);
         // N2 输出格式复位为默认 MP4（终审 review wave I3）：格式是**本轮显式**的选择，
@@ -453,10 +520,11 @@ export default function OverlayWindow() {
     }
   };
 
-  // 拾取：退出拾色 → 光标处采样 → 复制 HEX → 「已复制」闪样 1.4s（同 editor 闪样
-  // 模式：state + 定时器）。帧缓冲不可用仅退出（不闪假成功）。flow 守卫：复制在途
-  // 时新一轮 payload 已到（窗口可能已隐藏重用），迟到的闪样不得写进新一轮。
-  const pickAt = (cx: number, cy: number) => {
+  // 拾取：退出拾色 → 光标处采样 → 复制 HEX（Shift+点击复制 RGB，§3.3「复制 HEX/RGB」）
+  // → 「已复制」闪样 1.4s（同 editor 闪样模式：state + 定时器）。帧缓冲不可用仅退出
+  // （不闪假成功）。flow 守卫：复制在途时新一轮 payload 已到（窗口可能已隐藏重用），
+  // 迟到的闪样不得写进新一轮。
+  const pickAt = (cx: number, cy: number, copyRgb = false) => {
     setPickerMode(false);
     if (!display) return;
     const buf = frameBufRef.current;
@@ -464,19 +532,20 @@ export default function OverlayWindow() {
     const pw = Math.round(display.width * display.scale);
     const rgba = samplePixel(buf, pw, cx * display.scale, cy * display.scale);
     if (!rgba) return;
-    const hex = hexOf([rgba[0], rgba[1], rgba[2]]);
+    const rgb: Rgb = [rgba[0], rgba[1], rgba[2]];
+    const value = copyRgb ? rgbOf(rgb) : hexOf(rgb);
     const myFlow = flowRef.current;
-    void copyText(hex).then(() => {
+    void copyText(value).then(() => {
       if (flowRef.current !== myFlow) return;
-      setCopied(hex);
+      setCopied(value);
       if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
       copiedTimerRef.current = window.setTimeout(() => setCopied(null), 1400);
     });
   };
 
   // 拾色点击接管（包在 clickAwareHandlers 外）：down/up 都不放行选区状态机——拾色
-  // 期间选区保持原样。up 且按下发生在拾色内 → pickAt；按下早于拾色（拖拽中按 C 后
-  // 松开）→ 放行原 up 收尾拖拽态（那次按压不是拾取手势）。
+  // 期间选区保持原样。up 且按下发生在拾色内 → pickAt（Shift 按住 = 复制 RGB）；
+  // 按下早于拾色（拖拽中按 C 后松开）→ 放行原 up 收尾拖拽态（那次按压不是拾取手势）。
   const pickerAwareHandlers = {
     ...clickAwareHandlers,
     onPointerDown: (e: { clientX: number; clientY: number }) => {
@@ -486,7 +555,7 @@ export default function OverlayWindow() {
       }
       clickAwareHandlers.onPointerDown(e);
     },
-    onPointerUp: (e: { clientX: number; clientY: number }) => {
+    onPointerUp: (e: { clientX: number; clientY: number; shiftKey: boolean }) => {
       if (pickerMode) {
         const down = pickerDownRef.current;
         pickerDownRef.current = null;
@@ -494,7 +563,7 @@ export default function OverlayWindow() {
           clickAwareHandlers.onPointerUp(e);
           return;
         }
-        pickAt(e.clientX, e.clientY);
+        pickAt(e.clientX, e.clientY, e.shiftKey);
         return;
       }
       clickAwareHandlers.onPointerUp(e);
@@ -536,6 +605,7 @@ export default function OverlayWindow() {
     const draw = (buf: ArrayBuffer) => {
       if (buf.byteLength !== pw * ph * 4) {
         console.error(`冻结帧字节数不符：got ${buf.byteLength}, expect ${pw * ph * 4}`);
+        setFrameError(t("overlay.frameError", { message: `size ${buf.byteLength} ≠ ${pw * ph * 4}` }));
         return;
       }
       // M2 M5：字节长校验通过后缓存原始帧——拾色采样源（零 IPC，picker.ts 直索引）
@@ -573,30 +643,48 @@ export default function OverlayWindow() {
         ctx.strokeStyle = "#FFB020";
         ctx.lineWidth = 2;
         ctx.strokeRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+        // 尺寸标注：默认画选区下方右对齐；贴视口底缘放不下时翻到上方（与动作浮条
+        // barPosition 同款翻转逻辑），水平方向夹进视口左缘。
         const label = `${rect.w}×${rect.h}`;
         ctx.font = "13px system-ui, sans-serif";
         const tw = ctx.measureText(label).width + 12;
+        const belowY = rect.y + rect.h + 6;
+        const labelY = belowY + 20 > display.height ? rect.y - 26 : belowY;
+        const labelX = Math.max(0, Math.min(rect.x + rect.w - tw, display.width - tw));
         ctx.fillStyle = "#FFFFFF";
-        ctx.fillRect(rect.x + rect.w - tw, rect.y + rect.h + 6, tw, 20);
+        ctx.fillRect(labelX, labelY, tw, 20);
         ctx.fillStyle = "#0D1522";
-        ctx.fillText(label, rect.x + rect.w - tw + 6, rect.y + rect.h + 20);
+        ctx.fillText(label, labelX + 6, labelY + 14);
         // M2 M5 像素标尺：上/左边缘外侧 2px 起的刻度线（每 10px 短刻 4px、每 50px
         // 长刻 8px，半透明白）。纯 canvas 按当前 rect 现算、无新 state——拖拽与
         // 选中态都画（rect 非空即此两态），rect 变化天然随本 effect 刷新；选区
         // 过短（<20px）时 rulerTicks 返回空、整体跳过（只剩噪音的标尺不画）。
+        // 贴视口上/左缘（外侧刻度 <12px 空间）时翻到选区内侧画，不再被裁剪。
         if (rect.w >= 20 && rect.h >= 20) {
+          const rulerInsideTop = rect.y < 12;
+          const rulerInsideLeft = rect.x < 12;
           ctx.strokeStyle = "rgba(255,255,255,0.5)";
           ctx.lineWidth = 1;
           ctx.beginPath();
           for (const tk of rulerTicks(rect.w)) {
             const x = rect.x + tk.at + 0.5; // +0.5 对齐像素网格（dpr=1 下 1px 线不虚）
-            ctx.moveTo(x, rect.y - 2 - (tk.major ? 8 : 4));
-            ctx.lineTo(x, rect.y - 2);
+            if (rulerInsideTop) {
+              ctx.moveTo(x, rect.y + 2);
+              ctx.lineTo(x, rect.y + 2 + (tk.major ? 8 : 4));
+            } else {
+              ctx.moveTo(x, rect.y - 2 - (tk.major ? 8 : 4));
+              ctx.lineTo(x, rect.y - 2);
+            }
           }
           for (const tk of rulerTicks(rect.h)) {
             const y = rect.y + tk.at + 0.5;
-            ctx.moveTo(rect.x - 2 - (tk.major ? 8 : 4), y);
-            ctx.lineTo(rect.x - 2, y);
+            if (rulerInsideLeft) {
+              ctx.moveTo(rect.x + 2, y);
+              ctx.lineTo(rect.x + 2 + (tk.major ? 8 : 4), y);
+            } else {
+              ctx.moveTo(rect.x - 2 - (tk.major ? 8 : 4), y);
+              ctx.lineTo(rect.x - 2, y);
+            }
           }
           ctx.stroke();
         }
@@ -611,27 +699,52 @@ export default function OverlayWindow() {
     load.then((buf) => {
       if (!disposed) draw(buf);
     }).catch((err) => {
-      if (!disposed) console.error("冻结帧加载失败", err);
+      if (!disposed) setFrameError(t("overlay.frameError", { message: String(err) }));
     });
     return () => { disposed = true; };
   }, [rect, display, phase, hoverRect]);
+
+  // 动作浮条实测定位：BAR_W 常量跟不上按钮文案（双语 + 七动作）的真实宽度——右缘
+  // 选区按 252px 夹取时浮条右端溢出屏幕 ~90px 被裁。改为 useLayoutEffect 里按 DOM
+  // 实测 offsetWidth/Height 定位（绘制前完成，无闪烁）；phase/rect 变化、语言切换
+  // （按钮文案长度变化）都会触发重测。barPosition 的常量仅作测量前的缺省。
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const [barPos, setBarPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (phase === "selected" && rect && display && barRef.current) {
+      const w = barRef.current.offsetWidth;
+      const h = barRef.current.offsetHeight;
+      setBarPos(barPosition(rect, display.width, display.height, w, h));
+    } else {
+      setBarPos(null);
+    }
+  }, [phase, rect, display, lang]);
 
   if (!display) return null;
   return (
     <>
       <canvas ref={canvasRef}
-        style={{ position: "fixed", inset: 0, cursor: "crosshair" }}
+        style={{ position: "fixed", inset: 0,
+          // 光标统一由自绘十字准线承担（0.1 hotfix 3：WKWebView 上 CSS crosshair 不可
+          // 靠，双指示并存时 macOS 上会出现两个光标）。idle/dragging/拾色 = cursor:none
+          // + 自绘准线；selected = 系统箭头（动作浮条可达），准线隐藏。
+          cursor: phase === "selected" ? "default" : "none" }}
         {...pickerAwareHandlers}
         onDoubleClick={() => confirm()} />
       {/* 十字准线（0.1 hotfix 3）：横竖两条 1px 线，difference 混合在任意底色可见；
           pointerEvents:none 不拦事件，z 5 低于动作浮条（z 10）。覆盖层常驻复用，
-          组件只在 display 就绪后渲染，故线随窗口生命周期天然存在。 */}
-      <div ref={crossHRef} style={{ position: "fixed", left: 0, right: 0, top: 0, height: 1,
-        background: "rgba(255,255,255,0.8)", mixBlendMode: "difference",
-        pointerEvents: "none", zIndex: 5, transform: "translateY(-100px)" }} />
-      <div ref={crossVRef} style={{ position: "fixed", top: 0, bottom: 0, left: 0, width: 1,
-        background: "rgba(255,255,255,0.8)", mixBlendMode: "difference",
-        pointerEvents: "none", zIndex: 5, transform: "translateX(-100px)" }} />
+          组件只在 display 就绪后渲染，故线随窗口生命周期天然存在。selected 态隐藏：
+          选区已锚定，准线随指针乱窜只会干扰确认（审计 P2 修复）。 */}
+      {phase !== "selected" && (
+        <>
+          <div ref={crossHRef} style={{ position: "fixed", left: 0, right: 0, top: 0, height: 1,
+            background: "rgba(255,255,255,0.8)", mixBlendMode: "difference",
+            pointerEvents: "none", zIndex: 5, transform: "translateY(-100px)" }} />
+          <div ref={crossVRef} style={{ position: "fixed", top: 0, bottom: 0, left: 0, width: 1,
+            background: "rgba(255,255,255,0.8)", mixBlendMode: "difference",
+            pointerEvents: "none", zIndex: 5, transform: "translateX(-100px)" }} />
+        </>
+      )}
       {/* M2 M5 取色浮签：位置/颜色由 pointermove effect 直写（零 React state）；
           初始 transform 移到屏外，首次移动前不显示。z 9 低于动作浮条（10）。 */}
       {pickerMode && display && (
@@ -689,6 +802,14 @@ export default function OverlayWindow() {
           border: "1px solid #5B2430", borderRadius: 8, padding: "4px 12px",
           fontSize: 12, color: "#E5484D", maxWidth: "80vw" }}>{recordError}</div>
       )}
+      {/* 冻结帧装载失败（§9 失败不静默）：画布空 = 透明窗，用户会对着未冻结的
+          实时桌面框选且毫无线索——行内红幅替代静默。Esc 退出后重按热键即重试。 */}
+      {frameError && (
+        <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
+          zIndex: 10, pointerEvents: "none", background: "#0D1522",
+          border: "1px solid #5B2430", borderRadius: 8, padding: "4px 12px",
+          fontSize: 12, color: "#E5484D", maxWidth: "80vw" }}>{frameError}</div>
+      )}
       {recordMode && !recordError && (
         <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
           zIndex: 10, display: "flex", gap: 8, alignItems: "center" }}>
@@ -720,8 +841,9 @@ export default function OverlayWindow() {
           N1：录制模式动作浮条**缺席**（确认语义只有「录制这个选区」——Enter/双击/点击，
           无复制/保存/标注分支），选区出现即录即可达。 */}
       {phase === "selected" && rect && !recordMode && !scrollshotMode && (
-        <div style={{ position: "fixed", display: "flex", gap: 8, alignItems: "center",
-          ...barPosition(rect, display.width, display.height),
+        <div ref={barRef} style={{ position: "fixed", display: "flex", gap: 8, alignItems: "center",
+          ...(barPos ?? { left: 0, top: 0 }),
+          visibility: barPos ? "visible" : "hidden",
           background: "#0D1522", border: "1px solid #22405F", borderRadius: 8,
           padding: "6px 10px", zIndex: 10 }}>
           <button type="button" onClick={() => confirm("copy")}
@@ -737,16 +859,25 @@ export default function OverlayWindow() {
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.annotate")}</button>
-          {[
-            { id: "pin", label: t("overlay.pin") },
-            { id: "ocr", label: t("overlay.ocr") },
-            { id: "gif", label: t("overlay.gif") },
-          ].map(({ id, label }) => (
-            <button key={id} type="button" disabled title={t("overlay.comingSoon")}
-              style={{ padding: "4px 8px", background: "transparent", color: "#D8E2EE",
-                border: "1px solid #22405F", borderRadius: 6, opacity: 0.4,
-                fontSize: 13, cursor: "not-allowed" }}>{label}</button>
-          ))}
+          {/* §3.1 七动作补齐（v1.2）：贴图=选区直建贴图窗；OCR=标注链直跑识别；
+              GIF=按选区以 GIF 格式录制；更多设置=独立设置窗。全部实装，无占位。 */}
+          <button type="button" onClick={() => void pinSelection()}
+            style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
+              border: "1px solid #22405F", borderRadius: 6,
+              fontSize: 13, cursor: "pointer" }}>{t("overlay.pin")}</button>
+          <button type="button" onClick={() => void annotate(true)}
+            title={t("overlay.ocrTip")}
+            style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
+              border: "1px solid #22405F", borderRadius: 6,
+              fontSize: 13, cursor: "pointer" }}>{t("overlay.ocr")}</button>
+          <button type="button" onClick={() => void gifFromSelection()}
+            style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
+              border: "1px solid #22405F", borderRadius: 6,
+              fontSize: 13, cursor: "pointer" }}>{t("overlay.gif")}</button>
+          <button type="button" onClick={openSettingsFromBar}
+            style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
+              border: "1px solid #22405F", borderRadius: 6,
+              fontSize: 13, cursor: "pointer" }}>{t("overlay.settings")}</button>
         </div>
       )}
     </>

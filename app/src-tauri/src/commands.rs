@@ -33,7 +33,13 @@ pub struct DisplayPayload {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FinishReq { pub display_id: u64, pub rect: Rect, pub copy: bool, pub save: bool }
+pub struct FinishReq {
+    pub display_id: u64, pub rect: Rect, pub copy: bool, pub save: bool,
+    /// 动作浮条「OCR」标记（v1.2）：true 时编辑器装载后自动跑一次识别。serde
+    /// default——finish_capture 等既有载荷不携带该字段，按 false 走（渐进兼容）。
+    #[serde(default)]
+    pub run_ocr: bool,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,6 +220,8 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
     let physical = to_physical_rect(&req.rect, meta.scale);
     let cropped = crop_rgba(&meta.rgba, meta.width_px, meta.height_px, &physical)
         .map_err(|e| e.to_string())?;
+    // v1.2 F2 语义：确认的选区即「最近截图」——存入 LAST_SELECTION 供贴图键使用。
+    remember_last_selection(&cropped, physical.w, physical.h, meta.scale);
     // 3) 剪贴板：直接送 RGBA，省去裁剪 PNG 重编码 + 再解码两个环节（helper 与编辑器
     // 「来源=截图」保存共用，M2 Task M3 抽取）
     let mut copied = false;
@@ -289,7 +297,23 @@ pub async fn annotate_crop(app: AppHandle, req: FinishReq) -> Result<(), String>
         app,
         path.to_string_lossy().into_owned(),
         Some(crate::editor::EditorOrigin::Capture),
+        req.run_ocr,
     )
+}
+
+/// 覆盖层动作浮条「贴图」入口（v1.2，§3.1 七动作补齐）：当前选区裁剪 RGBA 直建
+/// 贴图窗口——不经临时 PNG 落盘（贴图窗口本就持有整帧 RGBA 内存，pin_from_path 的
+/// 「写盘→读盘→解码」三跳全免）。scale 传来源屏 scale：贴图初始显示尺寸 = 物理像素
+/// ÷ scale = 用户看到的选区逻辑尺寸，贴图与屏幕所见 1:1 起步。返回贴图 id。
+#[tauri::command(async)]
+pub async fn pin_from_selection(app: AppHandle, req: FinishReq) -> Result<u64, String> {
+    // 与 finish_capture 同款锁纪律：锁内只做查找 + Arc clone，裁剪全程无锁。
+    let meta = { CAPTURES.lock().unwrap_or_else(|e| e.into_inner()).get(&req.display_id).cloned() }
+        .ok_or("display not captured")?;
+    let physical = to_physical_rect(&req.rect, meta.scale);
+    let cropped = crop_rgba(&meta.rgba, meta.width_px, meta.height_px, &physical)
+        .map_err(|e| e.to_string())?;
+    crate::pins::do_pin_rgba(&app, std::sync::Arc::new(cropped), physical.w, physical.h, meta.scale)
 }
 
 /// 标注链的隐藏半程（M3 评审 Finding 1 拆分，见 [`annotate_crop`] 注）：前端在 flow
@@ -400,30 +424,38 @@ pub(crate) fn primary_display() -> Option<(u64, DisplayFrame)> {
         })
 }
 
-/// 贴图 pin 的图像来源第一级（C5）：CAPTURES 最近一轮的非空整帧。display_id 取最大者
-/// （多显示器无主次概念时稳定取一个）；release_captures 后 rgba 全为空 → None，调用方
-/// 落到剪贴板来源。锁内只做 Arc clone + 几何拷贝，不跨 IO。
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) struct LatestCapture {
+/// 贴图 pin 的「最近截图」来源（v1.2）：见下方 LAST_SELECTION——旧「CAPTURES 整屏帧
+/// 第一级」已废（选区进行中按 F2 会贴出全屏冻结帧，且保存不复制后退化为剪贴板旧图）。
+/// 最近一次确认的选区裁剪结果（v1.2 F2 语义修复）：finish_capture 确认时存入——
+/// 此前 F2 的「最近截图」直接取 CAPTURES **整屏帧**（选区进行中按 F2 = 贴出全屏
+/// 冻结帧）或退化为剪贴板旧图（保存不复制后）。贴图成功创建后由消费方 take 走
+/// （贴图窗口已持有自己的图像副本，无需常驻）。容量上限 = 一次选区的 RGBA（远
+/// 小于整屏帧，G2 口径可忽略），下次确认覆盖写。
+#[derive(Clone)]
+pub(crate) struct LastSelection {
     pub rgba: std::sync::Arc<Vec<u8>>,
     pub w_px: u32,
     pub h_px: u32,
     pub scale: f64,
 }
 
+static LAST_SELECTION: LazyLock<Mutex<Option<LastSelection>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// 存最近选区（finish_capture 裁剪成功即存，无论 copy/save）。
+fn remember_last_selection(rgba: &[u8], w_px: u32, h_px: u32, scale: f64) {
+    *LAST_SELECTION.lock().unwrap_or_else(|e| e.into_inner()) = Some(LastSelection {
+        rgba: std::sync::Arc::new(rgba.to_vec()),
+        w_px,
+        h_px,
+        scale,
+    });
+}
+
+/// 取走最近选区（None = 本进程尚无确认过的截图；F2 落到剪贴板来源）。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn latest_capture_rgba() -> Option<LatestCapture> {
-    let captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
-    captures
-        .iter()
-        .filter(|(_, m)| !m.rgba.is_empty())
-        .max_by_key(|(id, _)| *id)
-        .map(|(_, m)| LatestCapture {
-            rgba: m.rgba.clone(),
-            w_px: m.width_px,
-            h_px: m.height_px,
-            scale: m.scale,
-        })
+pub(crate) fn take_last_selection() -> Option<LastSelection> {
+    LAST_SELECTION.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 /// 流程结束释放整帧 RGBA（终审 wave，G2）：hide_all_overlays 在全部覆盖层隐藏后调用
@@ -516,6 +548,54 @@ pub fn allow_asset_scope(app: &AppHandle) {
 /// 查询；保存文件名与历史 app 字段（C4）暂用 "HawkSnap"。接入点：CGWindowListCopyWindowInfo
 /// 的 kCGWindowOwnerName（与 Task 4 磁吸候选同源），接入后此处替换、历史入库同步取真名。
 fn frontmost_app_name() -> Option<String> { None }
+
+/// 全部已捕获显示器的 (display_id, 全帧几何) 快照（全屏截图命令用）：一次锁内拷贝
+/// 几何字段，锁不跨帧持有。与 [`primary_display`] 同源（CAPTURES 条目）。
+fn all_display_frames() -> Vec<(u64, DisplayFrame)> {
+    let captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
+    captures
+        .iter()
+        .map(|(id, m)| (*id, DisplayFrame {
+            x: m.x as f64, y: m.y as f64, w: m.width as f64, h: m.height as f64,
+        }))
+        .collect()
+}
+
+/// 托盘「全屏截图」（v1.2，§3.1 三模式之「全屏」此前无一键入口——只能靠「悬停空白
+/// →整屏高亮→单击」的隐藏交互）：抓全部显示器帧后，对每台显示器以整屏 rect 走
+/// finish_capture 全链（裁剪→剪贴板→保存→入库）；剪贴板只写光标所在屏……的近似——
+/// 光标查询目前仅 macOS 侧有（hover.rs），跨平台口径取主显示器（含原点帧，否则
+/// 最大面积），多显示器「分别捕获」语义以「每屏各自落盘入库」落实。
+/// 剪贴板写 N 次只有最后一次生效，故 copy 只对单一显示器为 true。
+#[tauri::command(async)]
+pub async fn capture_fullscreen(app: AppHandle) -> Result<CaptureOutcome, String> {
+    // 抓帧 + 写 CAPTURES（复用 capture_screens 全程，含冻结帧落盘/TTL 清扫）。
+    capture_screens(app.clone()).await?;
+    let mut last: Option<CaptureOutcome> = None;
+    let targets = all_display_frames();
+    // 主显示器优先（含原点 (0,0) 的帧，否则面积最大者）——剪贴板给它。
+    let primary = primary_display().map(|(id, _)| id);
+    let primary = primary.or_else(|| targets.first().map(|(id, _)| *id));
+    for (id, frame) in targets {
+        if frame.w < 1.0 || frame.h < 1.0 {
+            continue;
+        }
+        let req = FinishReq {
+            display_id: id,
+            rect: Rect { x: 0, y: 0, w: frame.w as u32, h: frame.h as u32 },
+            copy: primary == Some(id),
+            save: true,
+            run_ocr: false,
+        };
+        match finish_capture(app.clone(), req).await {
+            Ok(o) => last = Some(o),
+            Err(e) => eprintln!("[hawksnap] 全屏截图 display {id} 失败: {e}"),
+        }
+    }
+    // 整帧 RGBA 已消费完毕：释放内存（每屏 24-59MB，G2 口径）。
+    release_captures();
+    last.ok_or_else(|| "全屏截图失败：没有可捕获的显示器".into())
+}
 
 #[cfg(test)]
 mod tests {

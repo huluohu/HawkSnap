@@ -105,10 +105,10 @@ fn cap_pin_rgba(
     }
 }
 
-/// pin 图像来源（C5）：CAPTURES 最近一轮非空整帧，或剪贴板图像（scale=1.0）。
+/// pin 图像来源（C5）：最近确认的选区截图，或剪贴板图像（scale=1.0）。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct PinSource {
-    /// 来源标签（探针/E2E 判别用）："captures" | "clipboard"。
+    /// 来源标签（探针/E2E 判别用）："last-capture" | "clipboard"。
     source: &'static str,
     rgba: std::sync::Arc<Vec<u8>>,
     w_px: u32,
@@ -116,13 +116,24 @@ struct PinSource {
     scale: f64,
 }
 
-/// 来源顺序（plan C5）：① CAPTURES 最后一轮的 rgba（未释放时——release_captures 后为
-/// 空 Arc，跳过）；② arboard 剪贴板图像（用户刚复制的任意图像）。两者皆无 → Err
-/// 「剪贴板没有图像且无最近截图」。
+/// 来源顺序（v1.2 语义修复，§4 F2 =「最近截图/剪贴板图像」）：
+/// ① **最近确认的选区截图**（finish_capture 存入 LAST_SELECTION 的裁剪结果）——
+///    此前直接取 CAPTURES 整屏帧：选区进行中按 F2 = 贴出全屏冻结帧（且与选区 UI
+///    叠屏）；保存不复制后则退化为剪贴板旧图，「最近截图」语义完全落空。
+/// ② arboard 剪贴板图像（用户复制的任意图像）。
+/// 覆盖层进行中的拒绝在热键入口已守卫（hotkey.rs F2 handler）——托盘/面板入口在
+/// 覆盖层活动时同样会被 flow 的互斥门闩拦住（start 流程报「已有捕获流程进行中」）。
+/// 两者皆无 → Err「剪贴板没有图像且无最近截图」。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn resolve_source() -> Result<PinSource, String> {
-    if let Some(c) = commands::latest_capture_rgba() {
-        return Ok(PinSource { source: "captures", rgba: c.rgba, w_px: c.w_px, h_px: c.h_px, scale: c.scale });
+    if let Some(sel) = commands::take_last_selection() {
+        return Ok(PinSource {
+            source: "last-capture",
+            rgba: sel.rgba,
+            w_px: sel.w_px,
+            h_px: sel.h_px,
+            scale: sel.scale,
+        });
     }
     let img = arboard::Clipboard::new()
         .and_then(|mut cb| cb.get_image())
@@ -296,6 +307,7 @@ fn open_pin_editor(
         app,
         path.to_string_lossy().into_owned(),
         Some(crate::editor::EditorOrigin::Pin { pin_id: id }),
+        false,
     )
 }
 
@@ -323,6 +335,20 @@ fn do_pin_from_path(app: &AppHandle, path: &str) -> Result<u64, String> {
         return Err("截图文件为空图".into());
     }
     spawn_pin_window(app, "history", std::sync::Arc::new(rgba), w_px, h_px, 1.0)
+}
+
+/// 选区直贴（v1.2 动作浮条「贴图」，commands::pin_from_selection 的落点）：调用方已
+/// 持有裁剪后的 RGBA（物理像素）与来源屏 scale，免临时文件往返。scale 语义：贴图
+/// 初始显示尺寸 = w_px ÷ scale（来源屏逻辑尺寸 = 屏幕所见 1:1）。非 macOS：Err
+/// （spawn_pin_window 同口径——贴图窗口是 macOS 原生 NSWindow）。
+pub(crate) fn do_pin_rgba(
+    app: &AppHandle,
+    rgba: std::sync::Arc<Vec<u8>>,
+    w_px: u32,
+    h_px: u32,
+    scale: f64,
+) -> Result<u64, String> {
+    spawn_pin_window(app, "selection", rgba, w_px, h_px, scale)
 }
 
 #[tauri::command(async)]

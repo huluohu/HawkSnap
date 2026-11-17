@@ -63,6 +63,17 @@ pub enum HotkeyKind {
     Record,
 }
 
+/// 注册失败的候选键建议（§4「给出候选键」）：静态表——逐个试注册动态探测可用组合
+/// 的代价与复杂度不成比例，候选只做引导。沿用 Snipaste 风格的同修饰系（Cmd/Alt + 数字
+/// 与功能键），实际占用情况以再次尝试为准。
+fn candidates_for(kind: HotkeyKind) -> &'static str {
+    match kind {
+        HotkeyKind::Capture => "候选键：Cmd+Shift+1 / Cmd+Alt+1 / F7",
+        HotkeyKind::Pin => "候选键：Cmd+Shift+2 / Cmd+Alt+2 / F8",
+        HotkeyKind::Record => "候选键：Cmd+Shift+3 / Cmd+Alt+3 / F9",
+    }
+}
+
 /// 热键注册失败（D0-⑤）：首错的消息 + 角色归因。同时是 hawk://hotkey-error 事件与
 /// hotkey_error 命令的载荷（serde camelCase → `{kind, message}`）；Display 只出 message
 /// ——lib.rs 的 eprintln 日志口径与拆分前一致（组合键本就写在 message 里）。
@@ -92,6 +103,24 @@ pub(crate) fn register_in_order(
         (settings.hotkey_pin.as_str(), HotkeyKind::Pin),
         (settings.hotkey_record.as_str(), HotkeyKind::Record),
     ];
+    // §4 库内互斥校验：同一组合绑多个功能时，第二个注册必失败且报「可能被占用」——
+    // 其实是**自己占了自己**，误导用户去查外部占用。注册前先做一次库内查重，命中即
+    // 归因到后一个角色，文案明说「重复绑定」。
+    for i in 0..jobs.len() {
+        for j in (i + 1)..jobs.len() {
+            if jobs[i].0.eq_ignore_ascii_case(jobs[j].0) && !jobs[j].0.trim().is_empty() {
+                return Err(HotkeyError {
+                    kind: jobs[j].1,
+                    message: format!(
+                        "热键 {} 重复绑定（{} 与 {} 设了同一个组合），请为每个功能设置不同的组合键",
+                        jobs[j].0,
+                        kind_label(jobs[i].1),
+                        kind_label(jobs[j].1),
+                    ),
+                });
+            }
+        }
+    }
     let mut first_err: Option<HotkeyError> = None;
     for (combo, kind) in jobs {
         if let Err(e) = register_fn(combo, kind) {
@@ -101,6 +130,16 @@ pub(crate) fn register_in_order(
         }
     }
     first_err.map_or(Ok(()), Err)
+}
+
+/// 角色的用户可见名（重复绑定文案归因用）。Rust 侧文案当前为中文单语（错误码化
+/// 归后续文案统一轮），此处与横幅既有中文口径一致。
+fn kind_label(kind: HotkeyKind) -> &'static str {
+    match kind {
+        HotkeyKind::Capture => "截图",
+        HotkeyKind::Pin => "贴图",
+        HotkeyKind::Record => "录屏",
+    }
 }
 
 /// 注册单个组合并挂对应处理器（生产 register_fn）。Shortcut::from_str 是插件的热键
@@ -126,7 +165,7 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     std::thread::spawn(move || trigger_capture_flow(&app));
                 }
             })
-            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}")),
+            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
         HotkeyKind::Pin => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
@@ -136,13 +175,27 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     eprintln!("[hawksnap] {combo_owned} 热键触发（pin_latest）");
                     let app = app2.clone();
                     std::thread::spawn(move || {
+                        // v1.2 守卫（审计修复）：覆盖层进行中（截图/录制/长截图选区）按 F2
+                        // 此前会贴出**整屏冻结帧**叠在选区 UI 上——两套全屏 UI 不叠屏（M2
+                        // 守卫 a 同款口径，F6 同守卫）。拒绝并横幅引导。
+                        let overlay_visible = super::flow::ANY_OVERLAY_VISIBLE
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        if overlay_visible {
+                            crate::panel::show_capture_error(
+                                &app,
+                                "截图选区进行中：先按 Esc 结束选区，再按贴图键".into(),
+                            );
+                            return;
+                        }
                         if let Err(e) = crate::pins::pin_latest(app.clone()) {
-                            let _ = tauri::Emitter::emit(&app, "hawk://capture-error", e);
+                            // 错误横幅可见化（show_capture_error 先懒拉主面板）：此前裸 emit
+                            // 在面板不存在时静默丢失——启动零窗口架构下正是常态。
+                            crate::panel::show_capture_error(&app, e);
                         }
                     });
                 }
             })
-            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}")),
+            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
         HotkeyKind::Record => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
@@ -191,7 +244,7 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     });
                 }
             })
-            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}")),
+            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
     }
 }
 

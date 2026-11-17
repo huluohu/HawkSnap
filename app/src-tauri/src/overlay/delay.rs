@@ -53,11 +53,13 @@ fn try_begin_delay(flag: &AtomicBool) -> bool {
 /// 必须在非主线程调用（建窗/show 均为投递给主线程事件循环的消息，close 才有主线程
 /// 禁忌，但本函数从 start_delayed_capture 进入，本就运行在 worker 线程）。
 fn show_countdown_window(app: &AppHandle) -> Result<(), String> {
+    // v1.2（审计修复）：show **不 set_focus**——倒计时 ≤5s 抢走用户正在输入的应用
+    // 焦点是不必要的打断；取消出口三条（点击浮窗 / 聚焦时 Esc / 托盘「取消倒计时」），
+    // 浮窗底部提示行已把「点击可取消」变成可见 affordance。
     if let Some(w) = app.get_webview_window("countdown") {
         // 复用：页面与监听常驻，仅重新居中并显示（窗口 hide 期间事件照常接收）。
         let _ = w.center();
         let _ = w.show();
-        let _ = w.set_focus();
         return Ok(());
     }
     let win = WebviewWindowBuilder::new(app, "countdown", WebviewUrl::App("countdown?window=countdown".into()))
@@ -71,7 +73,6 @@ fn show_countdown_window(app: &AppHandle) -> Result<(), String> {
         .build().map_err(|e| e.to_string())?;
     let _ = win.center();
     let _ = win.show();
-    let _ = win.set_focus();
     Ok(())
 }
 

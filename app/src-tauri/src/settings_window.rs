@@ -28,12 +28,15 @@ pub fn ensure_settings_window(app: &AppHandle) -> Result<WebviewWindow, String> 
     // URL 形式与既有窗口一致（overlay?window=overlay / editor?window=editor …）：
     // 路径段 + query 里的 window 标记，前端按 query 分发渲染。dev 模式下 vite
     // dev server 对未知路径回退 index.html；生产端 custom-protocol 同理。
+    // 窗口标题随设置语言（v1.2 i18n 修复：Dock/调度器可见的用户可见文案）。
+    let settings = crate::settings::Settings::load(app);
+    let title = if crate::rust_lang_zh(&settings) { "HawkSnap 设置" } else { "HawkSnap Settings" };
     WebviewWindowBuilder::new(
         app,
         SETTINGS_LABEL,
         WebviewUrl::App("settings?window=settings".into()),
     )
-        .title("HawkSnap 设置")
+        .title(title)
         .inner_size(900.0, 620.0)
         .min_inner_size(760.0, 520.0)
         .visible(true)
