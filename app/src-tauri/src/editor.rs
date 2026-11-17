@@ -370,7 +370,7 @@ mod editor_tests {
         let path = temp_png("badb64");
         std::fs::write(&path, b"stale").unwrap();
         let err = save_png_bytes(path.to_string_lossy().as_ref(), "!!!not-base64!!!").unwrap_err();
-        assert!(err.contains("PNG 数据解码失败"), "got: {err}");
+        assert!(err.contains("<hserr:png_decode_failed>"), "got: {err}");
         // 失败不落盘（原文件保持原样）
         assert_eq!(std::fs::read(&path).unwrap(), b"stale");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
@@ -382,7 +382,7 @@ mod editor_tests {
         std::fs::write(&path, b"stale").unwrap();
         let not_png = base64::engine::general_purpose::STANDARD.encode(b"JPEG data, honestly");
         let err = save_png_bytes(path.to_string_lossy().as_ref(), &not_png).unwrap_err();
-        assert!(err.contains("不是有效的 PNG 数据"), "got: {err}");
+        assert!(err.contains("<hserr:png_invalid>"), "got: {err}");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -392,20 +392,20 @@ mod editor_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let missing = dir.join("gone.png");
         let err = save_png_bytes(missing.to_string_lossy().as_ref(), "").unwrap_err();
-        assert!(err.contains("目标文件不存在"), "got: {err}");
+        assert!(err.contains("<hserr:editor_target_missing>"), "got: {err}");
         // 已存在但扩展名非 .png：拒绝（防借编辑器写任意格式路径）
         let txt = dir.join("shot.txt");
         std::fs::write(&txt, b"x").unwrap();
         let png = hawksnap_core::crop::rgba_to_png(&[0, 0, 0, 255], 1, 1).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
         let err = save_png_bytes(txt.to_string_lossy().as_ref(), &b64).unwrap_err();
-        assert!(err.contains("仅支持保存 PNG"), "got: {err}");
+        assert!(err.contains("<hserr:editor_png_only>"), "got: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn rejects_empty_path() {
-        assert_eq!(save_png_bytes("  ", "").unwrap_err(), "路径为空");
+        assert_eq!(save_png_bytes("  ", "").unwrap_err(), "<hserr:path_empty>");
     }
 
     /// M2 Task M3：origin 契约的 serde 形状（前端 invoke 载荷 ↔ Rust 枚举）。

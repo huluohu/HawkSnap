@@ -236,7 +236,7 @@ mod ocr_tests {
         // 不存在的源拒绝。
         assert!(ocr_export_txt(dir.join("gone.png").to_string_lossy().into_owned(), "y".into()).is_err());
         // 空路径拒绝。
-        assert_eq!(ocr_export_txt("  ".into(), "y".into()).unwrap_err(), "路径为空");
+        assert_eq!(ocr_export_txt("  ".into(), "y".into()).unwrap_err(), "<hserr:path_empty>");
         std::fs::remove_dir_all(&dir).ok();
     }
 

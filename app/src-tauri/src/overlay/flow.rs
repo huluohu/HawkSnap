@@ -388,12 +388,12 @@ mod tests {
     /// N5：长截图互斥守卫文案（纯逻辑）。
     #[test]
     fn scrollshot_guard_msg_is_stable() {
-        assert_eq!(scrollshot_guard_msg(), "长截图进行中，请先完成或取消长截图");
+        assert_eq!(scrollshot_guard_msg(), "<hserr:scrollshot_active_finish_first>");
     }
 
     #[test]
     fn capture_guard_only_when_recording() {
-        assert_eq!(capture_guard_msg(true).unwrap(), "录屏进行中，请先停止录屏");
+        assert_eq!(capture_guard_msg(true).unwrap(), "<hserr:recording_active_stop_first>");
         assert_eq!(capture_guard_msg(false), None);
     }
 }

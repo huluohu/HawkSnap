@@ -584,10 +584,10 @@ mod pins_tests {
         assert_eq!(rgba.len(), 8);
         // 脏载荷：非 base64 / 非 PNG / 空图
         let err = decode_pin_png("!!!not-base64!!!").unwrap_err();
-        assert!(err.contains("PNG 数据解码失败"), "got: {err}");
+        assert!(err.contains("<hserr:png_decode_failed>"), "got: {err}");
         let not_png = base64::engine::general_purpose::STANDARD.encode(b"JPEG data, honestly");
         let err = decode_pin_png(&not_png).unwrap_err();
-        assert!(err.contains("截图文件解码失败"), "got: {err}");
+        assert!(err.contains("<hserr:file_decode_failed>"), "got: {err}");
     }
 
     #[cfg(target_os = "macos")]
