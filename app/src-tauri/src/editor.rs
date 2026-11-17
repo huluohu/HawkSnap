@@ -299,6 +299,8 @@ fn save_annotate_to_history(
         &dir,
         rgba,
         &hawksnap_core::geometry::Rect { x: 0, y: 0, w, h },
+        // v1.2 {app} 接线：保存时刻的前台应用就是本应用的编辑器——传 "HawkSnap"。
+        "HawkSnap",
     )?;
     Ok(path.to_string_lossy().into_owned())
 }

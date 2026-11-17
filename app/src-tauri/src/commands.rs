@@ -236,6 +236,13 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
     }
     // 4) 保存：编码只发生在保存路径；格式/质量/目录均来自设置（C2 + C7 接线）。每次读
     // 小 JSON 文件（µs 级）——裁定 2：不为缓存引状态，profile 有实测成本再缓存。
+    // v1.2 {app} 接线：仅 save 路径需要应用名（文件名 + 历史来源列）——copy-only
+    // 不落盘，不做主线程往返。
+    let save_name = if req.save {
+        frontmost_app_name(&app).unwrap_or_else(|| "HawkSnap".into())
+    } else {
+        "HawkSnap".into()
+    };
     let mut saved_to = None;
     if req.save {
         let settings = crate::settings::Settings::load(&app);
@@ -257,15 +264,15 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
                 "png",
             )
         };
-        let path = save_path_for(&dir, &frontmost_app_name().unwrap_or_else(|| "HawkSnap".into()), ext);
+        let path = save_path_for(&dir, &save_name, ext);
         std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
         saved_to = Some(path.to_string_lossy().into_owned());
         // C4 保存即入库：缩略图落盘 + history::record。历史是旁路（裁定）：整条链任一步
         // 失败只 eprintln，绝不影响保存本身的成败——闭包包住全部步骤统一降级。
         // 剪贴板-only 捕获（copy=true, save=false）无落盘文件，不入库（完整版再议
-        // 临时文件方案）；w/h 记物理像素（physical），app 暂记 "HawkSnap"——frontmost
-        // 检测尚未接入（见 frontmost_app_name 注），接入后同步替换此处。
-        if let Err(e) = record_history(&app, &path, &dir, &cropped, &physical) {
+        // 临时文件方案）；w/h 记物理像素（physical）；app 列 = 真实前台应用名
+        // （v1.2 {app} 接线，save_name 在上方统一取好）。
+        if let Err(e) = record_history(&app, &path, &dir, &cropped, &physical, &save_name) {
             eprintln!("[hawksnap] 历史记录失败: {e}");
         }
     }
@@ -478,12 +485,15 @@ pub fn release_captures() {
 /// `?` 短路：任一步失败即 Err，由调用方 eprintln 降级（历史是旁路，不回滚、不重试、
 /// 不影响 CaptureOutcome）。pub(crate)：编辑器「来源=截图」保存入库复用（M2 Task M3，
 /// 语义同链）。kind="region"（截图；duration=None——时长列只对 recording 有意义）。
+/// app_name（v1.2）：截图链传真实前台应用名（NSWorkspace），编辑器保存传 "HawkSnap"
+/// ——保存时刻的前台应用就是本应用的编辑器，诚实口径。
 pub(crate) fn record_history(
     app: &AppHandle,
     path: &std::path::Path,
     dir: &std::path::Path,
     cropped: &[u8],
     physical: &Rect,
+    app_name: &str,
 ) -> Result<(), String> {
     let (thumb_rgba, tw, th) =
         hawksnap_core::crop::rgba_thumbnail(cropped, physical.w, physical.h, 320)
@@ -503,7 +513,7 @@ pub(crate) fn record_history(
         &thumb_path.to_string_lossy(),
         physical.w as i64,
         physical.h as i64,
-        "HawkSnap",
+        app_name,
         "region",
         None,
     )?;
@@ -543,11 +553,28 @@ pub fn allow_asset_scope(app: &AppHandle) {
     }
 }
 
-/// 前台应用名：恒 None（占位）。原「Plan B 接 window 检测后替换」的说法已过时——
-/// window/AX 检测在 Plan B 落地时只做了悬停高亮与磁吸候选，未包含 frontmost 名称
-/// 查询；保存文件名与历史 app 字段（C4）暂用 "HawkSnap"。接入点：CGWindowListCopyWindowInfo
-/// 的 kCGWindowOwnerName（与 Task 4 磁吸候选同源），接入后此处替换、历史入库同步取真名。
-fn frontmost_app_name() -> Option<String> { None }
+/// 前台应用名（v1.2 接入，§3.1 {app} 命名变量 + §3.6 来源应用列）：NSWorkspace
+/// frontmostApplication——主线程 API，经 run_on_main_thread + channel 取回；
+/// 200ms 超时 / 非 macOS / 取不到 → None（调用方回退 "HawkSnap"）。文件名里的
+/// 应用名与历史「来源应用」列从此是真实前台应用（如 Safari / Finder）。
+fn frontmost_app_name(app: &AppHandle) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(hawksnap_platform_mac::frontmost_app_name());
+        })
+        .ok()?;
+        rx.recv_timeout(std::time::Duration::from_millis(200))
+            .ok()
+            .flatten()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
 
 /// 全部已捕获显示器的 (display_id, 全帧几何) 快照（全屏截图命令用）：一次锁内拷贝
 /// 几何字段，锁不跨帧持有。与 [`primary_display`] 同源（CAPTURES 条目）。

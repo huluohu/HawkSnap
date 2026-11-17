@@ -7,6 +7,25 @@ pub mod ax;
 // 模块内部按 cfg(target_os = "macos") 门控平台 API，非 macOS 走 Err 桩。
 pub mod windowcap;
 
+/// 前台应用名（v1.2，§3.1 {app} 命名变量 + §3.6 来源应用列）：NSWorkspace 的
+/// frontmostApplication.localizedName。**必须主线程调用**（AppKit 纪律）——app 层
+/// commands::frontmost_app_name 经 run_on_main_thread + channel 取回。非 macOS：恒
+/// None（调用方回退 "HawkSnap"，与 v1.1.3 行为一致）。
+#[cfg(target_os = "macos")]
+pub fn frontmost_app_name() -> Option<String> {
+    use objc2_app_kit::NSWorkspace;
+    // SAFETY: AppKit 要求 NSWorkspace API 在主线程调用（调用方已保证）；
+    // sharedWorkspace/frontmostApplication/localizedName 均为无副作用查询。
+    let ws = unsafe { NSWorkspace::sharedWorkspace() };
+    let app = unsafe { ws.frontmostApplication() }?;
+    Some(app.localizedName().to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn frontmost_app_name() -> Option<String> {
+    None
+}
+
 // Plan D Task D4：屏幕录制权限预检 + 系统设置深链引导（修静默壁纸缺陷）。
 pub mod permissions;
 

@@ -50,7 +50,7 @@ objc2-core-graphics = { version = "0.3", features = ["CGColor", "CGColorSpace", 
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication", "NSCell", "NSColor", "NSEvent", "NSGraphics", "NSImage",
     "NSImageView", "NSResponder", "NSRunningApplication", "NSScreen",
-    "NSView", "NSWindow", "objc2-core-graphics",
+    "NSView", "NSWindow", "NSWorkspace", "objc2-core-graphics",
 ] }
 
 # M6 录屏绑定栈（绑定可用性裁定见 src/record.rs 模块注 + 任务报告）：
