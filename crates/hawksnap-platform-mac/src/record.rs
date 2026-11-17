@@ -239,27 +239,11 @@ pub fn mp4_track_dims(data: &[u8]) -> Option<(u32, u32)> {
 /// 选区逻辑矩形（display 本地，points，原点**左上**——与覆盖层 webview 的
 /// clientX/Y 同一坐标系，即 overlay 选区/载荷 Rect 的连续值形态）。
 #[derive(Debug, Clone, Copy, PartialEq)]
-/// 磁盘可用空间（v1.2 录屏启动预检，§9「磁盘空间不足：录屏启动前预检」）：
-/// statfs 的 f_bavail × f_bsize（非特权用户可用字节）。失败 → None（预检按
-/// 「未知 = 放行」降级——预检本身绝不阻断录制启动）。
-/// 非 macOS：恒 None（录屏管线本身仅 macOS，预检不会在其它平台被调用）。
-#[cfg(target_os = "macos")]
-pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut fs: libc::statfs_t = unsafe { std::mem::zeroed() };
-    // SAFETY: c 指向合法 C 串；fs 为本函数栈上的可写缓冲（libc::statfs 只写该缓冲）。
-    let rc = unsafe { libc::statfs(c.as_ptr(), &mut fs) };
-    if rc == 0 {
-        Some(fs.f_bsize as u64 * fs.f_bavail as u64)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn free_disk_bytes(_path: &std::path::Path) -> Option<u64> {
-    None
+pub struct LogicalRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
 }
 
 /// v1.2 流配置选项（§3.4「30/60fps 可选」「光标可选录制」）：录制入口经 RegionReq
@@ -293,11 +277,27 @@ impl StreamOpts {
     }
 }
 
-pub struct LogicalRect {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
+/// 磁盘可用空间（v1.2 录屏启动预检，§9「磁盘空间不足：录屏启动前预检」）：
+/// statfs 的 f_bavail × f_bsize（非特权用户可用字节）。失败 → None（预检按
+/// 「未知 = 放行」降级——预检本身绝不阻断录制启动）。
+/// 非 macOS：恒 None（录屏管线本身仅 macOS，预检不会在其它平台被调用）。
+#[cfg(target_os = "macos")]
+pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut fs: libc::statfs_t = unsafe { std::mem::zeroed() };
+    // SAFETY: c 指向合法 C 串；fs 为本函数栈上的可写缓冲（libc::statfs 只写该缓冲）。
+    let rc = unsafe { libc::statfs(c.as_ptr(), &mut fs) };
+    if rc == 0 {
+        Some(fs.f_bsize as u64 * fs.f_bavail as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn free_disk_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
 }
 
 /// 区域录制流参数：SCStreamConfiguration 的 sourceRect + 输出帧像素尺寸。

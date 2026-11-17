@@ -264,13 +264,15 @@ pub fn record_status() -> Option<RecordStatus> {
 // 输出目录：~/Movies/HawkSnap（spec §3.4；dirs_picture_dir 同款跨平台 HOME 口径）
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 /// 录屏启动的磁盘预检下限（v1.2，§9）：1GB——保守覆盖 ~17 分钟 1080p30 H.264
 /// + 系统声 AAC；更长的会话由用户自行保证空间（预检只挡「明显写不完」的启动）。
+/// 仅 macOS 消费（两处录制入口的 macOS 块内）；非 macOS 构建下无人调用。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MIN_FREE_DISK_BYTES: u64 = 1 << 30;
 
 /// 磁盘预检（§9）：可用空间低于下限 → Err（含可用量，用户可判断清理多少）。
-/// 未知（statfs 失败）→ Ok 放行——预检是增强，不是闸门。
+/// 未知（statfs 失败）→ Ok 放行——预检是增强，不是闸门。仅 macOS 消费（同上）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn disk_precheck(base: &std::path::Path) -> Result<(), String> {
     if let Some(free) = hawksnap_platform_mac::record::free_disk_bytes(base) {
         if free < MIN_FREE_DISK_BYTES {
@@ -283,6 +285,7 @@ fn disk_precheck(base: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn movies_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

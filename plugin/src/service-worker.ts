@@ -334,6 +334,120 @@ function captureRegion(tab: chrome.tabs.Tab): Promise<CapturePayload> {
   })();
 }
 
+
+// —— 整页捕获·视口拼接降级（§3.5「降级为逐视口捕获 + 拼接」）——
+//
+// debugger 主路径不可用（用户拒绝调试横幅 / 被其它调试器占用 / metrics 读取失败）
+// 时的回退：captureVisibleTab 逐屏滚动捕获 + offscreen 拼接。质量边界在 note 里
+// 明示：固定表头等悬浮元素会随每个视口重复入画（无特征匹配去重——桌面端长截图
+// 才有完整拼接器，插件侧做的是「有结果」而非「完美」）。
+// 硬护栏：瓦片数 / 物理高度超限直接抛错（走原失败路径），不做无界内存的拼接。
+
+const STITCH_MAX_TILES = 40;
+const STITCH_MAX_PHYSICAL_H = 12000;
+
+/** 在标签页里求值（隔离世界，共享 DOM）：视口与文档几何。 */
+async function evalViewport(
+  tabId: number,
+): Promise<{ iw: number; ih: number; dpr: number; sw: number; sh: number; y: number }> {
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => ({
+      iw: window.innerWidth,
+      ih: window.innerHeight,
+      dpr: window.devicePixelRatio || 1,
+      sw: document.documentElement.scrollWidth,
+      sh: document.documentElement.scrollHeight,
+      y: window.scrollY,
+    }),
+  });
+  const v = res.result as { iw: number; ih: number; dpr: number; sw: number; sh: number; y: number };
+  if (!v || v.ih <= 0 || v.sw <= 0 || v.sh <= 0) {
+    throw new Error('无法读取页面视口尺寸（受限页面？）');
+  }
+  return v;
+}
+
+async function scrollTo(tabId: number, x: number, y: number): Promise<void> {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    // func 形参须兼容 d.ts 的 (...args: unknown[])（strictFunctionTypes 下 number
+    // 形参不可赋值）——unknown 收参、函数体内收窄。
+    func: (px: unknown, py: unknown) => window.scrollTo(px as number, py as number),
+    args: [x, y],
+  });
+}
+
+async function captureFullPageByViewports(tab: chrome.tabs.Tab): Promise<CapturePayload> {
+  const tabId = tab.id as number;
+  const vp = await evalViewport(tabId);
+  const step = Math.max(1, Math.floor(vp.ih * 0.9));
+  const tileCount = Math.ceil(vp.sh / step);
+  if (tileCount > STITCH_MAX_TILES || vp.sh * vp.dpr > STITCH_MAX_PHYSICAL_H) {
+    throw new Error(
+      `页面过长（${Math.round(vp.sh)}px / ${tileCount} 屏），视口拼接不可用；请改用可见区截图或安装桌面端`,
+    );
+  }
+  // 懒加载预热：整页滚一遍（触发懒加载图），再回顶。
+  for (let y = 0; y < vp.sh; y += step) {
+    await scrollTo(tabId, 0, y);
+    await sleep(160);
+  }
+  await scrollTo(tabId, 0, 0);
+  await sleep(220);
+
+  const tiles: Array<{ dataUrl: string; x: number; y: number }> = [];
+  let lastY = -1;
+  for (let y = 0; y < vp.sh && tiles.length <= STITCH_MAX_TILES; y += step) {
+    await scrollTo(tabId, 0, y);
+    await sleep(180);
+    const cur = await evalViewport(tabId); // 页尾被 clamp：取真实 scrollY 定位瓦片
+    if (cur.y === lastY) break; // 已到页底：避免同屏重复
+    lastY = cur.y;
+    const dataUrl = await captureVisible(tab.windowId);
+    tiles.push({ dataUrl, x: 0, y: Math.round(cur.y * cur.dpr) });
+  }
+  if (tiles.length === 0) throw new Error('视口拼接未捕获到任何瓦片');
+
+  const height = Math.round(vp.sh * vp.dpr);
+  const width = Math.round(vp.sw * vp.dpr);
+  const stitched = await new Promise<{ ok: boolean; dataUrl?: string; error?: string }>((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: 'hawksnap:offscreen-stitch', width, height, tiles },
+      (res: unknown) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve(res as { ok: boolean; dataUrl?: string; error?: string });
+      },
+    );
+  });
+  if (!stitched.ok || !stitched.dataUrl) {
+    throw new Error(`视口拼接失败: ${stitched.error ?? 'offscreen 无响应'}`);
+  }
+  return {
+    captureId: uuid(),
+    pngBase64: stripDataUrl(stitched.dataUrl),
+    width,
+    height,
+    source: 'full' as const,
+    note: '视口拼接模式（调试通道不可用的降级）：固定表头等悬浮元素可能随视口重复出现',
+  };
+}
+
+/** 整页捕获 = debugger 主路径，失败（非用户取消）→ 视口拼接降级。 */
+async function captureFullPageWithFallback(tab: chrome.tabs.Tab): Promise<CapturePayload> {
+  try {
+    return await captureFullPage(tab);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('已取消')) throw err;
+    console.warn('[hawksnap] debugger 整页捕获不可用，降级视口拼接:', err);
+    return await captureFullPageByViewports(tab);
+  }
+}
+
 // —— 编辑器打开 ——
 
 async function openEditor(payload: CapturePayload): Promise<void> {
@@ -361,7 +475,7 @@ async function runCapture(mode: CaptureMode, tab: chrome.tabs.Tab): Promise<void
   try {
     const payload =
       mode === 'full'
-        ? await captureFullPage(tab)
+        ? await captureFullPageWithFallback(tab)
         : mode === 'visible'
           ? {
               captureId: uuid(),

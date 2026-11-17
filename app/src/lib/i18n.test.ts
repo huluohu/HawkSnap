@@ -25,7 +25,7 @@ function stubNavigatorLanguage(lang: string) {
 describe("i18n", () => {
   it("t_returns_zh_for_known_key", () => {
     setLanguage("zh-CN");
-    expect(t("history.title")).toBe("历史记录");
+    expect(t("history.title")).toBe("历史");
     expect(t("overlay.copy")).toBe("复制");
   });
 

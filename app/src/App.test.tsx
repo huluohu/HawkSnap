@@ -168,11 +168,12 @@ describe("App history section", () => {
           : Promise.resolve(null),
     );
     render(<App />);
-    expect(await screen.findByText("No screenshots yet")).toBeTruthy();
+    // v1.2：空态文案带下一步引导（热键来自设置回显 F1）
+    expect(await screen.findByText("No captures yet — press F1 for your first one, or start from the tray menu")).toBeTruthy();
     // 输入查询 → 防抖后空命中态
     fireEvent.change(screen.getByPlaceholderText("Search shots (file name / app)"), {
       target: { value: "zzz" },
     });
-    expect(await screen.findByText("No matching shots")).toBeTruthy();
+    expect(await screen.findByText("Nothing matches \u201Czzz\u201D — try a different keyword")).toBeTruthy();
   });
 });
