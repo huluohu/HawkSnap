@@ -25,13 +25,13 @@ function stubNavigatorLanguage(lang: string) {
 describe("i18n", () => {
   it("t_returns_zh_for_known_key", () => {
     setLanguage("zh-CN");
-    expect(t("settings.title")).toBe("设置");
+    expect(t("history.title")).toBe("历史记录");
     expect(t("overlay.copy")).toBe("复制");
   });
 
   it("t_returns_en_for_known_key_after_switch", () => {
     setLanguage("en-US");
-    expect(t("settings.title")).toBe("Settings");
+    expect(t("history.title")).toBe("History");
   });
 
   it("t_falls_back_to_zh_then_key", () => {
@@ -50,9 +50,9 @@ describe("i18n", () => {
     expect(
       t("banner.hotkeyError", { kind: "截图", message: "被占用" }),
     ).toBe("截图 热键注册失败：被占用");
-    expect(t("settings.quality", { n: 42 })).toBe("质量 42");
+    expect(t("scrollshot.bar.frames", { n: 42 })).toBe("42 帧");
     // 缺参：占位符原样保留（不吞不炸）。
-    expect(t("settings.quality")).toBe("质量 {n}");
+    expect(t("scrollshot.bar.frames")).toBe("{n} 帧");
   });
 
   it("language_resolution_follows_system_navigator", () => {

@@ -136,7 +136,7 @@ const SECTIONS: SectionDef[] = [
   {
     id: "history",
     labelKey: "nav.history",
-    titleKey: "history.title",
+    titleKey: "nav.history", // 与侧栏共用（主词典 history.title 是主面板的同义键，COPY 不重复留双源）
     icon: "clock",
     hue: "#0a84ff",
     render: (p) => <HistorySection {...p} />,
@@ -146,7 +146,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.shortcuts",
     titleKey: "shortcuts.title",
     icon: "keyboard",
-    hue: "#8e8e93",
+    hue: "#FFB020", // 品牌琥珀（§8 色板）——灰在彩色组里区分度最差
     render: (p) => <ShortcutsSection {...p} />,
   },
   {
@@ -170,7 +170,7 @@ const SECTIONS: SectionDef[] = [
     labelKey: "nav.about",
     titleKey: "about.title",
     icon: "infoCircle",
-    hue: "#5ac8fa",
+    hue: "#af52de", // 紫——原浅蓝与菜单栏青蓝同系，同屏区分度低
     render: (p) => <AboutSection {...p} />,
   },
 ];

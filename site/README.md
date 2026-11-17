@@ -18,7 +18,7 @@ site/
 
 ## 部署（GitHub Pages）
 
-由 `.github/workflows/ci.yml` 的 **`pages`** job 负责：
+由 `.github/workflows/deploy-site.yml` 负责：
 
 - **触发**：`workflow_dispatch`（手动）或 push 到 `main` 且**本次提交触达 `site/`**（job 内用
   `git diff --name-only <before> <sha>` 判定，未触达则跳过——CI 其余 job 不受影响）；

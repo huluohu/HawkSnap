@@ -593,7 +593,7 @@ export default function EditorWindow() {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#1f1f1f" }}>
+    <div className="hs-editor" style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#1f1f1f" }}>
       {/* 工具栏（图标用文字标签起步——计划口径；全部文案 t() 双语） */}
       <div style={toolbar} role="toolbar" aria-label={t("editor.toolbar")}>
         {TOOLS.map((id) => (
@@ -613,6 +613,7 @@ export default function EditorWindow() {
           <button
             key={c}
             type="button"
+            data-swatch=""
             aria-label={`${t("editor.color")} ${c}`}
             title={`${t("editor.color")} ${c}`}
             onClick={() => pickColor(c)}
@@ -775,7 +776,11 @@ export default function EditorWindow() {
                   setOcrHighlight(null);
                 }}
               >
-                ✕
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none"
+                  stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"
+                  aria-hidden="true">
+                  <path d="M6 6l12 12M18 6 6 18" />
+                </svg>
               </button>
             </div>
             {ocrLines.length === 0 ? (
@@ -875,10 +880,11 @@ const sep: CSSProperties = { width: 1, height: 20, background: "#333", margin: "
 const errorBanner: CSSProperties = {
   margin: 8,
   padding: "8px 12px",
-  border: "1px solid #d9534f",
+  // 深色窗体上的错误横幅用深底红字（v1.2：旧浅底红字浮在暗色 UI 上极违和）
+  border: "1px solid #5B2430",
   borderRadius: 6,
-  background: "#fdecea",
-  color: "#a94442",
+  background: "#2a1518",
+  color: "#E5484D",
   fontSize: 13,
 };
 

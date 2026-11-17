@@ -153,7 +153,7 @@ export default function RecordingBarWindow() {
     ...(pipOn ? { border: "1px solid #3E6B4C", color: "#7ED087" } : {}),
     padding: "5px 8px",
   };
-  // N4：按键显示开关（同 pip 的 aria-pressed 口径；图标字形「⌨」+ aria-label/
+  // N4：按键显示开关（同 pip 的 aria-pressed 口径；线性 SVG 键盘图标 + aria-label/
   // title 走 i18n——320px 条内与全部文字按钮共存，图标是唯一放得下的形态）。
   const keycastBtn: CSSProperties = {
     ...btn,
@@ -188,7 +188,12 @@ export default function RecordingBarWindow() {
         aria-label={t("record.keycast")}
         title={t("record.keycast")}
       >
-        <span aria-hidden="true">⌨</span>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+          stroke="currentColor" strokeWidth={1.6} strokeLinecap="round"
+          strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="7" width="18" height="10" rx="1.8" />
+          <path d="M6.5 10.2h.01M9.5 10.2h.01M12.5 10.2h.01M15.5 10.2h.01M18 10.2h.01M6.5 13.8h.01M18 13.8h.01M9.5 13.8h5" />
+        </svg>
       </button>
       <button style={btn} onClick={togglePause}>
         {paused ? t("record.resume") : t("record.pause")}

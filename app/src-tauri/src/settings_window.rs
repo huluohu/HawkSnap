@@ -87,7 +87,9 @@ pub fn open_permission_settings(which: String) -> Result<(), String> {
 
 /// 权限状态查询（设置页「权限」分区的状态点）。
 ///
-/// macOS 返回真实授权态；其余平台权限模型不同 → 两项都报 true（= 不拦用户）。
+/// macOS 返回真实授权态；其余平台 `platform_applicable=false`——权限门不存在，
+/// 前端据此前置显示「无需授权」而不是假绿「已授权」+ 一点就报错的深链按钮
+/// （v1.2 跨平台审计修复：此前 Windows/Linux 用户看到两项绿点，点按钮得 Err）。
 /// 屏幕录制项复用 `hawksnap_platform_mac::permissions::screen_recording_prechecked()`
 /// ——含 preflight 假阴性兜底（窗口标题实证探测），不与截图路径给出矛盾结论。
 #[tauri::command(async)]
@@ -97,20 +99,26 @@ pub fn permission_status() -> Result<PermissionStatus, String> {
         Ok(PermissionStatus {
             screen_recording: hawksnap_platform_mac::permissions::screen_recording_prechecked(),
             accessibility: hawksnap_platform_mac::ax::ax_trusted(),
+            platform_applicable: true,
         })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(PermissionStatus { screen_recording: true, accessibility: true })
+        Ok(PermissionStatus {
+            screen_recording: false,
+            accessibility: false,
+            platform_applicable: false,
+        })
     }
 }
 
-/// 权限状态载荷（serde camelCase → `{screenRecording, accessibility}`）。
+/// 权限状态载荷（serde camelCase → `{screenRecording, accessibility, platformApplicable}`）。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionStatus {
     pub screen_recording: bool,
     pub accessibility: bool,
+    pub platform_applicable: bool,
 }
 
 /// 打开外部链接（设置页「关于」分区的仓库/官网/第三方声明）。

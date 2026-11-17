@@ -131,21 +131,22 @@
                 <td>✅</td>
                 <td>⚠️ 走跨平台 xcap 后端（可能可用，<strong>未逐项适配实测</strong>；窗口自动识别为 macOS 专属）</td>
                 <td>❌ macOS 专属——相关入口明确报错</td>
-                <td>✅ AppImage + deb + rpm + 自动更新（v1.1.0 起）</td>
+                <td>✅ AppImage 应用内更新；deb / rpm 手动装新包</td>
               </tr>
               <tr>
                 <th scope="row">Windows（Win10 1903+ / Win11，x64）</th>
                 <td>✅</td>
                 <td>⚠️ 同 Linux（xcap 后端，<strong>未逐项适配实测</strong>）</td>
                 <td>❌ macOS 专属——同上</td>
-                <td>✅ NSIS 安装器 + MSI + 自动更新（v1.1.0 起）</td>
+                <td>✅ NSIS 安装器应用内更新；MSI 手动装新包</td>
               </tr>
             </tbody>
           </table>
         </div>
         <p class="table-note">四平台安装包均由 CI 构建并经 Ed25519 签名的更新器 feed 分发（v1.1.0 起，Ottr 式矩阵）。
           已知限制：macOS dmg 无公证、Windows 安装器未代码签名（SmartScreen 告警）；Linux / Windows
-          的采集能力未逐项适配实测（录屏/贴图等 macOS 专属能力在其它平台<strong>明确报错</strong>，绝不静默假装成功）。</p>
+          的采集能力未逐项适配实测（录屏/贴图等 macOS 专属能力在其它平台<strong>明确报错</strong>，绝不静默假装成功）；
+          Linux 采集后端面向 X11，Wayland 会话暂不支持（捕获给出可读失败提示，不产出黑屏图）。</p>
       </div>
     </section>
 

@@ -29,9 +29,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getLanguage,
-  setLanguage,
   subscribe,
-  type LanguageSetting,
 } from "../../lib/i18n";
 
 // —— 语言 ——
@@ -79,12 +77,12 @@ const zh = {
   "general.appearance.system": "跟随系统",
   "general.appearance.light": "浅色",
   "general.appearance.dark": "深色",
-  "general.appearance.info": "「跟随系统」会随 macOS 的浅色 / 深色模式自动切换设置窗口的配色。",
+  "general.appearance.info": "「跟随系统」随系统的浅色 / 深色模式自动切换设置窗口的配色。",
   "general.language.label": "界面语言",
   "general.language.system": "跟随系统",
   "general.language.zh": "简体中文",
   "general.language.en": "English",
-  "general.language.info": "「跟随系统」按 macOS 的语言偏好选择中文或英文界面。",
+  "general.language.info": "「跟随系统」按系统语言偏好选择中文或英文界面。",
   "general.output.title": "输出",
   "general.output.desc": "截图与录屏的默认落盘格式。",
   "general.output.formatLabel": "输出格式",
@@ -96,10 +94,10 @@ const zh = {
   "general.storage.title": "存储与启动",
   "general.storage.desc": "截图保存位置与开机行为。",
   "general.storage.saveDirLabel": "保存目录",
-  "general.storage.saveDirPlaceholder": "~/Pictures/HawkSnap",
-  "general.storage.saveDirInfo": "留空即使用默认目录 ~/Pictures/HawkSnap。",
+  "general.storage.saveDirPlaceholder": "留空 = 默认图片目录",
+  "general.storage.saveDirInfo": "留空即使用系统图片目录下的 HawkSnap 文件夹。",
   "general.storage.launchLabel": "开机自启",
-  "general.storage.launchDesc": "登录 macOS 时自动启动猎影。",
+  "general.storage.launchDesc": "登录系统时自动启动猎影。",
   "general.update.title": "软件更新",
   "general.update.desc": "检查新版本并下载安装。",
   "general.update.autoLabel": "自动更新",
@@ -130,7 +128,7 @@ const zh = {
   "capture.modes.regionTitle": "区域截图",
   "capture.modes.regionDesc": "拖拽选择任意矩形区域。",
   "capture.modes.windowTitle": "窗口截图",
-  "capture.modes.windowDesc": "悬停高亮目标窗口，单击直接截取。",
+  "capture.modes.windowDesc": "悬停高亮目标窗口，单击直接截取（窗口 / 元素识别由系统 API 提供，当前随 macOS 提供；其他平台为拖拽框选 + 屏幕边缘磁吸）。",
   "capture.modes.screenTitle": "全屏截图",
   "capture.modes.screenDesc": "截取当前显示器的整块屏幕。",
   "capture.delay.title": "延时截图",
@@ -163,7 +161,6 @@ const zh = {
   "annotate.shortcuts.undo": "撤销",
   "annotate.shortcuts.redo": "重做",
   "annotate.shortcuts.save": "保存",
-  "history.title": "历史记录",
   "history.limit.title": "历史上限",
   "history.limit.desc": "只保留最近的记录，超出上限后自动淘汰最旧的条目。",
   "history.limit.value": "当前上限：{count} 条",
@@ -199,6 +196,8 @@ const zh = {
   "permissions.accessibility.action": "打开系统设置",
   "permissions.accessibility.desc": "用于智能吸附时的悬停取词与按键显示。",
   "permissions.unknown": "状态未知",
+  "permissions.notApplicable.title": "本平台无需应用内授权",
+  "permissions.notApplicable.desc": "屏幕录制 / 辅助功能授权是 macOS 的系统要求；Windows 与 Linux 没有对应权限门，截图功能开箱即用。",
   "permissions.recheck": "重新检查",
   "permissions.usage.title": "权限用途",
   "permissions.usage.desc": "为什么需要这些权限，以及不授权会失去什么。",
@@ -225,7 +224,7 @@ const zh = {
   "menubar.behavior.desc": "猎影常驻菜单栏（Windows / Linux 为系统托盘），macOS 下不显示 Dock 图标；关闭本窗口不会退出应用，退出请用菜单栏的「退出」。",
   "about.title": "关于",
   "about.app.title": "猎影 HawkSnap",
-  "about.app.desc": "轻量的截图、标注与录屏工具，支持 macOS / Windows / Linux。",
+  "about.app.desc": "轻量的截图、标注与录屏工具。截图 / 标注 / OCR / 历史三平台一致；录屏、长截图、贴图、按键显示等进阶能力当前随 macOS 提供（平台矩阵见官网）。",
   "about.license.label": "许可",
   "about.app.license": "MIT 许可",
   "about.app.version": "版本 {version}",
@@ -284,12 +283,12 @@ const en: Record<CopyKey, string> = {
   "general.appearance.system": "Match System",
   "general.appearance.light": "Light",
   "general.appearance.dark": "Dark",
-  "general.appearance.info": "“Match System” follows the macOS light / dark mode for this window.",
+  "general.appearance.info": "“Match System” follows the system light / dark mode for this window.",
   "general.language.label": "Interface language",
   "general.language.system": "Match System",
   "general.language.zh": "简体中文",
   "general.language.en": "English",
-  "general.language.info": "“Match System” picks Chinese or English from the macOS language preference.",
+  "general.language.info": "“Match System” picks Chinese or English from the system language.",
   "general.output.title": "Output",
   "general.output.desc": "Default file format for captures and recordings.",
   "general.output.formatLabel": "Output format",
@@ -301,8 +300,8 @@ const en: Record<CopyKey, string> = {
   "general.storage.title": "Storage & Startup",
   "general.storage.desc": "Where captures are saved and whether HawkSnap starts with macOS.",
   "general.storage.saveDirLabel": "Save folder",
-  "general.storage.saveDirPlaceholder": "~/Pictures/HawkSnap",
-  "general.storage.saveDirInfo": "Leave it empty to use the default folder ~/Pictures/HawkSnap.",
+  "general.storage.saveDirPlaceholder": "留空 = 默认图片目录",
+  "general.storage.saveDirInfo": "Leave it empty to use the HawkSnap folder inside the system pictures folder.",
   "general.storage.launchLabel": "Launch at login",
   "general.storage.launchDesc": "Start HawkSnap automatically when you log in to macOS.",
   "general.update.title": "Software Update",
@@ -335,7 +334,7 @@ const en: Record<CopyKey, string> = {
   "capture.modes.regionTitle": "Region",
   "capture.modes.regionDesc": "Drag to select any rectangular area.",
   "capture.modes.windowTitle": "Window",
-  "capture.modes.windowDesc": "Hover to highlight a window, click to capture it.",
+  "capture.modes.windowDesc": "Hover to highlight a window, click to capture it (window / element detection comes from system APIs, currently macOS; other platforms use drag selection plus screen-edge snapping).",
   "capture.modes.screenTitle": "Full Screen",
   "capture.modes.screenDesc": "Capture the entire display.",
   "capture.delay.title": "Delayed Capture",
@@ -368,7 +367,6 @@ const en: Record<CopyKey, string> = {
   "annotate.shortcuts.undo": "Undo",
   "annotate.shortcuts.redo": "Redo",
   "annotate.shortcuts.save": "Save",
-  "history.title": "History",
   "history.limit.title": "History Limit",
   "history.limit.desc": "Only the most recent entries are kept; older ones are dropped automatically.",
   "history.limit.value": "Current limit: {count} entries",
@@ -404,6 +402,8 @@ const en: Record<CopyKey, string> = {
   "permissions.accessibility.action": "Open System Settings",
   "permissions.accessibility.desc": "Required for hover picking while smart snapping and for the key display overlay.",
   "permissions.unknown": "Status unknown",
+  "permissions.notApplicable.title": "No in-app authorization needed on this platform",
+  "permissions.notApplicable.desc": "Screen recording and accessibility authorization are macOS system requirements; Windows and Linux have no equivalent gates — capture works out of the box.",
   "permissions.recheck": "Re-check",
   "permissions.usage.title": "What the Permissions Are For",
   "permissions.usage.desc": "Why each permission is needed, and what stops working without it.",
@@ -1059,9 +1059,11 @@ export function GeneralSection({ form, setField }: SectionProps) {
                 { value: "en-US", label: tx("general.language.en") },
               ]}
               onChange={(v) => {
+                // v1.2（审计修复）：只写表单——语言与其它设置同一「保存生效」模型。
+                // 此前 onChange 即 setLanguage（本窗口预览），与「修改后点保存生效」
+                // 的分区文案矛盾：不保存关窗，窗口语言与持久化值漂移。save() 成功
+                // 后已按生效值 setLanguage（settings/index.tsx）。
                 setField("language", v);
-                // 语言即时生效（本窗口的 i18n 模块态；与主面板互不干扰）。
-                setLanguage(v as LanguageSetting);
               }}
             />
           </Row>
@@ -1438,6 +1440,9 @@ export function ShortcutsSection({ form, capturing, setCapturing }: SectionProps
 interface PermissionStatus {
   screenRecording: boolean;
   accessibility: boolean;
+  /** v1.2（跨平台审计修复）：权限门是否适用于本平台——非 macOS 恒 false，
+   *  分区据此前置显示「无需授权」的诚实文案（此前假绿「已授权」+ 报错按钮）。 */
+  platformApplicable: boolean;
 }
 
 export function PermissionsSection({ notifyError }: SectionProps) {
@@ -1519,6 +1524,11 @@ export function PermissionsSection({ notifyError }: SectionProps) {
         desc={tx("permissions.status.desc")}
       >
         <Rows>
+          {perm && !perm.platformApplicable ? (
+            // v1.2：非 macOS——两项权限门不存在，不渲染假「已授权」+ 报错按钮。
+            <Row label={tx("permissions.notApplicable.title")} info={tx("permissions.notApplicable.desc")} />
+          ) : (
+            <>
           {permRow(
             "screenRecording",
             tx("permissions.screen.label"),
@@ -1535,12 +1545,16 @@ export function PermissionsSection({ notifyError }: SectionProps) {
             tx("permissions.accessibility.action"),
             tx("permissions.accessibility.desc"),
           )}
+            </>
+          )}
         </Rows>
-        <div className="hs-btn-row" style={{ marginTop: 10 }}>
-          <button type="button" className="hs-btn" onClick={refresh}>
-            {tx("permissions.recheck")}
-          </button>
-        </div>
+        {perm?.platformApplicable === false ? null : (
+          <div className="hs-btn-row" style={{ marginTop: 10 }}>
+            <button type="button" className="hs-btn" onClick={refresh}>
+              {tx("permissions.recheck")}
+            </button>
+          </div>
+        )}
         {permError ? (
           <p className="hs-note" role="alert">
             {permError}

@@ -339,7 +339,13 @@ function App() {
             title={t("panel.openSettings")}
             aria-label={t("panel.openSettings")}
           >
-            <span aria-hidden="true">⚙</span>
+            {/* 线性 SVG 齿轮（与设置窗 Icon 体系同形——图标纪律：不用字形近似） */}
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+              stroke="currentColor" strokeWidth={1.7} strokeLinecap="round"
+              strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.2" />
+              <path d="M12 3.6v2.1M12 18.3v2.1M4.9 7.9l1.8 1.1M17.3 15l1.8 1.1M4.9 16.1l1.8-1.1M17.3 9l1.8-1.1" />
+            </svg>
           </button>
         </div>
       </header>
@@ -425,9 +431,17 @@ function App() {
           )}
           {shots.length === 0 ? (
             <div className="hs-empty">
-              <span className="hs-empty-icon" aria-hidden="true">🖼️</span>
+              <svg className="hs-empty-icon" viewBox="0 0 24 24" width="28" height="28"
+                fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round"
+                strokeLinejoin="round" aria-hidden="true">
+                <rect x="3.5" y="5" width="17" height="14" rx="2.2" />
+                <circle cx="9" cy="10" r="1.6" />
+                <path d="M3.5 16.2 8.4 12l4.2 3.6 3.4-2.8 4.5 3.6" />
+              </svg>
               <p className="hs-empty-text">
-                {debouncedQuery.trim() === "" ? t("history.empty") : t("history.emptySearch")}
+                {debouncedQuery.trim() === ""
+                  ? t("history.empty", { key: hotkeys.capture })
+                  : t("history.emptySearch", { query: debouncedQuery.trim() })}
               </p>
             </div>
           ) : (
@@ -447,7 +461,14 @@ function App() {
                       // 录屏条目（M6）：无缩略图 → 🎬 占位（贴图/重新编辑对 MP4 无意义，
                       // 下方动作区隐藏；打开目录/删除照常）。按 kind 判定（不再靠 app
                       // 列复用——kind 已是契约字段）。
-                      <div className="hs-thumb hs-thumb-record" aria-hidden="true">🎬</div>
+                      <div className="hs-thumb hs-thumb-record" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="26" height="26" fill="none"
+                          stroke="currentColor" strokeWidth={1.6} strokeLinecap="round"
+                          strokeLinejoin="round">
+                          <rect x="3.5" y="6" width="17" height="12" rx="2.2" />
+                          <path d="m10.2 9.5 4.6 2.5-4.6 2.5z" fill="currentColor" stroke="none" />
+                        </svg>
+                      </div>
                     ) : (
                       <div className="hs-thumb hs-thumb-blank" aria-hidden="true" />
                     )}

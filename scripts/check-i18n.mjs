@@ -100,5 +100,73 @@ if (orphans.length) {
   failed = true;
   console.error(`[i18n] 词典孤儿（Z≠E，双向不一致）:\n  ${orphans.join("\n  ")}`);
 }
+
+// —— 设置窗口 COPY 表门（v1.2）——
+// sections.tsx 的本地 zh/en 文案表（tx( 取词)游离在词典门禁之外：\bt\( 正则不匹配
+// tx(——此前 ~200 对文案零校验，漏键/不对齐只有运行时可见。这里补三道断言：
+//   ① zh/en 键集完全相等（主词典 Z==E 的镜像语义）；
+//   ② tx("...") 字面量引用的每个 key 都在表内（tx( 全量扫，无动态豁免——sections
+//      现状无模板字面量取词）；
+//   ③ COPY 键不得与主词典同名（同键双源 = 未来必漂移，出现即红）。
+function extractObject(source, decl) {
+  const at = source.indexOf(decl);
+  if (at < 0) throw new Error(`check-i18n: 未找到 ${decl}`);
+  const open = source.indexOf("{", at);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") {
+      depth--;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  throw new Error(`check-i18n: ${decl} 花括号不配对`);
+}
+function copyKeys(body) {
+  return new Set([...body.matchAll(/"([^"]+)"\s*:/g)].map((m) => m[1]));
+}
+try {
+  const settingsSrc = readFileSync(join(SRC, "windows", "settings", "sections.tsx"), "utf8");
+  const settingsIndexSrc = readFileSync(join(SRC, "windows", "settings", "index.tsx"), "utf8");
+  const zhBody = extractObject(settingsSrc, "const zh = {");
+  const enBody = extractObject(settingsSrc, "const en: Record<CopyKey, string> = {");
+  const zhKeys = copyKeys(zhBody);
+  const enKeys = copyKeys(enBody);
+  const txUsed = new Map();
+  for (const [file, src] of [["sections.tsx", settingsSrc], ["settings/index.tsx", settingsIndexSrc]]) {
+    src.split("\n").forEach((line, i) => {
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) return;
+      for (const m of line.matchAll(/\btx\(\s*(['"])([^'"\\]+)\1/g)) {
+        if (!txUsed.has(m[2])) txUsed.set(m[2], []);
+        txUsed.get(m[2]).push(`${file}:${i + 1}`);
+      }
+    });
+  }
+  const copyMissingZh = [...txUsed.keys()].filter((k) => !zhKeys.has(k));
+  const copyMissingEn = [...txUsed.keys()].filter((k) => !enKeys.has(k));
+  const copyOrphanZh = [...zhKeys].filter((k) => !enKeys.has(k)).map((k) => `${k}  (仅 zh)`);
+  const copyOrphanEn = [...enKeys].filter((k) => !zhKeys.has(k)).map((k) => `${k}  (仅 en)`);
+  const colliding = [...zhKeys].filter((k) => Z.has(k) || E.has(k));
+  console.log(`[i18n] 设置 COPY 表：zh=${zhKeys.size} en=${enKeys.size}，tx 字面量 ${txUsed.size} 个`);
+  let copyFailed = false;
+  if (copyMissingZh.length || copyMissingEn.length) {
+    copyFailed = true;
+    console.error(`[i18n] tx 引用缺失于 COPY 表:\n  zh缺: ${copyMissingZh.join(", ")}\n  en缺: ${copyMissingEn.join(", ")}`);
+  }
+  if (copyOrphanZh.length || copyOrphanEn.length) {
+    copyFailed = true;
+    console.error(`[i18n] COPY 表 zh/en 不对齐:\n  ${[...copyOrphanZh, ...copyOrphanEn].join("\n  ")}`);
+  }
+  if (colliding.length) {
+    copyFailed = true;
+    console.error(`[i18n] COPY 键与主词典同名（双源必漂移）: ${colliding.join(", ")}`);
+  }
+  if (copyFailed) process.exit(1);
+} catch (e) {
+  console.error(`[i18n] 设置 COPY 表门异常: ${e.message}`);
+  process.exit(1);
+}
+
 if (failed) process.exit(1);
 console.log("[i18n] OK：A⊆Z、A⊆E 且 Z==E");

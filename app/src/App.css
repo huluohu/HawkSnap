@@ -130,6 +130,8 @@
    不会带此类 —— body 级背景/字体由此限定作用域。 */
 body.hs-panel-body {
   margin: 0;
+  height: 100%;
+  overflow: hidden;
   background: var(--hs-bg);
   color: var(--hs-text);
   font-family: var(--hs-font);
@@ -143,10 +145,10 @@ body.hs-panel-body {
 
 .hs-root {
   box-sizing: border-box;
-  min-height: 100vh;
+  height: 100vh;
   max-width: 640px;
   margin: 0 auto;
-  padding: 16px 20px 32px;
+  padding: 16px 20px 24px;
   display: flex;
   flex-direction: column;
 }
@@ -256,6 +258,13 @@ body.hs-panel-body {
   display: grid;
   gap: 16px;
   min-width: 0;
+  /* v1.2：桌面式内滚（此前整页滚动，窗口右缘常驻滚动条 + 历史一多全窗滚）。
+     滚动面收进内容区：顶栏/横幅常驻，历史网格在内部滚动。 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  scrollbar-width: thin;
 }
 
 .hs-card {
@@ -822,4 +831,42 @@ div.hs-thumb {
   font-size: 12px;
   color: var(--hs-text-2);
   font-variant-numeric: tabular-nums;
+}
+
+/* —— 编辑器窗口交互三态（v1.2，审计 P1）：工具栏按钮此前纯内联样式——无
+   hover/active/focus-visible，键盘可达性与手感缺失。内联样式优先级高于类选择器，
+   三态用 !important 覆盖底色/描边；色值取编辑器既有激活态（鹰隼蓝系）。作用域仅
+   .hs-editor（editor/index.tsx 根节点），不波及其它窗口。 —— */
+
+.hs-editor button {
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.hs-editor button:hover:not(:disabled):not([aria-pressed="true"]):not([data-swatch]) {
+  background: #223047 !important;
+  border-color: #4aa3ff !important;
+}
+
+/* 色板 swatch：背景即颜色本身，hover 只提亮描边、绝不替换底色 */
+.hs-editor button[data-swatch]:hover:not(:disabled) {
+  border-color: #ffffff !important;
+}
+
+.hs-editor button:active:not(:disabled) {
+  background: #1a2536 !important;
+}
+
+.hs-editor button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 176, 32, 0.35) !important;
+}
+
+.hs-editor button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 主面板空态图标（SVG 替换字形后 inherit 文字色） */
+.hs-empty-icon {
+  color: var(--hs-text-3);
 }

@@ -45,7 +45,7 @@ HawkSnap is a free, fully local, lightweight screen-capture and screen-recording
 - **Keycast**: while recording, pressed key combinations appear on screen (e.g. ⌘⇧A) via a read-only event tap that never intercepts keys;
 - **History**: every shot lands in a local SQLite library — thumbnail grid, Chinese and English full-text search, re-edit / pin / reveal in Finder;
 - **Delayed capture**: pick 1 / 2 / 3 / 5 seconds from the tray menu, cancelable during the countdown;
-- **Browser extension**: a Chrome / Edge extension grabs a full page or a selection and sends it straight to the desktop app (via the Native Messaging bridge);
+- **Browser extension**: a Chrome / Edge extension grabs a full page or a selection and sends it straight to the desktop app (Native Messaging bridge; desktop pairing currently ships for macOS — otherwise captures download locally);
 - **Auto-update**: an Ed25519-signed update channel; updates with bad signatures are rejected before install;
 - **Bilingual UI**: 中文 / English, following the system language or set manually.
 
@@ -55,20 +55,29 @@ Grab the installer for your platform from [Releases](https://github.com/huluohu/
 
 | Platform | Installer | Auto-update |
 | --- | --- | --- |
-| macOS 12.3+ (Apple Silicon / Intel) | dmg | ✅ |
-| Windows 10 1903+ / 11 (x64) | NSIS setup / MSI | ✅ |
-| Linux (x64) | AppImage / deb / rpm | ✅ |
+| macOS 12.3+ (Apple Silicon / Intel) | dmg | ✅ in-app |
+| Windows 10 1903+ / 11 (x64) | NSIS setup | ✅ in-app |
+| Windows 10 1903+ / 11 (x64) | MSI | reinstall the new MSI |
+| Linux (x64) | AppImage | ✅ in-app |
+| Linux (x64) | deb / rpm | reinstall the new package |
 
-Check and install new versions in-app under “Settings → Auto-update”.
+In-app updates (Settings → Auto-update) cover the dmg / NSIS / AppImage
+channels; the MSI and Linux packages are updated by installing the new build
+over the old one.
 
 ## Platform differences
 
 | Capability | macOS | Windows / Linux |
 | --- | --- | --- |
 | Screenshot (region / full screen) | ✅ | ✅ cross-platform backend |
-| Window auto-detection (hover pick) | ✅ | ❌ (falls back to manual framing) |
+| Window auto-detection (hover pick) | ✅ | ❌ (falls back to drag selection + screen-edge snapping) |
 | Recording / PiP / scrolling shot / pin / keycast | ✅ | ❌ (entry points fail explicitly, never silently) |
-| OCR / history / editor / browser extension | ✅ | ✅ |
+| OCR / history / editor | ✅ | ✅ |
+| Browser extension | ✅ (desktop bridge pairing) | ✅ extension + local download; the desktop bridge pairs on macOS only |
+
+On Linux the capture backend targets X11; Wayland sessions are not supported
+yet (the capture call fails with a readable error instead of producing a black
+frame).
 
 ## Usage
 
