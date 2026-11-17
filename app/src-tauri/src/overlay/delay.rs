@@ -35,7 +35,7 @@ const DELAY_POLL: Duration = Duration::from_millis(50);
 
 /// 延时时长白名单（spec §3.1：1/2/3/5 秒可选）：纯逻辑可测，通过则原样返回。
 fn validate_delay_secs(secs: u64) -> Result<u64, String> {
-    matches!(secs, 1 | 2 | 3 | 5).then_some(secs).ok_or_else(|| "仅支持 1/2/3/5 秒".into())
+    matches!(secs, 1 | 2 | 3 | 5).then_some(secs).ok_or_else(|| crate::errcode::coded("delay_secs_invalid"))
 }
 
 /// 门闩独占（纯逻辑可测）：swap(true) 前值为 false 才算抢到——进行中重复启动返回 false。
@@ -107,7 +107,7 @@ pub fn start_delayed_capture(app: AppHandle, secs: u64) -> Result<(), String> {
     // 现在入口直接拒绝并给出与其它入口同款文案（用户立刻知道为什么不能启动）。
     if crate::recording::recording_active() {
         return Err(super::flow::capture_guard_msg(true)
-            .unwrap_or("录屏进行中，请先停止录屏")
+            .unwrap_or("<hserr:recording_active_stop_first>")
             .to_string());
     }
     if crate::scrollshot::scrollshot_active() {
@@ -118,7 +118,7 @@ pub fn start_delayed_capture(app: AppHandle, secs: u64) -> Result<(), String> {
     // （门闩未取，cancel_delayed_capture 判非活动期返回 Err，良性）不会残留到本轮。
     DELAY_ABORT.store(false, Ordering::SeqCst);
     if !try_begin_delay(&DELAY_ACTIVE) {
-        return Err("已有延时截图进行中".into());
+        return Err(crate::errcode::coded("delay_busy"));
     }
     // 建窗失败必须归还门闩：worker 尚未存在，无人会在到点/中止时清 DELAY_ACTIVE，
     // 漏还则此后所有延时启动永远撞「已有延时截图进行中」直至重启。
@@ -180,7 +180,7 @@ pub fn start_delayed_capture(app: AppHandle, secs: u64) -> Result<(), String> {
 #[tauri::command]
 pub fn cancel_delayed_capture() -> Result<(), String> {
     if !DELAY_ACTIVE.load(Ordering::SeqCst) {
-        return Err("没有进行中的延时截图".into());
+        return Err(crate::errcode::coded("delay_none"));
     }
     DELAY_ABORT.store(true, Ordering::SeqCst);
     Ok(())

@@ -141,7 +141,7 @@ fn sweep_expired_grabs(dir: &std::path::Path, now: std::time::SystemTime) -> usi
 pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, String> {
     let mut grabber = hawksnap_platform_mac::XcapGrabber::new();
     let frames = grabber.grab_all().map_err(|e| e.to_string())?;
-    let cache = grabs_cache_dir(&app).ok_or("无法定位缓存目录")?;
+    let cache = grabs_cache_dir(&app).ok_or_else(|| crate::errcode::coded("cache_dir_missing"))?;
     std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(frames.len());
     let mut captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
@@ -241,7 +241,7 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
         let settings = crate::settings::Settings::load(&app);
         // C7 保存目录接线（控制器追加）：settings.save_dir Some(非空) → 用户目录；
         // None → 默认 ~/Pictures/HawkSnap（与 C2 之前行为一致）。
-        let dir = resolve_save_dir(&settings).ok_or("no picture dir")?;
+        let dir = resolve_save_dir(&settings).ok_or_else(|| crate::errcode::coded("save_dir_missing"))?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let (bytes, ext) = if settings.output_format == "jpeg" {
             (
@@ -338,7 +338,7 @@ fn write_annotate_png(rgba: &[u8], w: u32, h: u32) -> Result<std::path::PathBuf,
         "hawksnap-annotate-{}-{seq}.png",
         chrono::Local::now().timestamp_millis()
     ));
-    std::fs::write(&path, &png).map_err(|e| format!("临时文件写入失败: {e}"))?;
+    std::fs::write(&path, &png).map_err(|e| crate::errcode::coded_kv("tmp_write_failed", &[("detail", &e.to_string())]))?;
     Ok(path)
 }
 
@@ -594,7 +594,7 @@ pub async fn capture_fullscreen(app: AppHandle) -> Result<CaptureOutcome, String
     }
     // 整帧 RGBA 已消费完毕：释放内存（每屏 24-59MB，G2 口径）。
     release_captures();
-    last.ok_or_else(|| "全屏截图失败：没有可捕获的显示器".into())
+    last.ok_or_else(|| crate::errcode::coded("fullscreen_no_display"))
 }
 
 #[cfg(test)]

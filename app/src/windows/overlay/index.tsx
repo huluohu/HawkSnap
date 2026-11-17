@@ -13,6 +13,7 @@ import { useSelection, type SelRect, type ConfirmAction } from "./useSelection";
 import type { Rect } from "./geometry";
 import { toLocalHover, type HoverFrame } from "./hover";
 import { barPosition } from "./actionBar";
+import { formatError } from "../../lib/errors";
 import { hexOf, rgbOf, rulerTicks, samplePixel, type Rgb } from "./picker";
 
 type Display = { displayId: number; x: number; y: number; width: number; height: number; scale: number; frameUrl: string; flow: number; intent: string };
@@ -807,7 +808,7 @@ export default function OverlayWindow() {
         <div style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)",
           zIndex: 10, pointerEvents: "none", background: "#0D1522",
           border: "1px solid #5B2430", borderRadius: 8, padding: "4px 12px",
-          fontSize: 12, color: "#E5484D", maxWidth: "80vw" }}>{recordError}</div>
+          fontSize: 12, color: "#E5484D", maxWidth: "80vw" }}>{formatError(recordError)}</div>
       )}
       {/* 冻结帧装载失败（§9 失败不静默）：画布空 = 透明窗，用户会对着未冻结的
           实时桌面框选且毫无线索——行内红幅替代静默。Esc 退出后重按热键即重试。 */}

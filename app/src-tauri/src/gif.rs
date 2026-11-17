@@ -82,7 +82,7 @@ fn frame_delay_10ms(pts: &[f64], i: usize) -> u16 {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn encode_gif(frames: &[GifFrame], out: &Path) -> Result<GifOutcome, String> {
     let Some(first) = frames.first() else {
-        return Err("GIF 编码无帧（录制过短或抽帧失败）".into());
+        return Err(crate::errcode::coded("gif_no_frames"));
     };
     let (w, h) = (first.width, first.height);
     let first_pts = first.pts;
@@ -142,11 +142,11 @@ pub(crate) fn finish_gif_recording(
     mp4_path: &Path,
 ) -> Result<GifOutcome, String> {
     let Some(lane) = lane else {
-        return Err("GIF 通道缺失（会话状态异常）".into());
+        return Err(crate::errcode::coded("gif_lane_missing"));
     };
     let frames = lane.drain();
     if frames.is_empty() {
-        return Err("GIF 通道无帧（录制过短或抽帧已禁用）".into());
+        return Err(crate::errcode::coded("gif_lane_empty"));
     }
     let out = mp4_path.with_extension("gif");
     let outcome = encode_gif(&frames, &out)?;

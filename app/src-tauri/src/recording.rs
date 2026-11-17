@@ -48,6 +48,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
+use crate::errcode::{coded, coded_kv};
 use hawksnap_core::geometry::Rect;
 // 输出路径生成只在 macOS 分支里被调用（record_start / record_start_region 的
 // 录制体整段 `#[cfg(target_os = "macos")]`），非 macOS 构建下本导入无人使用 →
@@ -90,7 +91,7 @@ pub fn parse_record_format(s: &str) -> Result<RecordFormat, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "mp4" => Ok(RecordFormat::Mp4),
         "gif" => Ok(RecordFormat::Gif),
-        _ => Err(format!("输出格式非法: {s}（仅支持 mp4 / gif）")),
+        _ => Err(coded_kv("recording_format_invalid", &[("fmt", &s)])),
     }
 }
 
@@ -123,11 +124,11 @@ pub fn transition(phase: Phase, action: RecAction) -> Result<Phase, String> {
         (Phase::Paused, RecAction::Resume) => Ok(Phase::Recording),
         (Phase::Recording | Phase::Paused, RecAction::Stop) => Ok(Phase::Idle),
         (Phase::Idle, RecAction::Pause | RecAction::Resume) => {
-            Err("没有进行中的录屏".into())
+            Err(coded("no_active_recording"))
         }
-        (Phase::Idle, RecAction::Stop) => Err("没有进行中的录屏".into()),
-        (Phase::Recording, RecAction::Start) => Err("已有录屏进行中".into()),
-        (Phase::Paused, RecAction::Start) => Err("录屏已暂停（先恢复或停止）".into()),
+        (Phase::Idle, RecAction::Stop) => Err(coded("no_active_recording")),
+        (Phase::Recording, RecAction::Start) => Err(coded("recording_busy")),
+        (Phase::Paused, RecAction::Start) => Err(coded("recording_paused_stop_first")),
         (Phase::Recording, RecAction::Resume) | (Phase::Paused, RecAction::Pause) => {
             // 幂等方向：F6 双通道/悬浮条双击的良性竞态——语义上无害，直接照办。
             Ok(phase)
@@ -276,9 +277,9 @@ const MIN_FREE_DISK_BYTES: u64 = 1 << 30;
 fn disk_precheck(base: &std::path::Path) -> Result<(), String> {
     if let Some(free) = hawksnap_platform_mac::record::free_disk_bytes(base) {
         if free < MIN_FREE_DISK_BYTES {
-            return Err(format!(
-                "磁盘空间不足（当前可用 {:.1}GB，录屏需至少 1GB）——请清理磁盘后重试",
-                free as f64 / 1e9
+            return Err(crate::errcode::coded_kv(
+                "disk_low",
+                &[("free", &format!("{:.1}", free as f64 / 1e9))],
             ));
         }
     }
@@ -303,7 +304,7 @@ fn movies_dir() -> Option<std::path::PathBuf> {
 pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String> {
     // 平台门槛（范围裁定）：录屏管线仅 macOS；其余平台显式拒绝（不静默）。
     #[cfg(not(target_os = "macos"))]
-    return Err("仅 macOS 支持录屏（跨平台适配归后续计划）".into());
+    return Err(coded("recording_macos_only"));
 
     #[cfg(target_os = "macos")]
     {
@@ -316,7 +317,7 @@ pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String
     {
         let guard = lock_rec();
         if guard.is_some() {
-            return Err("已有录屏进行中".into());
+            return Err(coded("recording_busy"));
         }
     }
 
@@ -326,10 +327,10 @@ pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String
         if let Err(e) = hawksnap_platform_mac::permissions::open_screen_recording_settings() {
             eprintln!("[hawksnap] 打开屏幕录制权限设置失败: {e}");
         }
-        return Err("屏幕录制权限未授予：请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 HawkSnap（首次失败已自动打开设置）".into());
+        return Err(coded("recording_permission"));
     }
 
-    let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
+    let base = movies_dir().ok_or_else(|| coded("home_missing"))?;
     // v1.2 磁盘预检（§9「录屏启动前预检」）：可用空间 <1GB 拒绝启动——1080p30 H.264
     // 约 8Mbps，1GB ≈ 17 分钟；更低时长会话的收尾（moov 写盘）在满盘时整段丢失。
     // 未知（statfs 失败）= 放行（预检绝不阻断录制）。
@@ -388,7 +389,7 @@ pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String
             // 胜者停止时自会关条。返回 Err 后败者侧由 record-error 横幅呈现。
             let _ = recorder.stop();
             let _ = std::fs::remove_file(&path);
-            return Err("已有录屏进行中".into());
+            return Err(coded("recording_busy"));
         }
         // 会话取号在安装锁内：只有成功启动才消耗序号（失败路径不跳号不影响单调）。
         let session = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -461,18 +462,18 @@ fn default_region_format() -> String {
 pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String> {
     // 平台门槛（同 record_start）：录屏管线仅 macOS。
     #[cfg(not(target_os = "macos"))]
-    return Err("仅 macOS 支持录屏（跨平台适配归后续计划）".into());
+    return Err(coded("recording_macos_only"));
 
     #[cfg(target_os = "macos")]
     {
     if lock_rec().is_some() {
-        return Err("已有录屏进行中".into());
+        return Err(coded("recording_busy"));
     }
     if req.rect.w < 1 || req.rect.h < 1 {
-        return Err(format!("选区尺寸无效: {}x{}", req.rect.w, req.rect.h));
+        return Err(coded_kv("recording_region_invalid", &[("w", &req.rect.w.to_string()), ("h", &req.rect.h.to_string())]));
     }
     let display_id = u32::try_from(req.display_id)
-        .map_err(|_| format!("显示器 id 非法: {}", req.display_id))?;
+        .map_err(|_| coded_kv("recording_display_invalid", &[("id", &req.display_id.to_string())]))?;
     let fmt = parse_record_format(&req.format)?;
 
     // 屏幕录制权限预检（同 record_start：拒绝 → 深链系统设置 + Err 文案）。
@@ -480,10 +481,10 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
         if let Err(e) = hawksnap_platform_mac::permissions::open_screen_recording_settings() {
             eprintln!("[hawksnap] 打开屏幕录制权限设置失败: {e}");
         }
-        return Err("屏幕录制权限未授予：请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 HawkSnap（首次失败已自动打开设置）".into());
+        return Err(coded("recording_permission"));
     }
 
-    let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
+    let base = movies_dir().ok_or_else(|| coded("home_missing"))?;
     // v1.2 磁盘预检（§9「录屏启动前预检」）：可用空间 <1GB 拒绝启动——1080p30 H.264
     // 约 8Mbps，1GB ≈ 17 分钟；更低时长会话的收尾（moov 写盘）在满盘时整段丢失。
     // 未知（statfs 失败）= 放行（预检绝不阻断录制）。
@@ -549,7 +550,7 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
             // 并发败者路径（同 record_start）：只清自己的半成品，不碰悬浮条/覆盖层。
             let _ = recorder.stop();
             let _ = std::fs::remove_file(&path);
-            return Err("已有录屏进行中".into());
+            return Err(coded("recording_busy"));
         }
         let session = SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         guard.replace(RecRuntime {
@@ -588,7 +589,7 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
 #[tauri::command(async)]
 pub fn record_pause() -> Result<(), String> {
     let mut guard = lock_rec();
-    let rt = guard.as_mut().ok_or_else(|| "没有进行中的录屏".to_string())?;
+    let rt = guard.as_mut().ok_or_else(|| coded("no_active_recording"))?;
     rt.phase = transition(rt.phase, RecAction::Pause)?;
     if rt.pause_started.is_none() {
         rt.pause_started = Some(Instant::now());
@@ -602,7 +603,7 @@ pub fn record_pause() -> Result<(), String> {
 #[tauri::command(async)]
 pub fn record_resume() -> Result<(), String> {
     let mut guard = lock_rec();
-    let rt = guard.as_mut().ok_or_else(|| "没有进行中的录屏".to_string())?;
+    let rt = guard.as_mut().ok_or_else(|| coded("no_active_recording"))?;
     rt.phase = transition(rt.phase, RecAction::Resume)?;
     if let Some(t) = rt.pause_started.take() {
         rt.paused_total += t.elapsed();
@@ -628,7 +629,7 @@ pub fn pip_update(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (x, y, size, visible);
-        return Err("仅 macOS 支持画中画".into());
+        return Err(coded("pip_macos_only"));
     }
     #[cfg(target_os = "macos")]
     {
@@ -642,10 +643,10 @@ pub fn pip_update(
             let guard = lock_rec();
             guard
                 .as_ref()
-                .ok_or_else(|| "没有进行中的录屏".to_string())?
+                .ok_or_else(|| coded("no_active_recording"))?
                 .pip_lane
                 .clone()
-                .ok_or_else(|| "本会话不支持画中画".to_string())?
+                .ok_or_else(|| crate::errcode::coded("recording_pip_unavailable"))?
         };
         lane.update(PipUpdate { x, y, size, visible })
     }
@@ -670,7 +671,7 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
 
     let rt = {
         let mut guard = lock_rec();
-        let rt = guard.take().ok_or_else(|| "没有进行中的录屏".to_string())?;
+        let rt = guard.take().ok_or_else(|| coded("no_active_recording"))?;
         // 转移合法性（Idle 态 take 不到 → 已覆盖；此处防未来扩展）。
         transition(rt.phase, RecAction::Stop)?;
         rt

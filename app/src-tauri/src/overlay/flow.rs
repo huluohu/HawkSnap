@@ -46,7 +46,8 @@ pub struct DisplayPayloadForTest {
 /// None。start_capture_flow 首行据此拒绝（互斥守卫 b，F6 对向守卫见 hotkey.rs）。
 pub fn capture_guard_msg(recording_active: bool) -> Option<&'static str> {
     if recording_active {
-        Some("录屏进行中，请先停止录屏")
+        // v1.2 错误码化（§3.7 G6）：前端 lib/errors.ts 映射 err.recording_active_stop_first
+        Some("<hserr:recording_active_stop_first>")
     } else {
         None
     }
@@ -96,7 +97,7 @@ pub fn start_record_selection_flow(app: &AppHandle) -> Result<(), String> {
     // 「先选区后报错」，用户拖完选区确认时才被告知不支持。入口一站拒绝，覆盖层
     // 不再进入；托盘/面板/热键一切新入口自动继承本门。
     #[cfg(not(target_os = "macos"))]
-    return Err("录屏当前仅支持 macOS（平台支持矩阵见 README）".into());
+    return Err(crate::errcode::coded("recording_macos_only"));
     #[cfg(target_os = "macos")]
     {
     // 防御性重查（f6_route 在热键侧已路由；本函数自持守卫——未来托盘/面板等新入口
@@ -127,7 +128,8 @@ pub fn start_record_selection_flow(app: &AppHandle) -> Result<(), String> {
 
 /// 长截图互斥守卫文案（纯函数可测）：长截图会话进行中 → 拒绝启动截图/录制选区。
 pub fn scrollshot_guard_msg() -> &'static str {
-    "长截图进行中，请先完成或取消长截图"
+    // v1.2 错误码化（§3.7 G6）：映射 err.scrollshot_active_finish_first
+    "<hserr:scrollshot_active_finish_first>"
 }
 
 /// N5：长截图选区流程入口（托盘「长截图」）。
@@ -141,7 +143,7 @@ pub fn start_scrollshot_selection_flow(app: &AppHandle) -> Result<(), String> {
     // v1.2 平台前置拒绝（跨平台审计修复）：滚动捕获管线仅 macOS（窗口抓取走
     // CGWindowListCreateImage）——同录制选区，入口一站拒绝。
     #[cfg(not(target_os = "macos"))]
-    return Err("长截图当前仅支持 macOS（平台支持矩阵见 README）".into());
+    return Err(crate::errcode::coded("scrollshot_macos_only"));
     #[cfg(target_os = "macos")]
     {
     if crate::recording::recording_active() {
@@ -151,7 +153,7 @@ pub fn start_scrollshot_selection_flow(app: &AppHandle) -> Result<(), String> {
         return Err(scrollshot_guard_msg().to_string());
     }
     if ANY_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
-        return Err("请先完成或取消当前截图".into());
+        return Err(crate::errcode::coded("overlay_busy_finish_first"));
     }
     // 延时倒计时中止（与 start_capture_flow 同款语义：新流程优先，倒计时让位）。
     if DELAY_ACTIVE.load(Ordering::SeqCst) {

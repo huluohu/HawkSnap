@@ -70,18 +70,20 @@ pub fn open_permission_settings(which: String) -> Result<(), String> {
         let anchor = match which.as_str() {
             "screenRecording" => "Privacy_ScreenCapture",
             "accessibility" => "Privacy_Accessibility",
-            other => return Err(format!("未知的权限面板: {other}")),
+            other => {
+                return Err(crate::errcode::coded_kv("perm_panel_unknown", &[("which", other)]));
+            }
         };
         std::process::Command::new("open")
             .arg(format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"))
             .spawn()
             .map(|_| ())
-            .map_err(|e| format!("打开系统设置失败: {e}"))
+            .map_err(|e| crate::errcode::coded_kv("perm_settings_open_failed", &[("detail", &e.to_string())]))
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = which;
-        Err("仅 macOS 支持系统设置深链".into())
+        Err(crate::errcode::coded("perm_deep_link_macos_only"))
     }
 }
 
@@ -128,10 +130,10 @@ pub struct PermissionStatus {
 #[tauri::command(async)]
 pub fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("仅支持 http/https 链接".into());
+        return Err(crate::errcode::coded("open_url_invalid"));
     }
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .open_url(url, None::<&str>)
-        .map_err(|e| format!("打开链接失败: {e}"))
+        .map_err(|e| crate::errcode::coded_kv("open_url_failed", &[("detail", &e.to_string())]))
 }

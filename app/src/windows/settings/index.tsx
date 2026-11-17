@@ -25,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { setLanguage, type LanguageSetting } from "../../lib/i18n";
+import { formatError } from "../../lib/errors";
 import {
   AboutSection,
   AnnotateSection,
@@ -211,7 +212,7 @@ export default function SettingsWindow() {
       })
       .catch((e) => {
         if (disposed) return;
-        setError(tx("error.generic", { message: String(e) }));
+        setError(tx("error.generic", { message: formatError(String(e)) }));
         setLoaded(true);
       });
     return () => {
@@ -310,7 +311,7 @@ export default function SettingsWindow() {
         setSaved(true);
         window.setTimeout(() => setSaved(false), 1600);
       })
-      .catch((e) => setError(tx("error.save", { message: String(e) })))
+      .catch((e) => setError(tx("error.save", { message: formatError(String(e)) })))
       .finally(() => setSaving(false));
   };
 

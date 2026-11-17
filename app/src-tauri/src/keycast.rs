@@ -323,7 +323,7 @@ const THROTTLE_WINDOW: Duration = Duration::from_millis(100);
 /// best-effort 调用幂等）。
 pub fn keycast_action(active: bool, recording: bool, enable: bool) -> Result<Option<bool>, String> {
     match (enable, recording, active) {
-        (true, false, _) => Err("没有进行中的录屏".into()),
+        (true, false, _) => Err(crate::errcode::coded("no_active_recording")),
         (true, true, false) => Ok(Some(true)),
         (true, true, true) => Ok(None),
         (false, _, true) => Ok(Some(false)),
@@ -488,7 +488,7 @@ pub(crate) fn spawn_tap(on_key: KeyHandler) -> Result<TapHandle, String> {
             };
             if tap_ref.is_null() {
                 clear_handler_if_mine(gen);
-                let _ = tx.send(Err("CGEventTap 创建失败（辅助功能权限可能未授予）".into()));
+                let _ = tx.send(Err(crate::errcode::coded("keycast_tap_permission")));
                 return;
             }
             // +1 引用接管（CGEventTapCreate 返回 create 规则引用；*mut c_void 经
@@ -499,7 +499,7 @@ pub(crate) fn spawn_tap(on_key: KeyHandler) -> Result<TapHandle, String> {
                 // source 未 run，无事件可投递）。
                 unsafe { ffi::CFMachPortInvalidate(tap.as_concrete_TypeRef() as *mut c_void) };
                 clear_handler_if_mine(gen);
-                let _ = tx.send(Err("tap runloop source 创建失败".into()));
+                let _ = tx.send(Err(crate::errcode::coded("keycast_tap_source")));
                 return;
             };
             let runloop = CFRunLoop::get_current();
@@ -536,7 +536,7 @@ pub(crate) fn spawn_tap(on_key: KeyHandler) -> Result<TapHandle, String> {
                     rl.stop();
                 }
             });
-            Err("keycast tap 装机超时（runloop 未就绪）".into())
+            Err(crate::errcode::coded("keycast_tap_timeout"))
         }
     }
 }
@@ -595,7 +595,7 @@ pub fn keycast_set(app: AppHandle, enabled: bool) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn keycast_enable(app: AppHandle) -> Result<(), String> {
     if !hawksnap_platform_mac::ax::ax_trusted() {
-        return Err("需辅助功能权限：系统设置→隐私与安全性→辅助功能 中添加 HawkSnap".into());
+        return Err(crate::errcode::coded("accessibility_permission"));
     }
     // LIFECYCLE 锁下 ACTIVE 必空（enable/disable 串行）——双检防御理论残留。
     if active_now() {
@@ -615,7 +615,7 @@ fn keycast_enable(app: AppHandle) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn keycast_enable(_app: AppHandle) -> Result<(), String> {
-    Err("仅 macOS 支持按键显示".into())
+    Err(crate::errcode::coded("keycast_macos_only"))
 }
 
 /// 停 tap（幂等；录屏收口与开关关闭共用）。cfg 门控兜底非 macOS 编译。

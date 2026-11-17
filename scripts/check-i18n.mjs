@@ -59,7 +59,7 @@ for (const file of files) {
     }
     for (const m of line.matchAll(NON_LITERAL_T)) {
       dynamicCalls.push(
-        `${rel}:${i + 1}  t(${m[1]}…  — 动态 key，检查器盲区（约定：仅 hotkey.kind.* 豁免，单测兜底）`,
+        `${rel}:${i + 1}  t(${m[1]}…  — 动态 key，检查器盲区（约定豁免族：hotkey.kind.* / lib/errors.ts 的 err.*——两族由单测与词典成对性兜底）`,
       );
     }
   });

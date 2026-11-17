@@ -111,7 +111,7 @@ pub fn panel_trigger(app: AppHandle, action: String) -> Result<(), String> {
 #[tauri::command(async)]
 pub fn open_path(path: String) -> Result<(), String> {
     if path.trim().is_empty() {
-        return Err("路径为空".into());
+        return Err(crate::errcode::coded("path_empty"));
     }
     let mut cmd = reveal_command(&std::path::PathBuf::from(&path))?;
     let out = cmd.output().map_err(|e| format!("启动文件管理器失败: {e}"))?;

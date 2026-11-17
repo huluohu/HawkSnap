@@ -81,20 +81,23 @@ pub fn editor_open(
     // 校验：文件存在 + PNG 可解码（ Hawksnap 编辑器只吃自家保存的 PNG；解码顺带
     // 验证非空/非损坏。几 MB 级解码在命令线程，不卡事件循环）。
     if path.trim().is_empty() {
-        return Err("路径为空".into());
+        return Err(crate::errcode::coded("path_empty"));
     }
-    let png = std::fs::read(&path).map_err(|e| format!("读取截图文件失败: {e}"))?;
+    let png = std::fs::read(&path).map_err(|e| crate::errcode::coded_kv("file_read_failed", &[("detail", &e.to_string())]))?;
     let (rgba, w, h) =
-        hawksnap_core::crop::png_to_rgba(&png).map_err(|e| format!("截图文件解码失败: {e}"))?;
+        hawksnap_core::crop::png_to_rgba(&png).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     // 尺寸统一门（v1.2 审计修复，§3.3 画布承载边界）：所有入口（历史重新编辑/贴图
     // 双击/覆盖层标注）在编辑器门前一站设防。WebKit 画布单边 >16384px 直接失败，
     // 巨幅位图会让全画布重绘与导出路径内存尖峰——超限一律拒绝并指路（长截图产物
     // 用「打开目录」查看）。语义等同于历史网格 canReedit 门控的 Rust 侧兜底：
     // 前端漏网（未来新入口）也进不来。长边 8192 = 6K Retina 全屏（6016px）仍有余量。
     if w.max(h) > EDITOR_MAX_EDGE_PX {
-        return Err(format!(
-            "图片长边 {}px 超出编辑器上限（{}px）：长截图等巨幅图片请在历史中用「打开目录」查看",
-            w.max(h), EDITOR_MAX_EDGE_PX
+        return Err(crate::errcode::coded_kv(
+            "editor_too_large",
+            &[
+                ("edge", &w.max(h).to_string()),
+                ("max", &EDITOR_MAX_EDGE_PX.to_string()),
+            ],
         ));
     }
     let _ = rgba; // 尺寸门只需要维度；解码本身即校验
@@ -155,7 +158,7 @@ fn ensure_editor_window(app: &AppHandle) -> Result<(), String> {
             if show_focus_existing(app) {
                 Ok(())
             } else {
-                Err(format!("编辑器窗口创建失败: {build_err}"))
+                Err(crate::errcode::coded_kv("editor_window_failed", &[("detail", &build_err.to_string())]))
             }
         }
     }
@@ -178,10 +181,10 @@ fn show_focus_existing(app: &AppHandle) -> bool {
 #[tauri::command(async)]
 pub fn editor_image_dataurl(path: String) -> Result<String, String> {
     if path.trim().is_empty() {
-        return Err("路径为空".into());
+        return Err(crate::errcode::coded("path_empty"));
     }
-    let png = std::fs::read(&path).map_err(|e| format!("读取截图文件失败: {e}"))?;
-    hawksnap_core::crop::png_to_rgba(&png).map_err(|e| format!("截图文件解码失败: {e}"))?;
+    let png = std::fs::read(&path).map_err(|e| crate::errcode::coded_kv("file_read_failed", &[("detail", &e.to_string())]))?;
+    hawksnap_core::crop::png_to_rgba(&png).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
     Ok(format!("data:image/png;base64,{b64}"))
 }
@@ -234,7 +237,7 @@ pub fn editor_save(
 /// （origin 副作用直接复用，免二次读盘）。
 fn save_png_bytes(path: &str, png_base64: &str) -> Result<(Vec<u8>, u32, u32), String> {
     if path.trim().is_empty() {
-        return Err("路径为空".into());
+        return Err(crate::errcode::coded("path_empty"));
     }
     let p = std::path::Path::new(path);
     let is_png_ext = p
@@ -242,16 +245,16 @@ fn save_png_bytes(path: &str, png_base64: &str) -> Result<(Vec<u8>, u32, u32), S
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("png"));
     if !is_png_ext {
-        return Err("编辑器仅支持保存 PNG 文件".into());
+        return Err(crate::errcode::coded("editor_png_only"));
     }
     if !p.is_file() {
-        return Err(format!("目标文件不存在: {path}"));
+        return Err(crate::errcode::coded_kv("editor_target_missing", &[("path", path)]));
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(png_base64.trim())
-        .map_err(|e| format!("PNG 数据解码失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("png_decode_failed", &[("detail", &e.to_string())]))?;
     if bytes.len() < PNG_MAGIC.len() || bytes[..PNG_MAGIC.len()] != PNG_MAGIC {
-        return Err("不是有效的 PNG 数据".into());
+        return Err(crate::errcode::coded("png_invalid"));
     }
     // 原子落盘（终审修复，数据丢失类）：先写同目录 `<path>.tmp` 再 rename 覆盖——
     // 同目录 rename 是 POSIX 原子操作，覆盖瞬间无第三态；直接 fs::write 覆盖会在
@@ -264,13 +267,13 @@ fn save_png_bytes(path: &str, png_base64: &str) -> Result<(Vec<u8>, u32, u32), S
     };
     if let Err(e) = std::fs::write(&tmp, &bytes) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!("写入截图文件失败: {e}"));
+        return Err(crate::errcode::coded_kv("file_write_failed", &[("detail", &e.to_string())]));
     }
     if let Err(e) = std::fs::rename(&tmp, p) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!("写入截图文件失败: {e}"));
+        return Err(crate::errcode::coded_kv("file_write_failed", &[("detail", &e.to_string())]));
     }
-    hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| format!("截图文件解码失败: {e}"))
+    hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))
 }
 
 /// origin=Capture 的入库半程（M2 Task M3 裁定细化）：编辑后的图另存 PNG 副本到
@@ -288,8 +291,8 @@ fn save_annotate_to_history(
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = crate::commands::save_path_for(&dir, "HawkSnap", "png");
     let png = hawksnap_core::crop::rgba_to_png(rgba, w, h)
-        .map_err(|e| format!("标注截图编码失败: {e}"))?;
-    std::fs::write(&path, &png).map_err(|e| format!("写入截图文件失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("annotate_encode_failed", &[("detail", &e.to_string())]))?;
+    std::fs::write(&path, &png).map_err(|e| crate::errcode::coded_kv("file_write_failed", &[("detail", &e.to_string())]))?;
     crate::commands::record_history(
         app,
         &path,

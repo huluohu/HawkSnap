@@ -31,6 +31,7 @@ import {
   getLanguage,
   subscribe,
 } from "../../lib/i18n";
+import { formatError } from "../../lib/errors";
 
 // —— 语言 ——
 
@@ -1332,7 +1333,7 @@ export function HistorySection({ form, setField, notifyError }: SectionProps) {
   const openInPanel = () => {
     // 失败必须 catch，绝不白屏。
     invoke<void>("open_main_panel")
-      .catch((e) => notifyError(tx("error.generic", { message: String(e) })));
+      .catch((e) => notifyError(tx("error.generic", { message: formatError(String(e)) })));
   };
 
   return (
@@ -1456,7 +1457,7 @@ export function PermissionsSection({ notifyError }: SectionProps) {
         setPerm(s);
         setPermError(null);
       })
-      .catch((e) => setPermError(tx("error.generic", { message: String(e) })));
+      .catch((e) => setPermError(tx("error.generic", { message: formatError(String(e)) })));
   }, [tx]);
 
   useEffect(() => {
@@ -1470,7 +1471,7 @@ export function PermissionsSection({ notifyError }: SectionProps) {
   const openPermission = (which: "screenRecording" | "accessibility") => {
     invoke<void>("open_permission_settings", { which })
       .then(() => refresh())
-      .catch((e) => notifyError(tx("error.permissionOpen", { message: String(e) })));
+      .catch((e) => notifyError(tx("error.permissionOpen", { message: formatError(String(e)) })));
   };
 
   const permRow = (

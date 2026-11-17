@@ -137,10 +137,10 @@ fn resolve_source() -> Result<PinSource, String> {
     }
     let img = arboard::Clipboard::new()
         .and_then(|mut cb| cb.get_image())
-        .map_err(|e| format!("剪贴板没有图像且无最近截图: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("pin_clipboard_empty", &[("detail", &e.to_string())]))?;
     let (w, h) = (img.width as u32, img.height as u32);
     if w == 0 || h == 0 {
-        return Err("剪贴板没有图像且无最近截图: empty image".into());
+        return Err(crate::errcode::coded("pin_clipboard_empty"));
     }
     Ok(PinSource { source: "clipboard", rgba: std::sync::Arc::new(img.bytes.into_owned()), w_px: w, h_px: h, scale: 1.0 })
 }
@@ -224,7 +224,7 @@ fn spawn_pin_window(
     _h_px: u32,
     _scale: f64,
 ) -> Result<u64, String> {
-    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+    Err(crate::errcode::coded("pin_macos_only"))
 }
 
 /// 主显示器中心（全局逻辑坐标，左上原点）：captured_display_frames 里含原点 (0,0) 的
@@ -298,7 +298,7 @@ fn open_pin_editor(
     h_px: u32,
     id: u64,
 ) -> Result<(), String> {
-    let app = app.ok_or("AppHandle 未就绪".to_string())?;
+    let app = app.ok_or_else(|| crate::errcode::coded("apphandle_missing"))?;
     let png = hawksnap_core::crop::rgba_to_png(&rgba, w_px, h_px)
         .map_err(|e| format!("贴图帧编码失败: {e}"))?;
     let path = pin_temp_path(id);
@@ -313,7 +313,7 @@ fn open_pin_editor(
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_latest(_app: &AppHandle) -> Result<(), String> {
-    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+    Err(crate::errcode::coded("pin_macos_only"))
 }
 
 /// M0 历史操作「贴图」：把历史条目的 PNG 文件钉成贴图窗口。async 命令：读文件 +
@@ -326,13 +326,13 @@ pub fn pin_from_path(app: AppHandle, path: String) -> Result<u64, String> {
 
 fn do_pin_from_path(app: &AppHandle, path: &str) -> Result<u64, String> {
     if path.trim().is_empty() {
-        return Err("路径为空".into());
+        return Err(crate::errcode::coded("path_empty"));
     }
-    let png = std::fs::read(path).map_err(|e| format!("读取截图文件失败: {e}"))?;
+    let png = std::fs::read(path).map_err(|e| crate::errcode::coded_kv("file_read_failed", &[("detail", &e.to_string())]))?;
     let (rgba, w_px, h_px) = hawksnap_core::crop::png_to_rgba(&png)
-        .map_err(|e| format!("截图文件解码失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     if w_px == 0 || h_px == 0 {
-        return Err("截图文件为空图".into());
+        return Err(crate::errcode::coded("file_empty_image"));
     }
     spawn_pin_window(app, "history", std::sync::Arc::new(rgba), w_px, h_px, 1.0)
 }
@@ -369,7 +369,7 @@ fn do_pin_set_opacity(app: &AppHandle, id: u64, opacity: f64) -> Result<(), Stri
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_set_opacity(_app: &AppHandle, _id: u64, _opacity: f64) -> Result<(), String> {
-    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+    Err(crate::errcode::coded("pin_macos_only"))
 }
 
 #[tauri::command(async)]
@@ -390,7 +390,7 @@ fn do_pin_zoom(app: &AppHandle, id: u64, factor: f64) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_zoom(_app: &AppHandle, _id: u64, _factor: f64) -> Result<(), String> {
-    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+    Err(crate::errcode::coded("pin_macos_only"))
 }
 
 #[tauri::command(async)]
@@ -405,7 +405,7 @@ fn do_pin_close(app: &AppHandle, id: u64) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_close(_app: &AppHandle, _id: u64) -> Result<(), String> {
-    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+    Err(crate::errcode::coded("pin_macos_only"))
 }
 
 #[tauri::command(async)]
@@ -429,7 +429,7 @@ fn do_pin_close_all(app: &AppHandle) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_close_all(_app: &AppHandle) -> Result<(), String> {
-    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+    Err(crate::errcode::coded("pin_macos_only"))
 }
 
 // —— 贴图管理（v1.2 最小版，§3.2「贴图管理器统一管理」） —--
@@ -480,7 +480,7 @@ fn decode_pin_png(png_base64: &str) -> Result<(Vec<u8>, u32, u32), String> {
     let (rgba, w, h) =
         hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| format!("截图文件解码失败: {e}"))?;
     if w == 0 || h == 0 {
-        return Err("截图文件为空图".into());
+        return Err(crate::errcode::coded("file_empty_image"));
     }
     Ok((rgba, w, h))
 }
@@ -509,7 +509,7 @@ pub(crate) fn pin_set_image_rgba(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, id, rgba, w_px, h_px);
-        Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+        Err(crate::errcode::coded("pin_macos_only"))
     }
 }
 

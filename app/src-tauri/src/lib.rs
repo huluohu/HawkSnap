@@ -14,6 +14,7 @@
 mod bench_mode;
 mod commands;
 mod editor;
+mod errcode;
 mod g4;
 mod gif;
 mod history;

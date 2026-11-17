@@ -115,11 +115,13 @@ pub(crate) fn register_in_order(
             if jobs[i].0.eq_ignore_ascii_case(jobs[j].0) && !jobs[j].0.trim().is_empty() {
                 return Err(HotkeyError {
                     kind: jobs[j].1,
-                    message: format!(
-                        "热键 {} 重复绑定（{} 与 {} 设了同一个组合），请为每个功能设置不同的组合键",
-                        jobs[j].0,
-                        kind_label(jobs[i].1),
-                        kind_label(jobs[j].1),
+                    message: crate::errcode::coded_kv(
+                        "hotkey_duplicate",
+                        &[
+                            ("combo", jobs[j].0),
+                            ("kindA", kind_label(jobs[i].1)),
+                            ("kindB", kind_label(jobs[j].1)),
+                        ],
                     ),
                 });
             }
@@ -157,7 +159,9 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
     use std::str::FromStr;
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
     let shortcut =
-        Shortcut::from_str(combo).map_err(|e| format!("热键 {combo} 无法解析: {e}"))?;
+        Shortcut::from_str(combo).map_err(|e| {
+        crate::errcode::coded_kv("hotkey_parse_failed", &[("combo", combo), ("detail", &e.to_string())])
+    })?;
     let gs = app.global_shortcut();
     let app2 = app.clone();
     // 拥有化组合串：Pin 探针的闭包要求 'static（&str 参数活不过本函数体）。
@@ -170,7 +174,16 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     std::thread::spawn(move || trigger_capture_flow(&app));
                 }
             })
-            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
+            .map_err(|e| {
+                        crate::errcode::coded_kv(
+                            "hotkey_register_failed",
+                            &[
+                                ("combo", combo),
+                                ("detail", &e.to_string()),
+                                ("candidates", candidates_for(kind)),
+                            ],
+                        )
+                    }),
         HotkeyKind::Pin => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
@@ -188,7 +201,7 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                         if overlay_visible {
                             crate::panel::show_capture_error(
                                 &app,
-                                "截图选区进行中：先按 Esc 结束选区，再按贴图键".into(),
+                                crate::errcode::coded("pin_overlay_active"),
                             );
                             return;
                         }
@@ -200,7 +213,16 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     });
                 }
             })
-            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
+            .map_err(|e| {
+                        crate::errcode::coded_kv(
+                            "hotkey_register_failed",
+                            &[
+                                ("combo", combo),
+                                ("detail", &e.to_string()),
+                                ("candidates", candidates_for(kind)),
+                            ],
+                        )
+                    }),
         HotkeyKind::Record => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
@@ -249,7 +271,16 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     });
                 }
             })
-            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
+            .map_err(|e| {
+                        crate::errcode::coded_kv(
+                            "hotkey_register_failed",
+                            &[
+                                ("combo", combo),
+                                ("detail", &e.to_string()),
+                                ("candidates", candidates_for(kind)),
+                            ],
+                        )
+                    }),
         HotkeyKind::Scrollshot => gs
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 if event.state == ShortcutState::Pressed {
@@ -268,7 +299,16 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                     });
                 }
             })
-            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
+            .map_err(|e| {
+                        crate::errcode::coded_kv(
+                            "hotkey_register_failed",
+                            &[
+                                ("combo", combo),
+                                ("detail", &e.to_string()),
+                                ("candidates", candidates_for(kind)),
+                            ],
+                        )
+                    }),
     }
 }
 
@@ -299,7 +339,7 @@ pub fn reregister_with(
         //（capture），仅为满足 HotkeyError 的 kind 字段；文案保持原样。
         .map_err(|e| HotkeyError {
             kind: HotkeyKind::Capture,
-            message: format!("注销旧热键失败: {e}"),
+            message: crate::errcode::coded_kv("hotkey_unbind_failed", &[("detail", &e.to_string())]),
         })?;
     register_in_order(settings, |combo, kind| register_fn(app, combo, kind))
 }

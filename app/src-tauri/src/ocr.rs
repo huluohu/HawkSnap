@@ -152,11 +152,11 @@ pub use hawksnap_ocr::OcrLine as OcrLineDto;
 #[tauri::command(async)]
 pub fn ocr_recognize(app: AppHandle, path: String) -> Result<Vec<OcrLineDto>, String> {
     if path.trim().is_empty() {
-        return Err("路径为空".into());
+        return Err(crate::errcode::coded("path_empty"));
     }
-    let png = std::fs::read(&path).map_err(|e| format!("读取截图文件失败: {e}"))?;
+    let png = std::fs::read(&path).map_err(|e| crate::errcode::coded_kv("file_read_failed", &[("detail", &e.to_string())]))?;
     let (rgba, w, h) =
-        hawksnap_core::crop::png_to_rgba(&png).map_err(|e| format!("截图文件解码失败: {e}"))?;
+        hawksnap_core::crop::png_to_rgba(&png).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     let lines = with_engine(&app, |engine| engine.recognize(&rgba, w, h))?;
     // 历史回填：识别文本拼接（行序）。失败仅记录——识别结果仍返回前端。
     if !lines.is_empty() {
@@ -177,9 +177,9 @@ pub fn ocr_recognize(app: AppHandle, path: String) -> Result<Vec<OcrLineDto>, St
 pub fn ocr_recognize_png(app: AppHandle, png_base64: String) -> Result<Vec<OcrLineDto>, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(png_base64.trim())
-        .map_err(|e| format!("PNG 数据解码失败: {e}"))?;
+        .map_err(|e| crate::errcode::coded_kv("png_decode_failed", &[("detail", &e.to_string())]))?;
     let (rgba, w, h) =
-        hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| format!("截图文件解码失败: {e}"))?;
+        hawksnap_core::crop::png_to_rgba(&bytes).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     with_engine(&app, |engine| engine.recognize(&rgba, w, h))
 }
 
@@ -196,7 +196,7 @@ pub fn ocr_models_dir(app: AppHandle) -> Result<String, String> {
 #[tauri::command(async)]
 pub fn ocr_export_txt(path: String, text: String) -> Result<String, String> {
     if path.trim().is_empty() {
-        return Err("路径为空".into());
+        return Err(crate::errcode::coded("path_empty"));
     }
     let p = std::path::Path::new(&path);
     let is_png = p
@@ -204,10 +204,10 @@ pub fn ocr_export_txt(path: String, text: String) -> Result<String, String> {
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("png"));
     if !is_png {
-        return Err("OCR 导出仅支持 PNG 源图".into());
+        return Err(crate::errcode::coded("ocr_export_png_only"));
     }
     if !p.is_file() {
-        return Err(format!("源图不存在: {path}"));
+        return Err(crate::errcode::coded_kv("ocr_source_missing", &[("path", &path)]));
     }
     let txt_path = p.with_extension("txt");
     std::fs::write(&txt_path, text.as_bytes()).map_err(|e| format!("写入文本文件失败: {e}"))?;

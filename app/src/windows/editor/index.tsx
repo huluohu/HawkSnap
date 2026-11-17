@@ -15,6 +15,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t, subscribe, getLanguage } from "../../lib/i18n";
+import { formatError } from "../../lib/errors";
 import EditorCanvas, { ZOOM_MAX, ZOOM_MIN, type EditorStyle, type Tool } from "./EditorCanvas";
 import { exportToPng } from "./export";
 import { useEditorHistory } from "./history";
@@ -715,17 +716,17 @@ export default function EditorWindow() {
       </div>
       {loadError && (
         <div role="alert" style={errorBanner}>
-          {t("editor.loadError", { message: loadError })}
+          {t("editor.loadError", { message: formatError(loadError) })}
         </div>
       )}
       {saveError && (
         <div role="alert" style={errorBanner}>
-          {t("editor.saveFailed", { message: saveError })}
+          {t("editor.saveFailed", { message: formatError(saveError) })}
         </div>
       )}
       {ocrError && (
         <div role="alert" style={{ ...errorBanner, display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ flex: 1 }}>{t("editor.ocr.failed", { message: ocrError })}</span>
+          <span style={{ flex: 1 }}>{t("editor.ocr.failed", { message: formatError(ocrError) })}</span>
           {/* §9「手动下载入口」（v1.2）：模型下载失败/校验失败时可打开模型目录手动
               放置文件后重试（ensure_models 幂等——SHA256 对得上就不重下）。 */}
           <button type="button" style={btn} onClick={() => void openModelsDir()}>

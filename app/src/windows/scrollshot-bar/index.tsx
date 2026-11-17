@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { formatError } from "../../lib/errors";
 import { listen } from "@tauri-apps/api/event";
 import { t } from "../../lib/i18n";
 
@@ -163,7 +164,7 @@ export default function ScrollshotBarWindow() {
       <style>{`@keyframes hawksnap-ss-pulse { 50% { opacity: 0.35; } }`}</style>
       <span style={dot} aria-hidden="true" />
       <span style={hint}>{hintText}</span>
-      {error && <span style={err} title={error}>{error}</span>}
+      {error && <span style={err} title={error}>{formatError(error)}</span>}
       <span style={count}>{t("scrollshot.bar.frames", { n: frames ?? 0 })}</span>
       {/* 完成按钮：⌘S 不可用时它是唯一出口 → 高亮提示；收尾在飞行中 → 禁用 */}
       <button

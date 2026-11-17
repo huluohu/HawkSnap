@@ -9,6 +9,7 @@ import {
   type LanguageSetting,
 } from "./lib/i18n";
 import { formatShotDate, shotKind, canReedit, type ShotRow } from "./lib/history";
+import { formatError } from "./lib/errors";
 // 真应用图标（光圈 + 鹰眼，512×512）——品牌位一律用它，不用 emoji 近似。
 import appIcon from "./assets/app-icon.png";
 import "./App.css";
@@ -357,18 +358,18 @@ function App() {
           <div role="alert" className="hs-banner hs-banner-error">
             {t("banner.hotkeyError", {
               kind: t(`hotkey.kind.${hotkeyError.kind}`),
-              message: hotkeyError.message,
+              message: formatError(hotkeyError.message),
             })}
           </div>
         )}
         {captureError && (
           <div role="alert" className="hs-banner hs-banner-error">
-            {t("banner.captureError", { message: captureError })}
+            {t("banner.captureError", { message: formatError(captureError) })}
           </div>
         )}
         {recordError && (
           <div role="alert" className="hs-banner hs-banner-error">
-            {t("banner.recordError", { message: recordError })}
+            {t("banner.recordError", { message: formatError(recordError) })}
           </div>
         )}
         {/* 发现新版本 → 引导去设置窗口安装（安装/重启流程在设置窗口统一实现，
@@ -426,7 +427,7 @@ function App() {
           </div>
           {historyError && (
             <div role="alert" className="hs-banner hs-banner-error hs-banner-sm">
-              {t("history.actionError", { message: historyError })}
+              {t("history.actionError", { message: formatError(historyError) })}
             </div>
           )}
           {shots.length === 0 ? (

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { t } from "../../lib/i18n";
+import { formatError } from "../../lib/errors";
 
 // 录屏悬浮条（M6 首版 280×56；N4 加按键显示开关后加宽为 320×56——顶部居中定位
 // 不变、宽度自适应内容，常驻复用与 countdown 同款 show/hide 模式）：
@@ -76,14 +77,14 @@ export default function RecordingBarWindow() {
 
   const togglePause = () => {
     const cmd = paused ? "record_resume" : "record_pause";
-    void invoke(cmd).catch((e) => setError(String(e)));
+    void invoke(cmd).catch((e) => setError(formatError(String(e))));
   };
 
   // 停止（评审修复：不静默）——record_stop 失败（磁盘满 / MP4 收尾失败 / 收尾超时）
   // 此前被吞掉而悬浮条已隐藏，主停止入口零反馈。与 togglePause 同款行内 setError：
   // Rust 侧仍持会话（stop 已从 REC 取出、半成品保留在盘），错误文案即 Err 串。
   const stop = () => {
-    void invoke<string>("record_stop").catch((e) => setError(String(e)));
+    void invoke<string>("record_stop").catch((e) => setError(formatError(String(e))));
   };
 
   // N3 画中画开关：乐观置位 → pip_update 失败（相机权限未授予/无相机）回落 +
@@ -94,7 +95,7 @@ export default function RecordingBarWindow() {
     setPipOn(next);
     void invoke("pip_update", { visible: next }).catch((e) => {
       setPipOn(false);
-      setError(String(e));
+      setError(formatError(String(e)));
       if (pipTimerRef.current !== null) window.clearTimeout(pipTimerRef.current);
       pipTimerRef.current = window.setTimeout(() => setError(null), 2000);
     });
@@ -109,7 +110,7 @@ export default function RecordingBarWindow() {
     setKeycastOn(next);
     void invoke("keycast_set", { enabled: next }).catch((e) => {
       setKeycastOn(false);
-      setError(String(e));
+      setError(formatError(String(e)));
       if (keycastTimerRef.current !== null) window.clearTimeout(keycastTimerRef.current);
       keycastTimerRef.current = window.setTimeout(() => setError(null), 2000);
     });
@@ -177,7 +178,7 @@ export default function RecordingBarWindow() {
         {paused ? <span style={{ color: "#FFB020", fontSize: 12, marginRight: 6 }}>{t("record.paused")}</span> : null}
         {seconds === null ? "00:00" : mmss(seconds)}
       </span>
-      {error && <span style={{ fontSize: 10, color: "#E5484D", maxWidth: 80, overflow: "hidden" }}>{error}</span>}
+      {error && <span style={{ fontSize: 10, color: "#E5484D", maxWidth: 80, overflow: "hidden" }} title={error}>{error}</span>}
       <button style={pipBtn} onClick={togglePip} aria-pressed={pipOn} title={t("record.pip")}>
         {t("record.pip")}
       </button>

@@ -341,27 +341,30 @@ pub fn scrollshot_start(app: AppHandle, req: ScrollshotReq) -> Result<(), String
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, req);
-        return Err("仅 macOS 支持长截图".into());
+        return Err(crate::errcode::coded("scrollshot_macos_only"));
     }
     #[cfg(target_os = "macos")]
     {
     if scrollshot_active() {
-        return Err("已有长截图进行中".into());
+        return Err(crate::errcode::coded("scrollshot_busy"));
     }
     if crate::recording::recording_active() {
-        return Err("录屏进行中，请先停止录屏".into());
+        return Err(crate::errcode::coded("recording_active_stop_first"));
     }
     if req.rect.w < 16 || req.rect.h < 16 {
-        return Err(format!("选区尺寸过小：{}×{}", req.rect.w, req.rect.h));
+        return Err(crate::errcode::coded_kv(
+            "scrollshot_region_too_small",
+            &[("w", &req.rect.w.to_string()), ("h", &req.rect.h.to_string())],
+        ));
     }
     // 屏幕录制权限预检（与截图/录屏同门槛；未授权时 macOS 静默返回空图）。
     if !hawksnap_platform_mac::permissions::screen_recording_prechecked() {
         let _ = hawksnap_platform_mac::permissions::open_screen_recording_settings();
-        return Err("屏幕录制权限未授予：请在 系统设置 → 隐私与安全性 → 屏幕录制 中授权 HawkSnap（首次失败已自动打开设置）".into());
+        return Err(crate::errcode::coded("recording_permission"));
     }
     // 显示器全局几何（覆盖层那一轮抓屏留下的几何快照；释放整帧后仍保留）。
     let Some(geo) = crate::commands::captured_display_geometry(req.display_id) else {
-        return Err("找不到显示器的位置信息，请重新框选".into());
+        return Err(crate::errcode::coded("scrollshot_display_missing"));
     };
     let global = hawksnap_platform_mac::windowcap::GlobalRect::new(
         geo.x + req.rect.x as f64,
@@ -428,7 +431,7 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
         let guard = lock_session();
         guard.as_ref().cloned()
     }
-    .ok_or_else(|| "没有进行中的长截图".to_string())?;
+    .ok_or_else(|| crate::errcode::coded("scrollshot_none"))?;
 
     // —— ⓪ 单飞守卫（评审 Minor：并发「完成」）——
     //
@@ -436,7 +439,7 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
     // **空画布**（画布已被取走）→ 旧实现弹出**虚假的**「保存失败」横幅（第一次
     // 其实已经成功）。这里只允许**一个**收尾在飞行中；后来的直接安静返回。
     if session.finishing.swap(true, Ordering::SeqCst) {
-        return Err("长截图正在结束中，请稍候".to_string());
+        return Err(crate::errcode::coded("scrollshot_stopping"));
     }
 
     // —— ① 拼接（重活，秒级）——
@@ -491,9 +494,9 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
             if outcome.consumes_session() {
                 consume_session(&app, &session);
             }
-            crate::panel::show_capture_error(&app, format!("长截图：保存失败（{e}）"));
+            crate::panel::show_capture_error(&app, crate::errcode::coded_kv("scrollshot_save_failed", &[("detail", &e.to_string())]));
             eprintln!("[hawksnap] 长截图保存失败: {e}");
-            return Err(format!("保存失败: {e}"));
+            return Err(crate::errcode::coded_kv("scrollshot_save_failed", &[("detail", &e.to_string())]));
         }
     };
 
@@ -535,7 +538,8 @@ fn surface_failure(app: &AppHandle, session: &Session, msg: &str) {
             message: msg.to_string(),
         },
     );
-    crate::panel::show_capture_error(app, format!("长截图：{msg}"));
+    // v1.2 错误码化：msg 可能已是 <hserr:…> 哨兵——去掉「长截图：」前缀，否则前端解析不了
+    crate::panel::show_capture_error(app, msg.to_string());
 }
 
 /// 消费会话：停采集 + 注销热键 + 关提示条 + 清槽位（**仅在成功/不可重试时**）。
@@ -574,7 +578,7 @@ pub fn scrollshot_force_stop(app: &AppHandle) {
 #[tauri::command(async)]
 pub fn scrollshot_abort(app: AppHandle) -> Result<(), String> {
     if scrollshot_stopping() {
-        return Err("长截图正在结束中，请稍候".to_string());
+        return Err(crate::errcode::coded("scrollshot_stopping"));
     }
     scrollshot_force_stop(&app);
     Ok(())
@@ -720,7 +724,7 @@ fn register_finish_hotkey(app: &AppHandle) -> bool {
         std::thread::spawn(move || {
             if !scrollshot_active() {
                 // 竞态兜底：会话已被消费（热键应已注销）→ 明确告知，不静默。
-                crate::panel::show_capture_error(&app, "长截图：没有进行中的长截图".into());
+                crate::panel::show_capture_error(&app, crate::errcode::coded("scrollshot_none"));
                 return;
             }
             // 失败**已由 scrollshot_stop 自行投递**（提示条行内 + 横幅）→ 这里只记
@@ -854,7 +858,7 @@ fn write_thumbnail(
         .unwrap_or_else(|| "shot".into());
     let thumb_path = thumbs_dir.join(format!("{stem}.png"));
     let Some((thumb_rgba, tw, th)) = thumb else {
-        return Err("首帧缩略图缺失，无法生成".into());
+        return Err(crate::errcode::coded("scrollshot_thumb_missing"));
     };
     let thumb_png = hawksnap_core::crop::rgba_to_png(&thumb_rgba, tw, th).map_err(|e| e.to_string())?;
     std::fs::write(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
