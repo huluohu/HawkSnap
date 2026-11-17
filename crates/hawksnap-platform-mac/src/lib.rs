@@ -18,7 +18,9 @@ pub fn frontmost_app_name() -> Option<String> {
     // sharedWorkspace/frontmostApplication/localizedName 均为无副作用查询。
     let ws = unsafe { NSWorkspace::sharedWorkspace() };
     let app = unsafe { ws.frontmostApplication() }?;
-    Some(app.localizedName().to_string())
+    // localizedName 是可空属性（无名称的进程返回 nil）——链式 ? 落到 None。
+    let name = unsafe { app.localizedName() }?;
+    Some(name.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
