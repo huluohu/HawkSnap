@@ -262,6 +262,9 @@ pub(crate) fn list_at_filtered(
             duration: r.get(8)?,
         })
     };
+    // 注意（E0597）：Rows 迭代器借用 stmt，而 if/else 表达式的**临时值**活到整个
+    // let 语句结束——stmt 是分支内的局部绑定，先死 → 借用越界。先在分支内 collect
+    // 成 Vec（临时 Rows 在 stmt 仍活的语句内结束），再产出。
     let rows = if let Some(kind) = kind {
         let mut stmt = conn
             .prepare(
@@ -270,10 +273,12 @@ pub(crate) fn list_at_filtered(
                  ORDER BY id DESC LIMIT ?2 OFFSET ?3",
             )
             .map_err(|e| e.to_string())?;
-        stmt.query_map(rusqlite::params![kind, limit, offset], map_row)
+        let collected = stmt
+            .query_map(rusqlite::params![kind, limit, offset], map_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        collected
     } else {
         let mut stmt = conn
             .prepare(
@@ -281,10 +286,12 @@ pub(crate) fn list_at_filtered(
                  ORDER BY id DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(|e| e.to_string())?;
-        stmt.query_map(rusqlite::params![limit, offset], map_row)
+        let collected = stmt
+            .query_map(rusqlite::params![limit, offset], map_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        collected
     };
     Ok(rows)
 }
@@ -329,6 +336,7 @@ pub(crate) fn search_at_filtered(
         })
     };
     let escaped = escape_match(query);
+    // E0597 同款注意（见 list_at_filtered）：分支内先 collect 成 Vec 再产出。
     let rows = if let Some(kind) = kind {
         let mut stmt = conn
             .prepare(
@@ -340,10 +348,12 @@ pub(crate) fn search_at_filtered(
                  LIMIT ?3",
             )
             .map_err(|e| e.to_string())?;
-        stmt.query_map(rusqlite::params![escaped, kind, limit], map_row)
+        let collected = stmt
+            .query_map(rusqlite::params![escaped, kind, limit], map_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        collected
     } else {
         let mut stmt = conn
             .prepare(
@@ -355,10 +365,12 @@ pub(crate) fn search_at_filtered(
                  LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
-        stmt.query_map(rusqlite::params![escaped, limit], map_row)
+        let collected = stmt
+            .query_map(rusqlite::params![escaped, limit], map_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        collected
     };
     Ok(rows)
 }

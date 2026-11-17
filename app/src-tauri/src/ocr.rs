@@ -9,6 +9,7 @@
 //! Mutex 串行推理——编辑器单窗口语义下单路使用，无吞吐诉求）。
 //! 下载/推理均为 `#[tauri::command(async)]`（命令线程执行，不卡事件循环）。
 
+use base64::Engine as _; // STANDARD.decode（ocr_recognize_png 的 base64 载荷）
 use hawksnap_ocr::models::ProgressPhase;
 use serde::Serialize;
 use std::time::{Duration, Instant};

@@ -119,6 +119,7 @@ fn run_bench(app: AppHandle, rounds: u64) {
             rect: Rect { x: x as i32, y: y as i32, w: w as u32, h: h as u32 },
             copy: true, // 被测路径：confirm → clipboard_done（副作用：每轮覆盖剪贴板）
             save: false,
+            run_ocr: false, // v1.2 新增字段——bench 不触发 OCR
         };
         // t_confirm：紧贴 finish_capture（其首行 mark("confirm")）；clipboard 基线同刻
         // 读取，供下方 t_clip 轮询做「越过基线」判定。
