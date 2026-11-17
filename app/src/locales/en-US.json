@@ -147,5 +147,19 @@
   "editor.zoom.reset": "Reset to 100%",
   "editor.zoom.fit": "Fit window",
   "editor.ocr.modelsDir": "Open models folder",
-  "editor.ocr.exportedTo": "Exported: {path}"
+  "editor.ocr.exportedTo": "Exported: {path}",
+  "hotkey.kind.scrollshot": "Scrolling capture",
+  "history.filter": "Filter by type",
+  "history.kind.all": "All",
+  "history.kind.region": "Captures",
+  "history.kind.recording": "Recordings",
+  "history.kind.scrollshot": "Scrolling",
+  "pins.title": "Pins",
+  "pins.empty": "No pins yet — press {key} to pin the latest capture on your desktop",
+  "pins.item": "Pin #{id} · {w}×{h}",
+  "pins.close": "Close",
+  "record.fps": "Frame rate",
+  "record.format.label": "Output format",
+  "record.cursor": "Cursor",
+  "record.cursorTip": "Show cursor in the recording (click to toggle)"
 }

@@ -183,7 +183,11 @@ pub fn record(
     kind: &str,
     duration: Option<f64>,
 ) -> Result<i64, String> {
-    record_at(&db_path(app), path, thumb_path, w, h, app_name, kind, duration)
+    // 保留策略可调（v1.2，§3.6「默认 500 条或 1GB，可调」）：行预算来自设置
+    // （history_max_rows，sanitized clamp 50..=10000）。1GB 媒体预算归后续版本
+    // （需要媒体体积账本，见 feature-list P1）。
+    let max_rows = crate::settings::Settings::load(app).history_max_rows as i64;
+    record_at_with_limit(&db_path(app), path, thumb_path, w, h, app_name, kind, duration, max_rows)
 }
 
 pub(crate) fn record_at(
@@ -195,6 +199,20 @@ pub(crate) fn record_at(
     app_name: &str,
     kind: &str,
     duration: Option<f64>,
+) -> Result<i64, String> {
+    record_at_with_limit(db, path, thumb_path, w, h, app_name, kind, duration, KEEP_MAX)
+}
+
+pub(crate) fn record_at_with_limit(
+    db: &std::path::Path,
+    path: &str,
+    thumb_path: &str,
+    w: i64,
+    h: i64,
+    app_name: &str,
+    kind: &str,
+    duration: Option<f64>,
+    max_rows: i64,
 ) -> Result<i64, String> {
     let conn = open_at(db)?;
     let created_at = chrono::Local::now().to_rfc3339();
@@ -212,42 +230,62 @@ pub(crate) fn record_at(
     // 裁剪失败仅 eprintln 降级，不影响本次已完成的入库（record 已成功，报
     // 「入库失败」会误导——终审 Fix 1 口径）。裁剪语义由 prune_keeps_newest_max 与
     // record_prunes_beyond_keep_max 单测覆盖。
-    if let Err(e) = prune_at(db, KEEP_MAX) {
+    if let Err(e) = prune_at(db, max_rows) {
         eprintln!("[hawksnap] 历史裁剪失败（忽略）: {e}");
     }
     Ok(id)
 }
 
-pub fn list(app: &AppHandle, limit: i64, offset: i64) -> Result<Vec<ShotRow>, String> {
-    list_at(&db_path(app), limit, offset)
-}
-
 /// M0：offset 分页（网格分页留用，默认 0）。新→旧不变。
 pub(crate) fn list_at(db: &std::path::Path, limit: i64, offset: i64) -> Result<Vec<ShotRow>, String> {
+    list_at_filtered(db, limit, offset, None)
+}
+
+/// v1.2 类型筛选（§3.6「按类型」）：kind 白名单值作为可选 WHERE 条件——None = 全部。
+pub(crate) fn list_at_filtered(
+    db: &std::path::Path,
+    limit: i64,
+    offset: i64,
+    kind: Option<&str>,
+) -> Result<Vec<ShotRow>, String> {
     let conn = open_at(db)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, created_at, path, thumb_path, w, h, app, kind, duration FROM shots
-             ORDER BY id DESC LIMIT ?1 OFFSET ?2",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([limit, offset], |r| {
-            Ok(ShotRow {
-                id: r.get(0)?,
-                created_at: r.get(1)?,
-                path: r.get(2)?,
-                thumb_path: r.get(3)?,
-                w: r.get(4)?,
-                h: r.get(5)?,
-                app: r.get(6)?,
-                kind: r.get(7)?,
-                duration: r.get(8)?,
-            })
+    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<ShotRow> {
+        Ok(ShotRow {
+            id: r.get(0)?,
+            created_at: r.get(1)?,
+            path: r.get(2)?,
+            thumb_path: r.get(3)?,
+            w: r.get(4)?,
+            h: r.get(5)?,
+            app: r.get(6)?,
+            kind: r.get(7)?,
+            duration: r.get(8)?,
         })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+    };
+    let rows = if let Some(kind) = kind {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, created_at, path, thumb_path, w, h, app, kind, duration FROM shots
+                 WHERE kind = ?1
+                 ORDER BY id DESC LIMIT ?2 OFFSET ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        stmt.query_map(rusqlite::params![kind, limit, offset], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, created_at, path, thumb_path, w, h, app, kind, duration FROM shots
+                 ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        stmt.query_map(rusqlite::params![limit, offset], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
     Ok(rows)
 }
 
@@ -262,43 +300,66 @@ fn escape_match(query: &str) -> String {
 
 /// FTS5 搜索：命中按 bm25 rank（越小越相关）升序，同分按 id 新→旧。
 /// 空/全空白查询返回空集（前端空输入走 list，此为防御）。
-pub fn search(app: &AppHandle, query: &str, limit: i64) -> Result<Vec<ShotRow>, String> {
-    search_at(&db_path(app), query, limit)
+pub(crate) fn search_at(db: &std::path::Path, query: &str, limit: i64) -> Result<Vec<ShotRow>, String> {
+    search_at_filtered(db, query, limit, None)
 }
 
-pub(crate) fn search_at(db: &std::path::Path, query: &str, limit: i64) -> Result<Vec<ShotRow>, String> {
+/// v1.2 类型筛选（§3.6）：FTS 命中集上叠加可选 kind 条件。
+pub(crate) fn search_at_filtered(
+    db: &std::path::Path,
+    query: &str,
+    limit: i64,
+    kind: Option<&str>,
+) -> Result<Vec<ShotRow>, String> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
     let conn = open_at(db)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT s.id, s.created_at, s.path, s.thumb_path, s.w, s.h, s.app, s.kind, s.duration
-             FROM shots_fts
-             JOIN shots s ON s.id = shots_fts.rowid
-             WHERE shots_fts MATCH ?1
-             ORDER BY shots_fts.rank, s.id DESC
-             LIMIT ?2",
-        )
-        .map_err(|e| e.to_string())?;
-    let escaped = escape_match(query);
-    let rows = stmt
-        .query_map(rusqlite::params![escaped, limit], |r| {
-            Ok(ShotRow {
-                id: r.get(0)?,
-                created_at: r.get(1)?,
-                path: r.get(2)?,
-                thumb_path: r.get(3)?,
-                w: r.get(4)?,
-                h: r.get(5)?,
-                app: r.get(6)?,
-                kind: r.get(7)?,
-                duration: r.get(8)?,
-            })
+    let map_row = |r: &rusqlite::Row| -> rusqlite::Result<ShotRow> {
+        Ok(ShotRow {
+            id: r.get(0)?,
+            created_at: r.get(1)?,
+            path: r.get(2)?,
+            thumb_path: r.get(3)?,
+            w: r.get(4)?,
+            h: r.get(5)?,
+            app: r.get(6)?,
+            kind: r.get(7)?,
+            duration: r.get(8)?,
         })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+    };
+    let escaped = escape_match(query);
+    let rows = if let Some(kind) = kind {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.created_at, s.path, s.thumb_path, s.w, s.h, s.app, s.kind, s.duration
+                 FROM shots_fts
+                 JOIN shots s ON s.id = shots_fts.rowid
+                 WHERE shots_fts MATCH ?1 AND s.kind = ?2
+                 ORDER BY shots_fts.rank, s.id DESC
+                 LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        stmt.query_map(rusqlite::params![escaped, kind, limit], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.created_at, s.path, s.thumb_path, s.w, s.h, s.app, s.kind, s.duration
+                 FROM shots_fts
+                 JOIN shots s ON s.id = shots_fts.rowid
+                 WHERE shots_fts MATCH ?1
+                 ORDER BY shots_fts.rank, s.id DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        stmt.query_map(rusqlite::params![escaped, limit], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
     Ok(rows)
 }
 
@@ -408,24 +469,60 @@ pub(crate) fn prune_at(db: &std::path::Path, max: i64) -> Result<(), String> {
 
 
 /// M0：limit/offset 可选（前端省略时 200/0——面板首屏口径不变）。
+/// v1.2：kind 可选类型筛选（§3.6「按类型」）——白名单外的值按 None（全部）处理。
 #[tauri::command]
 pub fn history_list(
     app: AppHandle,
     limit: Option<i64>,
     offset: Option<i64>,
+    kind: Option<String>,
 ) -> Result<Vec<ShotRow>, String> {
-    list(&app, limit.unwrap_or(200).clamp(1, 500), offset.unwrap_or(0).max(0))
+    list_filtered(
+        &app,
+        limit.unwrap_or(200).clamp(1, 500),
+        offset.unwrap_or(0).max(0),
+        kind.as_deref().filter(|k| KIND_FILTERS.contains(&k)),
+    )
 }
 
 /// M0 计划接口：history_search(query) -> Vec<ShotRow>。F12 目标 ≤200ms/500 条
 /// （fs_500_rows_search_timing 单测计时守护）。查询转义在 search_at 内做（防注入）。
+/// v1.2：kind 可选类型筛选，与 history_list 同白名单。
 #[tauri::command]
 pub fn history_search(
     app: AppHandle,
     query: String,
     limit: Option<i64>,
+    kind: Option<String>,
 ) -> Result<Vec<ShotRow>, String> {
-    search(&app, &query, limit.unwrap_or(50).clamp(1, 200))
+    search_filtered(
+        &app,
+        &query,
+        limit.unwrap_or(50).clamp(1, 200),
+        kind.as_deref().filter(|k| KIND_FILTERS.contains(&k)),
+    )
+}
+
+/// 类型筛选白名单（§3.6 kind 列取值 + browser 插件来源）。
+const KIND_FILTERS: [&str; 4] = ["region", "recording", "scrollshot", "browser"];
+
+/// 类型筛选入口（v1.2）：AppHandle 版走 db_path。
+pub fn list_filtered(
+    app: &AppHandle,
+    limit: i64,
+    offset: i64,
+    kind: Option<&str>,
+) -> Result<Vec<ShotRow>, String> {
+    list_at_filtered(&db_path(app), limit, offset, kind)
+}
+
+pub fn search_filtered(
+    app: &AppHandle,
+    query: &str,
+    limit: i64,
+    kind: Option<&str>,
+) -> Result<Vec<ShotRow>, String> {
+    search_at_filtered(&db_path(app), query, limit, kind)
 }
 
 #[tauri::command(async)]

@@ -20,14 +20,17 @@ export interface ShotRow {
 }
 
 /** 条目种类的规范取值（与 Rust 侧 kind 列取值一一对应）。 */
-export type ShotKind = "region" | "recording" | "scrollshot";
+export type ShotKind = "region" | "recording" | "scrollshot" | "browser";
 
 /**
  * 读条目种类：优先用契约里的 kind；缺字段（旧库/旧响应）时回退到 app 列的
  * 兼容判定（app === "recording" → recording，否则按截图处理）。
  */
 export function shotKind(row: ShotRow): ShotKind {
-  if (row.kind === "recording" || row.kind === "scrollshot" || row.kind === "region") {
+  if (
+    row.kind === "recording" || row.kind === "scrollshot"
+    || row.kind === "region" || row.kind === "browser"
+  ) {
     return row.kind;
   }
   return row.app === "recording" ? "recording" : "region";

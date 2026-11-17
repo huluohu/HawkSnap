@@ -106,6 +106,10 @@ export default function OverlayWindow() {
   // MP4 还是 GIF。现在每轮 payload 到达即复位为默认 MP4 → 格式永远是**本轮显式**
   // 的选择，不可能泄漏到用户没看见它的轮次。
   const [recordFormat, setRecordFormat] = useState<"mp4" | "gif">("mp4");
+  // v1.2（§3.4「30/60fps 可选」「光标可选录制」）：与格式同款的本轮显式选择——
+  // 每轮 payload 复位（见下方 overlay-ready 处理），不跨轮泄漏。
+  const [recordFps, setRecordFps] = useState<30 | 60>(30);
+  const [recordCursor, setRecordCursor] = useState(true);
 
   // —— M2 Task M5 取色器（Snipaste 式）——
   // C 进入/退出拾色模式；移动 = 浮签跟随光标实时显示光标下像素（冻结帧缓冲直采，
@@ -241,7 +245,7 @@ export default function OverlayWindow() {
       if (display.intent === "record") {
         try {
           await invoke("record_start_region", {
-            req: { displayId: display.displayId, rect: r, format: recordFormat },
+            req: { displayId: display.displayId, rect: r, format: recordFormat, fps: recordFps, cursor: recordCursor },
           });
           if (flowRef.current !== myFlow) return;
         } catch (err) {
@@ -397,6 +401,9 @@ export default function OverlayWindow() {
         // N2 输出格式复位为默认 MP4（终审 review wave I3）：格式是**本轮显式**的选择，
         // 上一轮的值不得泄漏到本轮（长截图轮更是完全看不到这个开关）。
         setRecordFormat("mp4");
+        // v1.2：fps/光标同款复位（默认 30fps、光标入镜）。
+        setRecordFps(30);
+        setRecordCursor(true);
         if (copiedTimerRef.current !== null) {
           window.clearTimeout(copiedTimerRef.current);
           copiedTimerRef.current = null;
@@ -817,7 +824,7 @@ export default function OverlayWindow() {
             padding: "4px 12px", fontSize: 12, color: "#D8E2EE", pointerEvents: "none" }}>
             {t("overlay.record.hint")}
           </div>
-          <div role="group" style={{ display: "flex", background: "#0D1522",
+          <div role="group" aria-label={t("record.format.label")} style={{ display: "flex", background: "#0D1522",
             border: "1px solid #22405F", borderRadius: 8, overflow: "hidden" }}>
             {([
               { id: "mp4" as const, label: t("record.format.mp4") },
@@ -833,6 +840,29 @@ export default function OverlayWindow() {
               </button>
               ))}
             </div>
+          {/* v1.2（§3.4）：fps 30/60 分段 + 光标开关——与格式开关同款胶囊形态。 */}
+          <div role="group" aria-label={t("record.fps")} style={{ display: "flex", background: "#0D1522",
+            border: "1px solid #22405F", borderRadius: 8, overflow: "hidden" }}>
+            {([30, 60] as const).map((fps) => (
+              <button key={fps} type="button" aria-pressed={recordFps === fps}
+                onClick={() => setRecordFps(fps)}
+                style={{ padding: "4px 10px", fontSize: 12, lineHeight: "16px",
+                  cursor: "pointer", border: "none",
+                  background: recordFps === fps ? "#22405F" : "transparent",
+                  color: recordFps === fps ? "#FFFFFF" : "#8A8F98" }}>
+                {fps}
+              </button>
+            ))}
+          </div>
+          <button type="button" aria-pressed={recordCursor}
+            title={t("record.cursorTip")}
+            onClick={() => setRecordCursor((c) => !c)}
+            style={{ padding: "4px 10px", fontSize: 12, lineHeight: "16px", cursor: "pointer",
+              background: recordCursor ? "#22405F" : "#0D1522",
+              color: recordCursor ? "#FFFFFF" : "#8A8F98",
+              border: "1px solid #22405F", borderRadius: 8 }}>
+            {t("record.cursor")}
+          </button>
           </div>
         )}
       {/* 选区确认浮条：canvas 的兄弟节点（fixed 定位）。pointer/dblclick 处理器都只挂在

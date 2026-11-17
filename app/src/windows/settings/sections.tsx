@@ -173,6 +173,9 @@ const zh = {
   "history.search.desc": "截图中的文字经 OCR 识别后进入全文索引，可在主面板直接搜索画面里的文字。",
   "history.openPanel": "在主面板中打开历史记录",
   "history.openPanelDesc": "打开主面板查看全部历史条目。",
+  "history.limit.hint": "50–10000 条，保存后生效。",
+  "shortcuts.slot.scrollshot": "长截图",
+  "shortcuts.scrollshotInfo": "拖选滚动区域，自动拼接为一张长图（托盘/热键 F3 同入口）。",
   "shortcuts.title": "键盘快捷键",
   "shortcuts.global.title": "全局快捷键",
   "shortcuts.global.desc": "以下组合键在系统全局生效。点击胶囊后按下想要的组合键，按下 Esc 取消。",
@@ -375,6 +378,9 @@ const en: Record<CopyKey, string> = {
   "history.search.desc": "Recognized text is indexed with OCR, so you can search the words inside a capture from the main panel.",
   "history.openPanel": "Open History in the main panel",
   "history.openPanelDesc": "Open the main panel to see every history entry.",
+  "history.limit.hint": "50–10000 entries, applies on save.",
+  "shortcuts.slot.scrollshot": "Scrolling capture",
+  "shortcuts.scrollshotInfo": "Drag the scrolling area; frames are stitched into one long image (same entry as the tray / F3 hotkey).",
   "shortcuts.title": "Keyboard Shortcuts",
   "shortcuts.global.title": "Global Shortcuts",
   "shortcuts.global.desc": "These combinations work system-wide. Click a chip, then press the combination you want; press Esc to cancel.",
@@ -477,6 +483,7 @@ export interface SettingsForm {
   hotkeyCapture: string;
   hotkeyPin: string;
   hotkeyRecord: string;
+  hotkeyScrollshot: string;
   outputFormat: string;
   jpegQuality: number;
   saveDir: string;
@@ -484,9 +491,11 @@ export interface SettingsForm {
   appearance: string;
   language: string;
   updateEnabled: boolean;
+  /** 历史保留行数（v1.2 可调保留策略；Rust sanitize clamp 50..=10000）。 */
+  historyMaxRows: number;
 }
 
-export type HotkeySlot = "hotkeyCapture" | "hotkeyPin" | "hotkeyRecord";
+export type HotkeySlot = "hotkeyCapture" | "hotkeyPin" | "hotkeyRecord" | "hotkeyScrollshot";
 
 export interface SectionProps {
   form: SettingsForm;
@@ -1315,9 +1324,7 @@ export function AnnotateSection(_props: SectionProps) {
 
 // —— 分区 4/8：历史记录 History ——
 
-const HISTORY_LIMIT = 500;
-
-export function HistorySection({ notifyError }: SectionProps) {
+export function HistorySection({ form, setField, notifyError }: SectionProps) {
   const tx = useT();
 
   const openInPanel = () => {
@@ -1330,9 +1337,21 @@ export function HistorySection({ notifyError }: SectionProps) {
     <div className="hs-cards">
       <Card icon="clock" title={tx("history.limit.title")} desc={tx("history.limit.desc")}>
         <Rows>
-          <Row label={tx("history.limit.title")}>
-            <span className="hs-status-text">
-              {tx("history.limit.value", { count: HISTORY_LIMIT })}
+          {/* v1.2：历史上限可调（§3.6「默认 500 条…可调」）——此前只读展示 500（前端
+              常量与 Rust KEEP_MAX 双源，后端调整即文案说谎）；现在读写 form 字段，
+              值来自后端 sanitize（clamp 50..=10000），保存管线复用主「保存」钮。 */}
+          <Row label={tx("history.limit.title")} info={tx("history.limit.hint")}>
+            <span className="hs-slider">
+              <input
+                type="range"
+                min={50}
+                max={10000}
+                step={50}
+                value={form.historyMaxRows}
+                aria-label={tx("history.limit.title")}
+                onChange={(e) => setField("historyMaxRows", Number(e.target.value))}
+              />
+              <span className="hs-slider-value">{form.historyMaxRows}</span>
             </span>
           </Row>
         </Rows>
@@ -1401,6 +1420,12 @@ export function ShortcutsSection({ form, capturing, setCapturing }: SectionProps
             tx("shortcuts.slot.record"),
             tx("shortcuts.recordInfo"),
             form.hotkeyRecord,
+          )}
+          {slotRow(
+            "hotkeyScrollshot",
+            tx("shortcuts.slot.scrollshot"),
+            tx("shortcuts.scrollshotInfo"),
+            form.hotkeyScrollshot,
           )}
         </Rows>
       </Card>

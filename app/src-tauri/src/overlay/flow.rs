@@ -90,7 +90,15 @@ pub fn start_capture_flow(app: &AppHandle) -> Result<(), String> {
 /// record_start API 保留给兼容）；F6 录制中 → 停止的 toggle 语义保留（hotkey.rs
 /// 经 f6_route 分派）。
 // 必须在非主线程调用（与 start_capture_flow 同一建窗纪律）。
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub fn start_record_selection_flow(app: &AppHandle) -> Result<(), String> {
+    // v1.2 平台前置拒绝（跨平台审计修复，§9 fail-closed）：录制管线仅 macOS——此前
+    // 「先选区后报错」，用户拖完选区确认时才被告知不支持。入口一站拒绝，覆盖层
+    // 不再进入；托盘/面板/热键一切新入口自动继承本门。
+    #[cfg(not(target_os = "macos"))]
+    return Err("录屏当前仅支持 macOS（平台支持矩阵见 README）".into());
+    #[cfg(target_os = "macos")]
+    {
     // 防御性重查（f6_route 在热键侧已路由；本函数自持守卫——未来托盘/面板等新入口
     // 复用本函数时同门槛生效，不依赖调用方记得先查）。StopRecording 分支 = 录制
     // 进行中（不应到这，热键侧已先路由去停）→ 按 capture_guard 文案拒绝。
@@ -114,6 +122,7 @@ pub fn start_record_selection_flow(app: &AppHandle) -> Result<(), String> {
     }
     super::intent::set(CaptureIntent::Record);
     launch_overlay_flow(app, CaptureIntent::Record)
+    }
 }
 
 /// 长截图互斥守卫文案（纯函数可测）：长截图会话进行中 → 拒绝启动截图/录制选区。
@@ -127,7 +136,14 @@ pub fn scrollshot_guard_msg() -> &'static str {
 /// 差异只有两件事：提示横幅文案、确认路由到 scrollshot_start（进入滚动采集会话）。
 /// 守卫：录屏中 / 长截图会话中 / 覆盖层已可见 → 拒绝（两套全屏 UI 不叠屏）。
 // 必须在非主线程调用（与 start_capture_flow 同一建窗纪律）。
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub fn start_scrollshot_selection_flow(app: &AppHandle) -> Result<(), String> {
+    // v1.2 平台前置拒绝（跨平台审计修复）：滚动捕获管线仅 macOS（窗口抓取走
+    // CGWindowListCreateImage）——同录制选区，入口一站拒绝。
+    #[cfg(not(target_os = "macos"))]
+    return Err("长截图当前仅支持 macOS（平台支持矩阵见 README）".into());
+    #[cfg(target_os = "macos")]
+    {
     if crate::recording::recording_active() {
         return Err(capture_guard_msg(true).unwrap().to_string());
     }
@@ -143,6 +159,7 @@ pub fn start_scrollshot_selection_flow(app: &AppHandle) -> Result<(), String> {
     }
     super::intent::set(CaptureIntent::Scrollshot);
     launch_overlay_flow(app, CaptureIntent::Scrollshot)
+    }
 }
 
 /// 两条流程入口的公共实现（N1 从 start_capture_flow 抽取，截图行为逐字节不变）：

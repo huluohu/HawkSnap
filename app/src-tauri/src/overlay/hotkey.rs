@@ -61,6 +61,8 @@ pub enum HotkeyKind {
     Capture,
     Pin,
     Record,
+    /// v1.2：长截图热键（§4 F3——M3 已交付长截图，托盘入口之外补齐热键）。
+    Scrollshot,
 }
 
 /// 注册失败的候选键建议（§4「给出候选键」）：静态表——逐个试注册动态探测可用组合
@@ -71,6 +73,7 @@ fn candidates_for(kind: HotkeyKind) -> &'static str {
         HotkeyKind::Capture => "候选键：Cmd+Shift+1 / Cmd+Alt+1 / F7",
         HotkeyKind::Pin => "候选键：Cmd+Shift+2 / Cmd+Alt+2 / F8",
         HotkeyKind::Record => "候选键：Cmd+Shift+3 / Cmd+Alt+3 / F9",
+        HotkeyKind::Scrollshot => "候选键：Cmd+Shift+4 / Cmd+Alt+4 / F10",
     }
 }
 
@@ -102,6 +105,7 @@ pub(crate) fn register_in_order(
         (settings.hotkey_capture.as_str(), HotkeyKind::Capture),
         (settings.hotkey_pin.as_str(), HotkeyKind::Pin),
         (settings.hotkey_record.as_str(), HotkeyKind::Record),
+        (settings.hotkey_scrollshot.as_str(), HotkeyKind::Scrollshot),
     ];
     // §4 库内互斥校验：同一组合绑多个功能时，第二个注册必失败且报「可能被占用」——
     // 其实是**自己占了自己**，误导用户去查外部占用。注册前先做一次库内查重，命中即
@@ -139,6 +143,7 @@ fn kind_label(kind: HotkeyKind) -> &'static str {
         HotkeyKind::Capture => "截图",
         HotkeyKind::Pin => "贴图",
         HotkeyKind::Record => "录屏",
+        HotkeyKind::Scrollshot => "长截图",
     }
 }
 
@@ -240,6 +245,25 @@ pub fn register_one(app: &AppHandle, combo: &str, kind: HotkeyKind) -> Result<()
                             F6Route::Reject(msg) => {
                                 crate::panel::show_capture_error(&app, msg.to_string());
                             }
+                        }
+                    });
+                }
+            })
+            .map_err(|e| format!("{combo} 注册失败（可能被占用）: {e}；{}", candidates_for(kind))),
+        HotkeyKind::Scrollshot => gs
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state == ShortcutState::Pressed {
+                    eprintln!("[hawksnap] {combo_owned} 热键触发（scrollshot）");
+                    let app = app2.clone();
+                    std::thread::spawn(move || {
+                        // bench 守卫（与 F1/F6 同款）：基准轮次不受外部触发污染。
+                        if crate::bench_mode::is_running() {
+                            return;
+                        }
+                        // 与托盘「长截图」同链路：进入长截图选区覆盖层；失败走
+                        // capture-error 横幅（懒拉主面板，不静默）。
+                        if let Err(e) = super::flow::start_scrollshot_selection_flow(&app) {
+                            crate::panel::show_capture_error(&app, e);
                         }
                     });
                 }

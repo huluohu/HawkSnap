@@ -209,7 +209,7 @@ pub fn run() {
             history::history_list, history::history_search, history::history_delete,
             editor::editor_open, editor::editor_image_dataurl, editor::editor_save,
             pins::pin_latest, pins::pin_from_path, pins::pin_set_opacity, pins::pin_zoom,
-            pins::pin_close, pins::pin_close_all, pins::pin_set_image,
+            pins::pin_close, pins::pin_close_all, pins::pin_set_image, pins::pin_list,
             panel::panel_trigger, panel::open_path, panel::open_main_panel,
             settings_window::open_settings,
             settings_window::open_permission_settings,
@@ -465,6 +465,28 @@ pub fn run() {
             // 在此接管：开面板 → 打点 → stderr 汇总 → 退出（见 g4.rs）。
             crate::perf::mark_tray_ready();
             crate::g4::maybe_run(app.handle());
+
+            // v1.2（审计修复）：启动静默检查更新——此前检查只挂在主面板挂载时机，
+            // 零窗口常驻架构下只碰托盘的用户可能永不触发（§9「更新检查失败静默降级
+            // 为下次启动重试」的语义本就是启动检查）。延迟 30s：冷启动预算（G4 打点
+            // 已完成）与 bench/g4 模式完全不受影响；命中新版本 → 懒拉主面板——面板
+            // 挂载自检会再次命中并在横幅展示（与手动检查同一 UI 面，不重复实现）。
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    if crate::bench_mode::is_running() || crate::g4::requested() {
+                        return;
+                    }
+                    if let Ok(Some(_)) = tauri::async_runtime::block_on(
+                        crate::updater::check_for_updates(handle.clone(), false),
+                    ) {
+                        if let Err(e) = crate::panel::ensure_main_panel(&handle) {
+                            eprintln!("[hawksnap] 更新提示面板拉起失败: {e}");
+                        }
+                    }
+                });
+            }
 
             // Plan B Task 9 应急（G2）：空闲覆盖层 webview 看护线程。Plan B Task 1 的
             // 常驻复用让每个空闲 overlay-*/countdown webview 常驻 ~30MB，fresh-idle

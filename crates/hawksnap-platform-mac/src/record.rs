@@ -239,6 +239,60 @@ pub fn mp4_track_dims(data: &[u8]) -> Option<(u32, u32)> {
 /// 选区逻辑矩形（display 本地，points，原点**左上**——与覆盖层 webview 的
 /// clientX/Y 同一坐标系，即 overlay 选区/载荷 Rect 的连续值形态）。
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// 磁盘可用空间（v1.2 录屏启动预检，§9「磁盘空间不足：录屏启动前预检」）：
+/// statfs 的 f_bavail × f_bsize（非特权用户可用字节）。失败 → None（预检按
+/// 「未知 = 放行」降级——预检本身绝不阻断录制启动）。
+/// 非 macOS：恒 None（录屏管线本身仅 macOS，预检不会在其它平台被调用）。
+#[cfg(target_os = "macos")]
+pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut fs: libc::statfs_t = unsafe { std::mem::zeroed() };
+    // SAFETY: c 指向合法 C 串；fs 为本函数栈上的可写缓冲（libc::statfs 只写该缓冲）。
+    let rc = unsafe { libc::statfs(c.as_ptr(), &mut fs) };
+    if rc == 0 {
+        Some(fs.f_bsize as u64 * fs.f_bavail as u64)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn free_disk_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// v1.2 流配置选项（§3.4「30/60fps 可选」「光标可选录制」）：录制入口经 RegionReq
+/// 透传到 SCStreamConfiguration。Default = 既有行为（30fps、光标入镜）——既有
+/// 构造器签名原样保留（探针/集成测试零改动），新入口走 `*_opts` 变体。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamOpts {
+    /// 目标帧率（白名单 30/60，越界按 30——SCK minimumFrameInterval 只放这两个
+    /// 有实测支撑的值，不放进非法域）。
+    pub fps: u32,
+    /// 光标是否入镜。
+    pub cursor: bool,
+}
+
+impl Default for StreamOpts {
+    fn default() -> Self {
+        StreamOpts { fps: 30, cursor: true }
+    }
+}
+
+impl StreamOpts {
+    /// 入口载荷合法化：fps 白名单（30/60，其余回 30）、cursor 缺省 true。
+    pub fn sanitized(fps: Option<u32>, cursor: Option<bool>) -> Self {
+        StreamOpts {
+            fps: match fps {
+                Some(60) => 60,
+                _ => 30,
+            },
+            cursor: cursor.unwrap_or(true),
+        }
+    }
+}
+
 pub struct LogicalRect {
     pub x: f64,
     pub y: f64,
@@ -1801,7 +1855,7 @@ impl ScreenRecorder {
         output_path: PathBuf,
         pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::Main, None, None, pip_lane)
+        Self::begin(output_path, DisplayPick::Main, None, None, pip_lane, StreamOpts::default())
     }
 
     /// N2 全屏 + GIF 旁路：[`Self::start`] 的抽帧形态（回调按 15fps 降采样攒帧，
@@ -1811,7 +1865,7 @@ impl ScreenRecorder {
         gif_lane: std::sync::Arc<GifLane>,
         pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::Main, None, Some(gif_lane), pip_lane)
+        Self::begin(output_path, DisplayPick::Main, None, Some(gif_lane), pip_lane, StreamOpts::default())
     }
 
     /// N1 区域录制启动：指定显示器 + 选区逻辑矩形（display 本地 points，左上原点，
@@ -1824,7 +1878,7 @@ impl ScreenRecorder {
         region: LogicalRect,
         pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
-        Self::begin(output_path, DisplayPick::ById(display_id), Some(region), None, pip_lane)
+        Self::begin(output_path, DisplayPick::ById(display_id), Some(region), None, pip_lane, StreamOpts::default())
     }
 
     /// N2 区域 + GIF 旁路：[`Self::start_region`] 的抽帧形态（MP4 管线原样不动，
@@ -1836,12 +1890,43 @@ impl ScreenRecorder {
         gif_lane: std::sync::Arc<GifLane>,
         pip_lane: Option<std::sync::Arc<PipLane>>,
     ) -> Result<ScreenRecorder, String> {
+        Self::start_region_gif_opts(output_path, display_id, region, gif_lane, pip_lane, StreamOpts::default())
+    }
+
+    /// v1.2：[`Self::start_region_gif`] 的可配形态（fps/光标）。
+    pub fn start_region_gif_opts(
+        output_path: PathBuf,
+        display_id: u32,
+        region: LogicalRect,
+        gif_lane: std::sync::Arc<GifLane>,
+        pip_lane: Option<std::sync::Arc<PipLane>>,
+        opts: StreamOpts,
+    ) -> Result<ScreenRecorder, String> {
         Self::begin(
             output_path,
             DisplayPick::ById(display_id),
             Some(region),
             Some(gif_lane),
             pip_lane,
+            opts,
+        )
+    }
+
+    /// v1.2：[`Self::start_region`] 的可配形态（fps/光标）。
+    pub fn start_region_opts(
+        output_path: PathBuf,
+        display_id: u32,
+        region: LogicalRect,
+        pip_lane: Option<std::sync::Arc<PipLane>>,
+        opts: StreamOpts,
+    ) -> Result<ScreenRecorder, String> {
+        Self::begin(
+            output_path,
+            DisplayPick::ById(display_id),
+            Some(region),
+            None,
+            pip_lane,
+            opts,
         )
     }
 
@@ -1853,6 +1938,7 @@ impl ScreenRecorder {
         region: Option<LogicalRect>,
         gif_lane: Option<std::sync::Arc<GifLane>>,
         pip_lane: Option<std::sync::Arc<PipLane>>,
+        opts: StreamOpts,
     ) -> Result<ScreenRecorder, String> {
         if output_path.exists() {
             return Err(format!("输出文件已存在: {}", output_path.display()));
@@ -1989,7 +2075,8 @@ impl ScreenRecorder {
             )
         };
 
-        // 3. 配置：30fps BGRA + 系统声（48k/2ch，排除本进程自己的音频）。
+        // 3. 配置：BGRA + 系统声（48k/2ch，排除本进程自己的音频）；fps/光标
+        //    由 StreamOpts 透传（v1.2，Default = 30fps/光标入镜 = 旧行为）。
         //    N1 区域：sourceRect = 选区（**points 直传**，display 本地逻辑坐标——
         //    SCK 头文件证据见 region_stream_params 注）；destinationRect 缺省 =
         //    整个输出面（源裁剪区缩放充满输出面，out 尺寸恰为 1:1 物理密度）。
@@ -2000,9 +2087,9 @@ impl ScreenRecorder {
             if let Some(src) = source_rect {
                 cfg.setSourceRect(src);
             }
-            cfg.setMinimumFrameInterval(CMTime::new(1, 30));
+            cfg.setMinimumFrameInterval(CMTime::new(1, opts.fps as i32));
             cfg.setPixelFormat(kCVPixelFormatType_32BGRA);
-            cfg.setShowsCursor(true);
+            cfg.setShowsCursor(opts.cursor);
             cfg.setCapturesAudio(true);
             cfg.setSampleRate(48000);
             cfg.setChannelCount(2);

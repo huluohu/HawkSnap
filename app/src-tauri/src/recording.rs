@@ -265,6 +265,24 @@ pub fn record_status() -> Option<RecordStatus> {
 // ---------------------------------------------------------------------------
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// 录屏启动的磁盘预检下限（v1.2，§9）：1GB——保守覆盖 ~17 分钟 1080p30 H.264
+/// + 系统声 AAC；更长的会话由用户自行保证空间（预检只挡「明显写不完」的启动）。
+const MIN_FREE_DISK_BYTES: u64 = 1 << 30;
+
+/// 磁盘预检（§9）：可用空间低于下限 → Err（含可用量，用户可判断清理多少）。
+/// 未知（statfs 失败）→ Ok 放行——预检是增强，不是闸门。
+fn disk_precheck(base: &std::path::Path) -> Result<(), String> {
+    if let Some(free) = hawksnap_platform_mac::record::free_disk_bytes(base) {
+        if free < MIN_FREE_DISK_BYTES {
+            return Err(format!(
+                "磁盘空间不足（当前可用 {:.1}GB，录屏需至少 1GB）——请清理磁盘后重试",
+                free as f64 / 1e9
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn movies_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -309,6 +327,10 @@ pub fn record_start(app: AppHandle, format: Option<String>) -> Result<(), String
     }
 
     let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
+    // v1.2 磁盘预检（§9「录屏启动前预检」）：可用空间 <1GB 拒绝启动——1080p30 H.264
+    // 约 8Mbps，1GB ≈ 17 分钟；更低时长会话的收尾（moov 写盘）在满盘时整段丢失。
+    // 未知（statfs 失败）= 放行（预检绝不阻断录制）。
+    disk_precheck(&base)?;
     let path = recording_output_path(&base, chrono::Local::now())?;
 
     // **先建悬浮条窗口，再启动流**（终审修复的自排除前置，platform 侧 start() 注②）：
@@ -416,6 +438,15 @@ pub struct RegionReq {
     #[serde(default = "default_region_format")]
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub format: String,
+    /// v1.2（§3.4「30/60fps 可选」）：None = 默认 30。白名单在 StreamOpts::sanitized
+    /// （30/60，越界回 30）。
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fps: Option<u32>,
+    /// v1.2（§3.4「光标可选录制」）：None = 默认入镜。
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub cursor: Option<bool>,
 }
 
 fn default_region_format() -> String {
@@ -450,6 +481,10 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
     }
 
     let base = movies_dir().ok_or_else(|| "无法定位用户目录（HOME/USERPROFILE 均缺失）".to_string())?;
+    // v1.2 磁盘预检（§9「录屏启动前预检」）：可用空间 <1GB 拒绝启动——1080p30 H.264
+    // 约 8Mbps，1GB ≈ 17 分钟；更低时长会话的收尾（moov 写盘）在满盘时整段丢失。
+    // 未知（statfs 失败）= 放行（预检绝不阻断录制）。
+    disk_precheck(&base)?;
     let path = recording_output_path(&base, chrono::Local::now())?;
 
     // **先建悬浮条窗口，再启动流**（自排除前置，record_start 同款论证：SCShareable
@@ -473,19 +508,25 @@ pub fn record_start_region(app: AppHandle, req: RegionReq) -> Result<(), String>
     };
     #[cfg(target_os = "macos")]
     let pip_lane = Some(std::sync::Arc::new(PipLane::new()));
+    // v1.2：fps/光标白名单化后进流配置（§3.4 两项可选项的唯一入口）。
+    #[cfg(target_os = "macos")]
+    let opts = hawksnap_platform_mac::record::StreamOpts::sanitized(req.fps, req.cursor);
+    #[cfg(target_os = "macos")]
     let recorder = match match fmt {
-        RecordFormat::Gif => hawksnap_platform_mac::record::ScreenRecorder::start_region_gif(
+        RecordFormat::Gif => hawksnap_platform_mac::record::ScreenRecorder::start_region_gif_opts(
             path.clone(),
             display_id,
             region,
             gif_lane.clone().expect("gif 分支已建通道"),
             pip_lane.clone(),
+            opts,
         ),
-        RecordFormat::Mp4 => hawksnap_platform_mac::record::ScreenRecorder::start_region(
+        RecordFormat::Mp4 => hawksnap_platform_mac::record::ScreenRecorder::start_region_opts(
             path.clone(),
             display_id,
             region,
             pip_lane.clone(),
+            opts,
         ),
     } {
         Ok(r) => r,

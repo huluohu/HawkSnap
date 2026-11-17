@@ -147,5 +147,19 @@
   "editor.zoom.reset": "重置为 100%",
   "editor.zoom.fit": "适应窗口",
   "editor.ocr.modelsDir": "打开模型目录",
-  "editor.ocr.exportedTo": "已导出：{path}"
+  "editor.ocr.exportedTo": "已导出：{path}",
+  "hotkey.kind.scrollshot": "长截图",
+  "history.filter": "按类型筛选",
+  "history.kind.all": "全部",
+  "history.kind.region": "截图",
+  "history.kind.recording": "录屏",
+  "history.kind.scrollshot": "长截图",
+  "pins.title": "贴图",
+  "pins.empty": "暂无贴图——按 {key} 把最近截图钉在桌面上",
+  "pins.item": "贴图 #{id} · {w}×{h}",
+  "pins.close": "关闭",
+  "record.fps": "帧率",
+  "record.format.label": "输出格式",
+  "record.cursor": "光标",
+  "record.cursorTip": "光标入镜（点击切换）"
 }

@@ -762,3 +762,64 @@ div.hs-thumb {
     padding-top: 0;
   }
 }
+
+/* —— 类型筛选 chips + 贴图管理（v1.2，§3.6/§3.2）—— */
+
+.hs-chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
+.hs-chip-btn {
+  padding: 3px 12px;
+  font-size: 12px;
+  line-height: 18px;
+  border-radius: 999px;
+  border: 1px solid var(--hs-card-border);
+  background: var(--hs-card-bg);
+  color: var(--hs-text-2);
+  cursor: pointer;
+}
+
+.hs-chip-btn:hover {
+  color: var(--hs-text);
+}
+
+.hs-chip-btn.is-active {
+  background: var(--hs-accent);
+  border-color: var(--hs-accent);
+  color: #ffffff;
+}
+
+.hs-chip-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--hs-focus-ring);
+}
+
+.hs-pin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hs-pin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--hs-card-border);
+  border-radius: 7px;
+  background: var(--hs-card-bg);
+}
+
+.hs-pin-meta {
+  font-size: 12px;
+  color: var(--hs-text-2);
+  font-variant-numeric: tabular-nums;
+}

@@ -224,7 +224,7 @@ fn spawn_pin_window(
     _h_px: u32,
     _scale: f64,
 ) -> Result<u64, String> {
-    Err("unsupported platform".into())
+    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
 }
 
 /// 主显示器中心（全局逻辑坐标，左上原点）：captured_display_frames 里含原点 (0,0) 的
@@ -313,7 +313,7 @@ fn open_pin_editor(
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_latest(_app: &AppHandle) -> Result<(), String> {
-    Err("unsupported platform".into())
+    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
 }
 
 /// M0 历史操作「贴图」：把历史条目的 PNG 文件钉成贴图窗口。async 命令：读文件 +
@@ -369,7 +369,7 @@ fn do_pin_set_opacity(app: &AppHandle, id: u64, opacity: f64) -> Result<(), Stri
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_set_opacity(_app: &AppHandle, _id: u64, _opacity: f64) -> Result<(), String> {
-    Err("unsupported platform".into())
+    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
 }
 
 #[tauri::command(async)]
@@ -390,7 +390,7 @@ fn do_pin_zoom(app: &AppHandle, id: u64, factor: f64) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_zoom(_app: &AppHandle, _id: u64, _factor: f64) -> Result<(), String> {
-    Err("unsupported platform".into())
+    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
 }
 
 #[tauri::command(async)]
@@ -405,7 +405,7 @@ fn do_pin_close(app: &AppHandle, id: u64) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_close(_app: &AppHandle, _id: u64) -> Result<(), String> {
-    Err("unsupported platform".into())
+    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
 }
 
 #[tauri::command(async)]
@@ -429,7 +429,43 @@ fn do_pin_close_all(app: &AppHandle) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 fn do_pin_close_all(_app: &AppHandle) -> Result<(), String> {
-    Err("unsupported platform".into())
+    Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
+}
+
+// —— 贴图管理（v1.2 最小版，§3.2「贴图管理器统一管理」） —--
+
+/// 贴图清单条目（serde camelCase → `{id, wPx, hPx}`）。图像数据不回传（主面板只
+/// 需要尺寸与 id；关闭/编辑走既有 pin_close / 双击贴图本体）。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinInfo {
+    pub id: u64,
+    pub w_px: u32,
+    pub h_px: u32,
+}
+
+/// 贴图清单：主面板「贴图」卡片数据源。非 macOS 无贴图窗口 → 恒空（卡片显示空态
+/// ——与「能力缺席显式声明」口径一致，不假报）。
+#[tauri::command(async)]
+pub fn pin_list() -> Result<Vec<PinInfo>, String> {
+    Ok(do_pin_list())
+}
+
+#[cfg(target_os = "macos")]
+fn do_pin_list() -> Vec<PinInfo> {
+    let pins = PINS.lock().unwrap_or_else(|e| e.into_inner());
+    pins.iter()
+        .map(|(id, p)| {
+            let (_, w, h) = p.image_rgba();
+            PinInfo { id: *id, w_px: w, h_px: h }
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn do_pin_list() -> Vec<PinInfo> {
+    Vec::new()
 }
 
 // —— 编辑器保存回写贴图（M2 Task M3） —--
@@ -473,7 +509,7 @@ pub(crate) fn pin_set_image_rgba(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, id, rgba, w_px, h_px);
-        Err("unsupported platform".into())
+        Err("贴图当前仅支持 macOS（平台支持矩阵见 README）".into())
     }
 }
 

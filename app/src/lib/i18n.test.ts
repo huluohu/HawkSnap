@@ -75,7 +75,7 @@ describe("i18n", () => {
   // G6 补网：动态 key（模板字面量 t(`hotkey.kind.${kind}`)）检查器扫不到，
   // 用单测断言三个 kind key 双语同时在盘。
   it("dynamic_hotkey_kind_keys_exist_in_both_dictionaries", () => {
-    for (const kind of ["capture", "pin", "record"] as const) {
+    for (const kind of ["capture", "pin", "record", "scrollshot"] as const) {
       expect(zhDict[`hotkey.kind.${kind}`]).toBeTruthy();
       expect(enDict[`hotkey.kind.${kind}`]).toBeTruthy();
     }

@@ -43,7 +43,13 @@ let autoCheckFired = false;
 // 归因，message 为人类可读文案（注册失败原因）。kind 的展示名走
 // t(`hotkey.kind.${kind}`)（唯一约定的动态 key 族，单测断言双语在盘——检查器扫不到
 // 模板字面量，scripts/check-i18n.mjs 对此类调用报 warn 不 fail）。
-type HotkeyKind = "capture" | "pin" | "record";
+type HotkeyKind = "capture" | "pin" | "record" | "scrollshot";
+
+// 历史类型筛选（kind 值与 Rust KIND_FILTERS 白名单一致）。
+type KindFilter = "all" | "region" | "recording" | "scrollshot";
+
+// pin_list 载荷（Rust PinInfo serde camelCase）。
+interface PinInfo { id: number; wPx: number; hPx: number }
 interface HotkeyErrorPayload {
   kind: HotkeyKind;
   message: string;
@@ -74,6 +80,12 @@ function App() {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  // —— 类型筛选（v1.2，§3.6「按类型」）：chips 只作用于列表/搜索的 kind 条件；
+  // "all" 不携带 kind 字段（载荷与旧版一致，兼容测试断言）。
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
+  // —— 贴图管理（v1.2 最小版，§3.2）：贴图清单 + 单张关闭。清单 10s 轮询 + 贴图
+  // 动作后即时刷新（贴图也可经 F2/托盘增减——轮询兜住非本面板路径）。
+  const [pins, setPins] = useState<PinInfo[]>([]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -215,13 +227,30 @@ function App() {
     return () => mq?.removeEventListener("change", apply);
   }, [appearance]);
 
+  // —— 贴图清单轮询（v1.2）：10s 兜底轮询（F2/托盘路径不在本面板内），贴图动作
+  // 后另有即时刷新（refreshPins）。非 macOS 后端恒空 → 卡片显示空态（能力缺席
+  // 显式声明，不假报状态）。
+  const refreshPins = useCallback(() => {
+    invoke<PinInfo[]>("pin_list")
+      .then((p) => setPins(Array.isArray(p) ? p : []))
+      .catch(() => setPins([]));
+  }, []);
+
+  useEffect(() => {
+    refreshPins();
+    const timer = window.setInterval(refreshPins, 10000);
+    return () => window.clearInterval(timer);
+  }, [refreshPins]);
+
   // —— 历史分区（M0）—— 搜索输入 250ms 防抖（计划接口）；空查询走 history_list，
   // 非空走 history_search。加载失败入 historyError（分区内横幅，不打扰设置区）。
-  const refreshShots = useCallback((query: string) => {
+  // v1.2：kind 筛选随载荷下发（"all" 不携带，保持旧载荷形态）。
+  const refreshShots = useCallback((query: string, kind: KindFilter) => {
+    const kindArg = kind === "all" ? {} : { kind };
     const req =
       query.trim() === ""
-        ? invoke<ShotRow[]>("history_list", { limit: 50, offset: 0 })
-        : invoke<ShotRow[]>("history_search", { query, limit: 50 });
+        ? invoke<ShotRow[]>("history_list", { limit: 50, offset: 0, ...kindArg })
+        : invoke<ShotRow[]>("history_search", { query, limit: 50, ...kindArg });
     req
       .then((rows) => {
         setShots(rows);
@@ -236,11 +265,13 @@ function App() {
   }, [historyQuery]);
 
   useEffect(() => {
-    refreshShots(debouncedQuery);
-  }, [debouncedQuery, refreshShots]);
+    refreshShots(debouncedQuery, kindFilter);
+  }, [debouncedQuery, kindFilter, refreshShots]);
 
   const pinShot = (path: string) => {
-    invoke<number>("pin_from_path", { path }).catch((e) => setHistoryError(String(e)));
+    invoke<number>("pin_from_path", { path })
+      .then(() => refreshPins())
+      .catch((e) => setHistoryError(String(e)));
   };
   const openShot = (path: string) => {
     invoke<void>("open_path", { path }).catch((e) => setHistoryError(String(e)));
@@ -249,7 +280,7 @@ function App() {
     invoke<void>("history_delete", { id })
       .then(() => {
         setConfirmDeleteId(null);
-        refreshShots(debouncedQuery);
+        refreshShots(debouncedQuery, kindFilter);
       })
       .catch((e) => setHistoryError(String(e)));
   };
@@ -367,6 +398,26 @@ function App() {
             value={historyQuery}
             onChange={(e) => setHistoryQuery(e.target.value)}
           />
+          {/* 类型筛选 chips（v1.2，§3.6「按类型」）：作用于列表与搜索的 kind 条件；
+              键面全部字面量 t()（G6 约定：动态 key 仅 hotkey.kind.* 豁免）。 */}
+          <div className="hs-chip-row" role="group" aria-label={t("history.filter")}>
+            {([
+              { id: "all", label: t("history.kind.all") },
+              { id: "region", label: t("history.kind.region") },
+              { id: "recording", label: t("history.kind.recording") },
+              { id: "scrollshot", label: t("history.kind.scrollshot") },
+            ] as const).map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={kindFilter === id}
+                className={`hs-chip-btn${kindFilter === id ? " is-active" : ""}`}
+                onClick={() => setKindFilter(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {historyError && (
             <div role="alert" className="hs-banner hs-banner-error hs-banner-sm">
               {t("history.actionError", { message: historyError })}
@@ -438,6 +489,37 @@ function App() {
                 );
               })}
             </div>
+          )}
+        </section>
+
+        {/* —— 贴图管理（v1.2 最小版，§3.2「贴图管理器」）：清单 + 单张关闭 + 空态
+            引导（按贴图热键把最近截图钉上桌面）。非 macOS 恒空态——贴图窗口是
+            macOS 原生 NSWindow，能力缺席显式声明。 —— */}
+        <section className="hs-card">
+          <h2 className="hs-section-title">{t("pins.title")}</h2>
+          {pins.length === 0 ? (
+            <p className="hs-empty-text">{t("pins.empty", { key: hotkeys.pin })}</p>
+          ) : (
+            <ul className="hs-pin-list">
+              {pins.map((p) => (
+                <li key={p.id} className="hs-pin-row">
+                  <span className="hs-pin-meta">
+                    {t("pins.item", { id: p.id, w: p.wPx, h: p.hPx })}
+                  </span>
+                  <button
+                    type="button"
+                    className="hs-tile-btn"
+                    onClick={() =>
+                      invoke<void>("pin_close", { id: p.id })
+                        .then(() => refreshPins())
+                        .catch((e) => setHistoryError(String(e)))
+                    }
+                  >
+                    {t("pins.close")}
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
         </section>
 

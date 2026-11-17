@@ -80,7 +80,7 @@ describe("overlay record mode (N1)", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     });
     expect(invokeMock).toHaveBeenCalledWith("record_start_region", {
-      req: { displayId: 2, rect: { x: 0, y: 0, w: 1440, h: 900 }, format: "mp4" },
+      req: { displayId: 2, rect: { x: 0, y: 0, w: 1440, h: 900 }, format: "mp4", fps: 30, cursor: true },
     });
   });
 
@@ -101,7 +101,7 @@ describe("overlay record mode (N1)", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     });
     expect(invokeMock).toHaveBeenLastCalledWith("record_start_region", {
-      req: { displayId: 2, rect: { x: 0, y: 0, w: 1440, h: 900 }, format: "gif" },
+      req: { displayId: 2, rect: { x: 0, y: 0, w: 1440, h: 900 }, format: "gif", fps: 30, cursor: true },
     });
   });
 

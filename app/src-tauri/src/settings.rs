@@ -9,7 +9,9 @@ pub struct Settings {
     pub hotkey_capture: String,   // 默认 "F1"
     pub hotkey_pin: String,       // 默认 "F2"
     pub hotkey_record: String,    // 默认 "F6"
+    pub hotkey_scrollshot: String, // 默认 "F3"（v1.2：§4 长截图热键——M3 已交付长截图，热键兑现）
     pub output_format: String,    // "png" | "jpeg"，默认 "png"
+    pub history_max_rows: u32,    // 保留策略行预算（v1.2，§3.6「默认 500 条…可调」）
     pub jpeg_quality: u8,         // 1-100，默认 90
     pub save_dir: Option<String>, // None → ~/Pictures/HawkSnap
     pub launch_at_login: bool,    // 默认 false
@@ -24,7 +26,9 @@ impl Default for Settings {
             hotkey_capture: "F1".into(),
             hotkey_pin: "F2".into(),
             hotkey_record: "F6".into(),
+            hotkey_scrollshot: "F3".into(),
             output_format: "png".into(),
+            history_max_rows: 500,
             jpeg_quality: 90,
             save_dir: None,
             launch_at_login: false,
@@ -93,6 +97,14 @@ impl Settings {
         if self.language != "zh-CN" && self.language != "en-US" {
             self.language = "system".into();
         }
+        // v1.2：外观白名单归一——未知值（旧文件手改）回 "system"；此前任意串透传，
+        // 主题失效（前端 [data-theme] 分支落空）且无感知。
+        if self.appearance != "light" && self.appearance != "dark" {
+            self.appearance = "system".into();
+        }
+        // v1.2：保留策略行预算 clamp（50..=10000）——手改/脏输入落不出极端值
+        // （0 = 永不裁剪会无界膨胀；极大值失去清理语义）。
+        self.history_max_rows = self.history_max_rows.clamp(50, 10000);
         self
     }
 }
@@ -226,6 +238,7 @@ mod tests {
             hotkey_capture: "F9".into(),
             hotkey_pin: "F10".into(),
             hotkey_record: "F11".into(),
+            hotkey_scrollshot: "F12".into(),
             output_format: "jpeg".into(),
             jpeg_quality: 42,
             save_dir: Some("/tmp/shots".into()),
@@ -233,6 +246,7 @@ mod tests {
             appearance: "dark".into(),
             language: "zh-CN".into(),
             update_enabled: false,
+            history_max_rows: 233,
         };
         s.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();
@@ -293,12 +307,14 @@ mod tests {
 
     #[test]
     fn reregister_uses_settings_strings() {
-        // 注入 register_fn 捕获收到的 (combo, kind)：顺序必须 capture → pin → record，
-        // 字符串逐字取自设置（Shortcut::from_str 解析是插件域，不在此测）。
+        // 注入 register_fn 捕获收到的 (combo, kind)：顺序必须 capture → pin → record
+        // → scrollshot（v1.2 第四槽），字符串逐字取自设置（Shortcut::from_str 解析是
+        // 插件域，不在此测）。
         let s = Settings {
             hotkey_capture: "Cmd+Shift+A".into(),
             hotkey_pin: "F9".into(),
             hotkey_record: "Ctrl+Alt+7".into(),
+            hotkey_scrollshot: "F10".into(),
             ..Default::default()
         };
         let mut seen: Vec<(String, HotkeyKind)> = Vec::new();
@@ -313,6 +329,7 @@ mod tests {
                 ("Cmd+Shift+A".to_string(), HotkeyKind::Capture),
                 ("F9".to_string(), HotkeyKind::Pin),
                 ("Ctrl+Alt+7".to_string(), HotkeyKind::Record),
+                ("F10".to_string(), HotkeyKind::Scrollshot),
             ],
             "注册序与字符串必须逐字来自设置"
         );

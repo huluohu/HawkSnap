@@ -53,6 +53,7 @@ interface Settings {
   hotkeyCapture: string;
   hotkeyPin: string;
   hotkeyRecord: string;
+  hotkeyScrollshot: string;
   outputFormat: string;
   jpegQuality: number;
   saveDir: string | null;
@@ -60,12 +61,14 @@ interface Settings {
   appearance: string;
   language: string;
   updateEnabled: boolean;
+  historyMaxRows: number;
 }
 
 const DEFAULTS: SettingsForm = {
   hotkeyCapture: "F1",
   hotkeyPin: "F2",
   hotkeyRecord: "F6",
+  hotkeyScrollshot: "F3",
   outputFormat: "png",
   jpegQuality: 90,
   saveDir: "",
@@ -73,6 +76,7 @@ const DEFAULTS: SettingsForm = {
   appearance: "system",
   language: "system",
   updateEnabled: true,
+  historyMaxRows: 500,
 };
 
 // saveDir 归一：null ↔ ""（空 = 默认 ~/Pictures/HawkSnap）。
