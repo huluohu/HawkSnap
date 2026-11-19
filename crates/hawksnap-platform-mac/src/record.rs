@@ -3776,16 +3776,17 @@ mod stub_tests {
             let err = lane
                 .update(PipUpdate { size: Some(bad_size), ..Default::default() })
                 .unwrap_err();
-            assert!(err.contains("尺寸非法"), "size={bad_size} 应报尺寸非法: {err}");
+            // 错误码化（2026-11-20）：断言走哨兵码（词典 err.pip_bad_size 双语渲染）。
+            assert!(err.contains("<hserr:pip_bad_size>"), "size={bad_size} 应报尺寸非法: {err}");
         }
         let err = lane
             .update(PipUpdate { x: Some(Some(f64::NAN)), ..Default::default() })
             .unwrap_err();
-        assert!(err.contains("x 坐标非法"), "x=NaN 应报坐标非法: {err}");
+        assert!(err.contains("<hserr:pip_bad_x>"), "x=NaN 应报坐标非法: {err}");
         let err = lane
             .update(PipUpdate { y: Some(Some(f64::INFINITY)), ..Default::default() })
             .unwrap_err();
-        assert!(err.contains("y 坐标非法"), "y=inf 应报坐标非法: {err}");
+        assert!(err.contains("<hserr:pip_bad_y>"), "y=inf 应报坐标非法: {err}");
         assert_eq!(lane.state(), before, "被拒绝的更新不得改动状态");
     }
 
