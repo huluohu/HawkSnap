@@ -448,16 +448,22 @@ export default function OverlayWindow() {
   // payload = AxFrameJson | null（全局逻辑坐标；null = 光标下无元素且窗口回退未命中，
   // 清除高亮）→ toLocalHover 换算 display 本地并丢弃越界帧 → hoverRect。
   // 依赖 display：换算需要本 display 的全局原点与尺寸；display 每轮换新对象即重挂，
-  // 窗口常驻复用下每轮至多重挂一次，成本可忽略。selected 态照常更新 state（保持最新
-  // 悬停框）但绘制按 phase 门控——裁定 4 的「keep last hoverRect but don't draw」。
+  // 窗口常驻复用下每轮至多重挂一次，成本可忽略。
+  // FE-P1-2（2026-11-20 前端审计）：selected 态**直接丢弃** hover 帧——绘制本就按
+  // phase 门控，更新 state 只会触发与屏幕完全相同的全画布重绘（5K 屏 ≈ 56MB
+  // putImageData/帧，纯浪费）。经 phaseRef 读取（监听不随 phase 重挂）；回到 idle
+  // 后下一帧（≤33ms）自然恢复最新悬停框。
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
   useEffect(() => {
     if (!display) return;
     let unlisten: (() => void) | undefined;
     let disposed = false;
     listen<HoverFrame | null>("hawk://hover", (e) => {
+      if (phaseRef.current === "selected") return;
       const next = toLocalHover(e.payload, display);
-      // 值相等则保持原引用：Rust 每 16ms 发一帧（同一元素悬停期间坐标不变），
-      // 引用去重让 React 直接 bail out，避免同帧全画布重绘以 60fps 空转。
+      // 值相等则保持原引用：Rust 每 33ms 发一帧（同一元素悬停期间坐标不变），
+      // 引用去重让 React 直接 bail out，避免同帧全画布重绘空转。
       setHoverRect((prev) => (prev && next
         && prev.x === next.x && prev.y === next.y
         && prev.w === next.w && prev.h === next.h ? prev : next));
@@ -585,6 +591,10 @@ export default function OverlayWindow() {
   // 原始字节按 frameUrl 缓存（记 Promise：首帧在途时选区已开始变化的重入共享同一次加载，
   // 拖拽重绘零重复请求）。
   const frameRef = useRef<{ url: string; load: Promise<ArrayBuffer> } | null>(null);
+  // 解码后的 ImageData 缓存（FE-P1-1，2026-11-20 前端审计）：重绘 effect 每次 rect/
+  // hover 变化都跑 draw——此前每次 `new Uint8ClampedArray(buf)` 再拷一份整帧
+  // （5K 屏 ≈ 56MB/帧 的纯搬运）。同 frameUrl 下复用同一 ImageData。
+  const frameImgRef = useRef<{ url: string; frame: ImageData } | null>(null);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !display) return;
@@ -618,13 +628,24 @@ export default function OverlayWindow() {
       }
       // M2 M5：字节长校验通过后缓存原始帧——拾色采样源（零 IPC，picker.ts 直索引）
       frameBufRef.current = buf;
-      const frame = new ImageData(new Uint8ClampedArray(buf), pw, ph);
+      // ImageData 复用（FE-P1-1）：同 frameUrl 只解码/拷贝一次；重绘只重画。
+      let frame: ImageData;
+      if (frameImgRef.current && frameImgRef.current.url === display.frameUrl) {
+        frame = frameImgRef.current.frame;
+      } else {
+        frame = new ImageData(new Uint8ClampedArray(buf), pw, ph);
+        frameImgRef.current = { url: display.frameUrl, frame };
+      }
       // 背衬 = 物理像素，CSS 尺寸 = 逻辑像素：Retina 下逐像素清晰（顺带修复旧实现
-      // 逻辑画布被浏览器插值放大的发软问题）。重设 width/height 同时重置 ctx 状态。
-      canvas.width = pw;
-      canvas.height = ph;
-      canvas.style.width = `${display.width}px`;
-      canvas.style.height = `${display.height}px`;
+      // 逻辑画布被浏览器插值放大的发软问题）。**仅在尺寸真正变化时重设**——规范上
+      // 同值赋值也会重置整个画布 backing store，重绘路径上白付一次全层 realloc
+      // （FE-P1-1；transform 由下方 setTransform 每次绝对重设，不依赖重置）。
+      if (canvas.width !== pw || canvas.height !== ph) {
+        canvas.width = pw;
+        canvas.height = ph;
+        canvas.style.width = `${display.width}px`;
+        canvas.style.height = `${display.height}px`;
+      }
       // putImageData 不受 transform 影响（恰好物理 1:1 直写）；遮罩/选区/标注仍用逻辑
       // 坐标，经 transform 映射到物理背衬。用 setTransform（而非 ctx.scale）保证 effect
       // 因 rect 变化重跑时 transform 绝对重设，绝不叠加。

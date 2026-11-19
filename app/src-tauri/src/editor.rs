@@ -80,19 +80,24 @@ pub fn editor_open(
 ) -> Result<(), String> {
     // 路径白名单（2026-11-20 纵深防御：只装载应用自己的落盘根）。
     crate::commands::validate_media_path(&app, &path)?;
-    // 校验：文件存在 + PNG 可解码（ Hawksnap 编辑器只吃自家保存的 PNG；解码顺带
-    // 验证非空/非损坏。几 MB 级解码在命令线程，不卡事件循环）。
+    // 校验：文件存在 + PNG 头合法（ Hawksnap 编辑器只吃自家保存的 PNG）。
     if path.trim().is_empty() {
         return Err(crate::errcode::coded("path_empty"));
     }
     let png = std::fs::read(&path).map_err(|e| crate::errcode::coded_kv("file_read_failed", &[("detail", &e.to_string())]))?;
-    let (rgba, w, h) =
-        hawksnap_core::crop::png_to_rgba(&png).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     // 尺寸统一门（v1.2 审计修复，§3.3 画布承载边界）：所有入口（历史重新编辑/贴图
     // 双击/覆盖层标注）在编辑器门前一站设防。WebKit 画布单边 >16384px 直接失败，
     // 巨幅位图会让全画布重绘与导出路径内存尖峰——超限一律拒绝并指路（长截图产物
     // 用「打开目录」查看）。语义等同于历史网格 canReedit 门控的 Rust 侧兜底：
     // 前端漏网（未来新入口）也进不来。长边 8192 = 6K Retina 全屏（6016px）仍有余量。
+    //
+    // R-F6（2026-11-20 性能审计）：尺寸门此前用「完整 PNG→RGBA 解码」实现，解码
+    // 产物 `let _ = rgba` 直接丢弃——每次打开付 8192² ≈ 268MB 瞬时 + 数百 ms。
+    // 改读 IHDR（png_dimensions）；「非空/非损坏」交给前端装载链（asset 快路失败
+    // → dataURL 降级 → loadError 错误态，兜底链完整）。
+    let Some((w, h)) = hawksnap_core::crop::png_dimensions(&png) else {
+        return Err(crate::errcode::coded("png_invalid"));
+    };
     if w.max(h) > EDITOR_MAX_EDGE_PX {
         return Err(crate::errcode::coded_kv(
             "editor_too_large",
@@ -102,7 +107,6 @@ pub fn editor_open(
             ],
         ));
     }
-    let _ = rgba; // 尺寸门只需要维度；解码本身即校验
 
     // M2 Task M3：贴图/标注来源装载的是 $TMPDIR 临时文件——静态 asset scope 只有
     // `$CACHE/**`（tauri.conf），save_dir 由 M0 运行期放行，临时目录刻意不整段放行

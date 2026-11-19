@@ -276,7 +276,16 @@ function App() {
   // 显式声明，不假报状态）。
   const refreshPins = useCallback(() => {
     invoke<PinInfo[]>("pin_list")
-      .then((p) => setPins(Array.isArray(p) ? p : []))
+      .then((p) => {
+        const next = Array.isArray(p) ? p : [];
+        // FE-P3-9（2026-11-20 前端审计）：10s 轮询下内容不变时保持旧引用——每次
+        // setPins(新数组) 会触发主面板全量重渲染（50 瓦片 vdom diff 空转）。
+        setPins((prev) =>
+          prev.length === next.length && prev.every((x, i) => x.id === next[i].id)
+            ? prev
+            : next,
+        );
+      })
       .catch(() => setPins([]));
   }, []);
 

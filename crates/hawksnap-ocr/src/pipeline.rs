@@ -90,9 +90,26 @@ impl OcrEngine {
         Ok(OcrEngine { det, cls, rec: rec_s, labels })
     }
 
-    /// 全链识别：RGBA → 行列表（检测序，行序排序）。失败 Err（中文错误文案）。
+    /// 全链识别：RGBA → 行列表（检测序，行序排序）。box = **原图**坐标（前端画布
+    /// 高亮契约）。失败 Err（码化文案，见 ocr_err）。
     pub fn recognize(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<OcrLine>, String> {
         let img = preprocess::rgba_to_image(rgba, w, h)?;
+        // 分辨率门（R-F2，2026-11-20 性能审计）：det 输入张量按原图线性膨胀——
+        // 编辑器合法上限（8192²）导出 → f32 张量 + nchw 各 ~800MB（瞬时 ~1.9GB，
+        // 有 OOM 面）。PP-OCR 惯例 det 限长 960-1280：处理前把最长边降到
+        // OCR_MAX_EDGE=2400（识别质量在此区间无可感损失，rec 本就把行裁剪重采样到
+        // 48×192）；box 坐标按比例映射回原图，前端高亮契约不变。≤2400 的常规路径
+        // 零影响（scale = 1.0）。
+        const OCR_MAX_EDGE: f32 = 2400.0;
+        let (mw, mh) = img.dimensions();
+        let downscale = (mw.max(mh) as f32 / OCR_MAX_EDGE).max(1.0);
+        let img = if downscale > 1.0 {
+            let nw = ((mw as f32 / downscale).round() as u32).max(1);
+            let nh = ((mh as f32 / downscale).round() as u32).max(1);
+            preprocess::resize(&img, nw, nh)
+        } else {
+            img
+        };
         let boxes = self.detect(&img)?;
         #[cfg(feature = "ocr-debug")]
         for b in &boxes {
@@ -100,6 +117,8 @@ impl OcrEngine {
         }
         let mut out = Vec::with_capacity(boxes.len());
         for b in &boxes {
+            // 裁剪与 cls/rec 都在**处理坐标系**（检测框就是该系的）；仅输出行把
+            // box 映射回原图坐标（前端画布高亮契约）。
             let mut crop = crop_box(&img, b);
             {
                 let (cw, ch) = crop.dimensions();
@@ -113,7 +132,17 @@ impl OcrEngine {
             if text.trim().is_empty() {
                 continue;
             }
-            out.push(OcrLine::from_box(b, text, score));
+            let out_box = if downscale > 1.0 {
+                let mut nb = b.clone();
+                for p in &mut nb.pts {
+                    p.0 *= downscale;
+                    p.1 *= downscale;
+                }
+                nb
+            } else {
+                b.clone()
+            };
+            out.push(OcrLine::from_box(&out_box, text, score));
         }
         Ok(out)
     }

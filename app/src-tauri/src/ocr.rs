@@ -168,6 +168,17 @@ pub fn ocr_recognize(app: AppHandle, path: String) -> Result<Vec<OcrLineDto>, St
         return Err(crate::errcode::coded("path_empty"));
     }
     let png = std::fs::read(&path).map_err(|e| crate::errcode::coded_kv("file_read_failed", &[("detail", &e.to_string())]))?;
+    // 像素闸（R-F2）：IHDR 先验（不解码）——>40MP 拒（与浏览器链路
+    // MAX_CAPTURE_PIXELS 同值）；配合 pipeline 的降采样门（最长边 2400），解码后
+    // 的推理峰值内存同样有界。
+    if let Some((w, h)) = hawksnap_core::crop::png_dimensions(&png) {
+        if (w as u64) * (h as u64) > 40_000_000 {
+            return Err(crate::errcode::coded_kv(
+                "ocr_png_too_large",
+                &[("detail", &format!("{w}x{h}"))],
+            ));
+        }
+    }
     let (rgba, w, h) =
         hawksnap_core::crop::png_to_rgba(&png).map_err(|e| crate::errcode::coded_kv("file_decode_failed", &[("detail", &e.to_string())]))?;
     let lines = with_engine(&app, |engine| engine.recognize(&rgba, w, h))?;

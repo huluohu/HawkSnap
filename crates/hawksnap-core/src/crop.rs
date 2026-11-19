@@ -11,6 +11,19 @@ pub enum CropError {
     Encode,
 }
 
+/// PNG 头部尺寸读取（IHDR，头 24 字节）：供「先验尺寸再解码」的闸——OCR 与编辑器
+/// 装载此前为拿宽高**完整解码整图**（8192² 图 ≈ 268MB 瞬时 RGBA + 数百 ms，尺寸
+/// 校验根本用不到像素，2026-11-20 性能审计 F2/F6）。非 PNG / 过短 / 尺寸为 0 → None。
+pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const PNG_SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    if bytes.len() < 24 || bytes[..8] != PNG_SIG || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    if w == 0 || h == 0 { None } else { Some((w, h)) }
+}
+
 pub fn crop_png(png: &[u8], physical: &Rect) -> Result<Vec<u8>, CropError> {
     let img = image::load_from_memory(png).map_err(|_| CropError::Decode)?;
     let (sw, sh) = (img.width() as i32, img.height() as i32);
@@ -100,6 +113,16 @@ mod tests {
         let out = crop_png(&solid_png(4, 4, [255, 0, 0, 255]), &Rect { x: 1, y: 1, w: 2, h: 2 }).unwrap();
         let img = image::load_from_memory(&out).unwrap();
         assert_eq!((img.width(), img.height()), (2, 2));
+    }
+
+    #[test]
+    fn png_dimensions_reads_ihdr_without_decode() {
+        // 3x5 图 → IHDR 里的 (3,5)；与完整解码结果一致（R-F6：尺寸门不再解码整图）。
+        let png = solid_png(3, 5, [10, 20, 30, 255]);
+        assert_eq!(png_dimensions(&png), Some((3, 5)));
+        // 非 PNG / 过短 → None。
+        assert_eq!(png_dimensions(b"definitely not a png header!!"), None);
+        assert_eq!(png_dimensions(&png[..10]), None);
     }
 
     #[test]

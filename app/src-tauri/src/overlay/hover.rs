@@ -26,9 +26,11 @@ impl From<hawksnap_platform_mac::ax::AxFrame> for AxFrameJson {
     }
 }
 
-/// 16ms 节流 ≈ 60fps，与覆盖层重绘节奏契合；同时限定内联 AX 同步查询的成本上限
+/// 33ms 节流 ≈ 30fps（2026-11-20 前端审计 F16：16ms 下 AX 同步查询（跨应用单次
+/// 1-20ms）+ CGWindowList 全窗枚举叠加可吃满主线程预算；30fps 对吸附高亮的视觉
+/// 连续性足够——吸附框不跟踪逐像素运动）。同时限定内联 AX 同步查询的成本上限
 /// （裁定 2：查询 inline 在 handler 主线程做，绝不 per-event spawn 线程）。
-const THROTTLE: Duration = Duration::from_millis(16);
+const THROTTLE: Duration = Duration::from_millis(33);
 
 /// 上次发射时刻（poison 容忍与 HOTKEY_ERROR 同款）。
 static LAST_HOVER: Mutex<Option<Instant>> = Mutex::new(None);

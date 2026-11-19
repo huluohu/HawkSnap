@@ -49,6 +49,11 @@ export function canReedit(row: ShotRow): boolean {
   return k !== "recording" && k !== "scrollshot";
 }
 
+// Intl.DateTimeFormat 构造开销可观（FE-P3-13，2026-11-20 前端审计）：此前每个瓦片
+// 每次渲染都 new 一个 formatter（50 瓦片 × 每键重渲染 ≈ 50 次/输入）。lang 只有
+// 两个取值 → 模块级缓存 formatter。
+const shotDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
 /**
  * RFC3339 created_at → 本地化「日期 时间」串（网格瓦片标题）。解析失败原样返回
  * （历史库内容是数据不是文案，手改坏不炸 UI）。lang 决定 Intl.Locale：zh-CN / en-US。
@@ -56,11 +61,16 @@ export function canReedit(row: ShotRow): boolean {
 export function formatShotDate(iso: string, lang: "zh-CN" | "en-US"): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(lang, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  let fmt = shotDateFormatters.get(lang);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(lang, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    shotDateFormatters.set(lang, fmt);
+  }
+  return fmt.format(d);
 }

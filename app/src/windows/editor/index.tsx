@@ -380,22 +380,32 @@ export default function EditorWindow() {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.drawImage(image, cx, cy, cw, ch, 0, 0, canvas.width, canvas.height);
-      const url = canvas.toDataURL("image/png");
-      const img = new Image();
-      img.onload = () => {
-        // 裁剪撤销快照：裁剪**生效前**的完整会话（含撤销/重做栈——恢复裁剪时原样
-        // 写回，裁前的标注编辑历史一个不少）。
-        cropUndoRef.current = [
-          ...cropUndoRef.current,
-          { img: image, shapes: present, past, future },
-        ];
-        setCropUndoCount(cropUndoRef.current.length);
-        setImage(img);
-        reset(applyCrop(present, { x: cx, y: cy, w: cw, h: ch }));
-        setSelected(null);
-        setTool("select");
-      };
-      img.src = url;
+      // FE-P2-4（2026-11-20 前端审计）：同步 toDataURL 在主线程整块编码 PNG 的
+      // base64（8192² 裁剪 ≈ 40-130MB 字符串分配）——改 toBlob（异步编码）+
+      // Object URL（无 base64 峰值；onload 后即 revoke，位图已解码驻留 Image）。
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          // 裁剪撤销快照：裁剪**生效前**的完整会话（含撤销/重做栈——恢复裁剪时
+          // 原样写回，裁前的标注编辑历史一个不少）。**上限 3 层**（FE-P2-4）：
+          // 每层持有完整位图 + 双栈，无界多层裁剪会让位图按层累积（每层最高
+          // 256MiB 解码内存）；3 层覆盖「裁错了往回退」的真实使用面。
+          cropUndoRef.current = [
+            ...cropUndoRef.current.slice(-2),
+            { img: image, shapes: present, past, future },
+          ];
+          setCropUndoCount(cropUndoRef.current.length);
+          setImage(img);
+          reset(applyCrop(present, { x: cx, y: cy, w: cw, h: ch }));
+          setSelected(null);
+          setTool("select");
+        };
+        img.onerror = () => URL.revokeObjectURL(url);
+        img.src = url;
+      }, "image/png");
     },
     [image, present, past, future, reset],
   );
