@@ -7,10 +7,6 @@ on:
     paths: [site/**]
   workflow_dispatch:
 
-permissions:
-  pages: write
-  id-token: write
-
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -19,10 +15,15 @@ jobs:
   deploy:
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    # job 级最小权限（2026-11-20 审计）：高权限（pages write + id-token）只授予本
+    # job，未来新增 job 不再默认继承。
+    permissions:
+      pages: write
+      id-token: write
     steps:
       # fetch-depth: 0 —— gate 步要 diff github.event.before..sha；浅克隆取不到
       # before 对象 → diff 失败 → changed=false → 部署步骤全跳过（b401b55 实挂）。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Detect site/ changes (push only)
@@ -36,15 +37,15 @@ jobs:
           fi
       - name: Configure Pages
         if: steps.gate.outputs.changed != 'false'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
         with:
           enablement: true
       - name: Upload site artifact
         if: steps.gate.outputs.changed != 'false'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: site
       - name: Deploy to GitHub Pages
         if: steps.gate.outputs.changed != 'false'
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

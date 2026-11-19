@@ -54,8 +54,8 @@ jobs:
     # （更新器 feed darwin-only，G7 保证力在 macOS/Linux 完整保留）。M5 跟进。
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable (pinned 2026-11-20)
       # TODO: 接入 `cargo clippy --workspace -- -D warnings`。当前存量代码在
       # hawksnap-platform-mac 有 clippy 告警（neg_cmp_op_on_partial_ord），D2 裁定先
       # 不让 lint 噪音阻塞三平台 bring-up；D6 收口时仍未清理，启用顺延到告警清零后。
@@ -86,8 +86,8 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -99,22 +99,19 @@ jobs:
       - run: npm run check:i18n
 
   # ---- 浏览器插件（M4 P2：MV3 扩展，构建 + 纯逻辑单测）----
-  #
-  # 注意：仓库**尚未提交 plugin/package-lock.json**（插件仅 esbuild 一个 devDep，
-  # 首跑 npm install 生成后应提交入库），故这里用 `npm install` 而非 `npm ci`——
-  # `npm ci` 在无 lockfile 时硬失败。**lockfile 提交后，把下方 npm install 改回
-  # npm ci**（与 frontend 腿同口径，享受缓存与可复现安装）。
+  # 2026-11-20：plugin/package-lock.json 已提交入库（供应链审计）→ `npm ci`
+  # 可复现安装（与 frontend 腿同口径）。esbuild 版本以 lockfile 为准，不再浮动解析。
   plugin-test:
     runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: plugin
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - run: npm install   # TODO: lockfile 提交后改为 npm ci
+      - run: npm ci
       - run: npm test
       - run: npm run build
 
@@ -123,9 +120,9 @@ jobs:
     # continue-on-error: false——此 job 即 G1 断言本体，红 = 不达标，不允许静默。
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable (pinned 2026-11-20)
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -222,10 +219,10 @@ jobs:
     steps:
       # fetch-depth: 0 —— 「对应源码包」用 `git archive <tag>` 生成，
       # 必须能取到 tag 对象；浅克隆（默认 depth=1）没有 tag 引用。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable (pinned 2026-11-20)
         with:
           targets: ${{ matrix.rust_target }}
       # 自签证书导入 + 信任（Ottr 同款，2026-10-31）：bundler 按「有效身份」解析
@@ -262,10 +259,10 @@ jobs:
           cp /bin/echo "$RUNNER_TEMP/smoke-sign-bin"
           codesign --force --sign HawkSnapCodesign "$RUNNER_TEMP/smoke-sign-bin"
           rm -f "$RUNNER_TEMP/smoke-sign-bin"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -352,7 +349,7 @@ jobs:
           done
           ls -la "$dir"
       - name: Upload updater payload + artifacts (per-OS)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.name }}
           if-no-files-found: error
@@ -383,7 +380,7 @@ jobs:
           tar -tzf "dist/HawkSnap-${GITHUB_REF_NAME}-source.tar.gz" | head -5
       - name: Upload source archive
         if: matrix.source_archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-source
           if-no-files-found: error
@@ -405,13 +402,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       # 多平台发布（2026-10-31）→ feed 四平台键齐全。--platforms 显式指定参与平台：

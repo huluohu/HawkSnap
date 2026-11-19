@@ -322,6 +322,8 @@ fn do_pin_latest(_app: &AppHandle) -> Result<(), String> {
 /// 主线程（同 pin_latest 纪律）。落盘文件即物理像素 → scale=1.0；返回贴图 id。
 #[tauri::command(async)]
 pub fn pin_from_path(app: AppHandle, path: String) -> Result<u64, String> {
+    // 路径白名单（2026-11-20 纵深防御：贴图窗口显示任意可读 PNG 的内容）。
+    crate::commands::validate_media_path(&app, &path)?;
     do_pin_from_path(&app, &path)
 }
 

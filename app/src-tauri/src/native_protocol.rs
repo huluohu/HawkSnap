@@ -429,8 +429,11 @@ fn random_bytes(n: usize) -> Option<Vec<u8>> {
     }
     #[cfg(not(unix))]
     {
-        let _ = n;
-        None
+        // Windows 等：OS CSPRNG（2026-11-20 审计修复——原实现返回 None，每次启动
+        // 退守 RandomState+纳秒时间+pid 的低熵混合，令牌实际熵远低于 128bit）。
+        let mut buf = vec![0u8; n];
+        getrandom::fill(&mut buf).ok()?;
+        Some(buf)
     }
 }
 

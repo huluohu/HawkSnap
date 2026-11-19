@@ -78,6 +78,8 @@ pub fn editor_open(
     origin: Option<EditorOrigin>,
     run_ocr: bool,
 ) -> Result<(), String> {
+    // 路径白名单（2026-11-20 纵深防御：只装载应用自己的落盘根）。
+    crate::commands::validate_media_path(&app, &path)?;
     // 校验：文件存在 + PNG 可解码（ Hawksnap 编辑器只吃自家保存的 PNG；解码顺带
     // 验证非空/非损坏。几 MB 级解码在命令线程，不卡事件循环）。
     if path.trim().is_empty() {
@@ -179,7 +181,9 @@ fn show_focus_existing(app: &AppHandle) -> bool {
 /// 降级装载（上下文裁定：仅当 asset 协议加载失败时前端调用）：读 PNG → base64
 /// dataURL。8MP PNG → ~10MB 字符串过 IPC，故只作降级路径，不作常规装载。
 #[tauri::command(async)]
-pub fn editor_image_dataurl(path: String) -> Result<String, String> {
+pub fn editor_image_dataurl(app: AppHandle, path: String) -> Result<String, String> {
+    // 路径白名单（2026-11-20 纵深防御：base64 回传面等同任意 PNG 读取）。
+    crate::commands::validate_media_path(&app, &path)?;
     if path.trim().is_empty() {
         return Err(crate::errcode::coded("path_empty"));
     }

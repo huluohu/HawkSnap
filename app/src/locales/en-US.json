@@ -282,5 +282,8 @@
   "err.scrollshot_stall_stopped": "Scrolling capture: alignment stalled (page is moving but cannot be matched, canvas stopped at {detail}px) — capture stopped, click \"Finish\" to save what was captured",
   "err.scrollshot_max_height": "Scrolling capture: reached the maximum length ({detail}px) — press ⌘S or click \"Finish\" to save",
   "err.scrollshot_finish_hotkey_failed": "Scrolling capture: failed to register the ⌘S finish hotkey ({detail}) — use the \"Finish\" button on the capture bar",
-  "err.gif_encode_timeout": "GIF encoding timed out (frame {detail}) — recording channel anomaly"
+  "err.gif_encode_timeout": "GIF encoding timed out (frame {detail}) — recording channel anomaly",
+  "err.path_not_found": "File not found: {path}",
+  "err.media_path_outside_scope": "File is outside the directories this app can access: {path}",
+  "err.ocr_png_too_large": "Image payload too large: {detail}"
 }

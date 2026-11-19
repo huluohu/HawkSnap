@@ -1,0 +1,10 @@
+# 供应链维护（2026-11-20 安全审计轮）：全部 GitHub Actions 已 pin 到 commit SHA
+# ——本文件让 Dependabot 每周检查 pin 更新并自动开 PR（人工复核后合并），避免
+# 「pin 了就永久冻结」的副作用。npm/cargo 生态当前无 lockfile 之外的自动化诉求，
+# 暂不接入（插件仓 lockfile 落地后可加 package-ecosystem: npm）。
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

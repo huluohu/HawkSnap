@@ -176,6 +176,20 @@ fn bind_listener(preferred: u16) -> Result<(TcpListener, u16), String> {
     ))
 }
 
+/// 并发连接上限（2026-11-20 审计加固）：每连接一线程且原无上限——同机进程可开
+/// 大量回环连接耗尽线程/内存（本地 DoS，权限边界内）。桥接是「一问一答」的短
+/// 请求，8 并发已远超真实流量；超限直接关连接（客户端可重试）。
+const MAX_CONCURRENT_CONNS: usize = 8;
+
+static LIVE_CONNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct ConnSlot;
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        LIVE_CONNS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// accept 循环：每连接一线程（连接是「一问一答」的短请求，独立线程最简）。
 fn accept_loop<F>(listener: TcpListener, handler: Arc<F>, token: String)
 where
@@ -187,9 +201,16 @@ where
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
+                if LIVE_CONNS.load(std::sync::atomic::Ordering::SeqCst) >= MAX_CONCURRENT_CONNS {
+                    eprintln!("[hawksnap] Native Messaging 并发连接超限，拒绝新连接");
+                    drop(s);
+                    continue;
+                }
+                LIVE_CONNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let handler = Arc::clone(&handler);
                 let token = token.clone();
                 std::thread::spawn(move || {
+                    let _slot = ConnSlot;
                     if let Err(e) = handle_conn(s, handler, &token) {
                         eprintln!("[hawksnap] Native Messaging 连接处理失败: {e}");
                     }

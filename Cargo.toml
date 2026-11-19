@@ -13,6 +13,9 @@ hawksnap-platform-mac = { path = "crates/hawksnap-platform-mac" }
 xcap = "0.4"
 image = "0.25"
 thiserror = "1"
+# OS CSPRNG（2026-11-20 审计）：Windows 无 /dev/urandom，native-messaging 一次性
+# 令牌此前退守 RandomState+时间+pid 的低熵混合——0.3 已在依赖树（非新增下载）。
+getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 # SQLite 历史存储（C3）。bundled：自带 amalgamation 编译，不依赖系统 libsqlite3。
 # default-features=false：默认 features 含 sqlite-wasm-rs（wasm 运行时），桌面用不到；

@@ -161,6 +161,9 @@ pub use hawksnap_ocr::OcrLine as OcrLineDto;
 /// → 历史回填（旁路降级：回填失败不影响识别结果返回）。
 #[tauri::command(async)]
 pub fn ocr_recognize(app: AppHandle, path: String) -> Result<Vec<OcrLineDto>, String> {
+    // 路径白名单（2026-11-20 纵深防御：OCR 把图上文字提取回前端——任意路径读入
+    // 等于「读任意 PNG 的文字」）。
+    crate::commands::validate_media_path(&app, &path)?;
     if path.trim().is_empty() {
         return Err(crate::errcode::coded("path_empty"));
     }
@@ -185,6 +188,16 @@ pub fn ocr_recognize(app: AppHandle, path: String) -> Result<Vec<OcrLineDto>, St
 /// （画布栅格不是历史库里的文件）。
 #[tauri::command(async)]
 pub fn ocr_recognize_png(app: AppHandle, png_base64: String) -> Result<Vec<OcrLineDto>, String> {
+    // 载荷上限（2026-11-20 审计）：base64 无上限 → 编辑器画布合法上限（8192²）的
+    // 导出 ≈ 数十 MB，但恶意/异常载荷可任意大（解码 + det 张量随尺寸膨胀，见
+    // pipeline 的分辨率门）。64 MiB base64 ≈ 48 MiB PNG，8192² 场景宽裕。
+    const PNG_BASE64_MAX: usize = 64 * 1024 * 1024;
+    if png_base64.len() > PNG_BASE64_MAX {
+        return Err(crate::errcode::coded_kv(
+            "ocr_png_too_large",
+            &[("detail", &png_base64.len().to_string())],
+        ));
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(png_base64.trim())
         .map_err(|e| crate::errcode::coded_kv("png_decode_failed", &[("detail", &e.to_string())]))?;
@@ -204,11 +217,18 @@ pub fn ocr_models_dir(app: AppHandle) -> Result<String, String> {
 /// 识别结果导出 txt：写 `<png_stem>.txt` 到源图旁（M4：复用 editor_save 的
 /// 「写回源文件所在目录」口径）。源必须是已存在的 .png（防任意路径写入）。
 #[tauri::command(async)]
-pub fn ocr_export_txt(path: String, text: String) -> Result<String, String> {
+pub fn ocr_export_txt(app: AppHandle, path: String, text: String) -> Result<String, String> {
+    // 路径白名单（2026-11-20 纵深防御：读入 + 旁挂写 txt 都收敛到应用落盘根）。
+    crate::commands::validate_media_path(&app, &path)?;
+    do_export_txt(&path, &text)
+}
+
+/// 导出半程（AppHandle-free，可测）：仅 .png / 必须存在 → 同目录同名 .txt（0600）。
+fn do_export_txt(path: &str, text: &str) -> Result<String, String> {
     if path.trim().is_empty() {
         return Err(crate::errcode::coded("path_empty"));
     }
-    let p = std::path::Path::new(&path);
+    let p = std::path::Path::new(path);
     let is_png = p
         .extension()
         .and_then(|e| e.to_str())
@@ -217,7 +237,7 @@ pub fn ocr_export_txt(path: String, text: String) -> Result<String, String> {
         return Err(crate::errcode::coded("ocr_export_png_only"));
     }
     if !p.is_file() {
-        return Err(crate::errcode::coded_kv("ocr_source_missing", &[("path", &path)]));
+        return Err(crate::errcode::coded_kv("ocr_source_missing", &[("path", path)]));
     }
     let txt_path = p.with_extension("txt");
     // OCR 导出的文本 = 屏幕内容的文字版，同样 0600。
@@ -238,17 +258,17 @@ mod ocr_tests {
         let png = hawksnap_core::crop::rgba_to_png(&[1, 2, 3, 255], 1, 1).unwrap();
         let src = dir.join("shot.png");
         std::fs::write(&src, &png).unwrap();
-        let out = ocr_export_txt(src.to_string_lossy().into_owned(), "第一行\n第二行".into()).unwrap();
+        let out = do_export_txt(&src.to_string_lossy(), "第一行\n第二行").unwrap();
         assert_eq!(out, dir.join("shot.txt").to_string_lossy().into_owned());
         assert_eq!(std::fs::read(&out).unwrap(), "第一行\n第二行".as_bytes());
         // 非 png 扩展拒绝。
         let txt = dir.join("shot.txt");
         std::fs::write(&txt, b"x").unwrap();
-        assert!(ocr_export_txt(txt.to_string_lossy().into_owned(), "y".into()).is_err());
+        assert!(do_export_txt(&txt.to_string_lossy(), "y").is_err());
         // 不存在的源拒绝。
-        assert!(ocr_export_txt(dir.join("gone.png").to_string_lossy().into_owned(), "y".into()).is_err());
+        assert!(do_export_txt(&dir.join("gone.png").to_string_lossy(), "y").is_err());
         // 空路径拒绝。
-        assert_eq!(ocr_export_txt("  ".into(), "y".into()).unwrap_err(), "<hserr:path_empty>");
+        assert_eq!(do_export_txt("  ", "y").unwrap_err(), "<hserr:path_empty>");
         std::fs::remove_dir_all(&dir).ok();
     }
 

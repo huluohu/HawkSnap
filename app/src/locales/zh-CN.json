@@ -282,5 +282,8 @@
   "err.scrollshot_stall_stopped": "长截图：匹配已停滞（页面在动但无法对齐，画布停在 {detail}px）——已停止采集，可点「完成」保存当前长图",
   "err.scrollshot_max_height": "长截图：已达最大长度（{detail}px）——请按 ⌘S 或点「完成」保存当前长图",
   "err.scrollshot_finish_hotkey_failed": "长截图：⌘S 完成热键注册失败（{detail}）——请用提示条上的「完成」按钮结束",
-  "err.gif_encode_timeout": "GIF 编码超时（帧 {detail}）——录制通道异常"
+  "err.gif_encode_timeout": "GIF 编码超时（帧 {detail}）——录制通道异常",
+  "err.path_not_found": "文件不存在：{path}",
+  "err.media_path_outside_scope": "文件不在应用可访问的目录内：{path}",
+  "err.ocr_png_too_large": "图像载荷过大：{detail}"
 }

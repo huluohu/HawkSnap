@@ -577,6 +577,49 @@ pub(crate) fn resolve_save_dir(settings: &crate::settings::Settings) -> Option<s
     }
 }
 
+/// 媒体路径白名单（2026-11-20 纵深防御审计）：webview 是半信任面——图像**读入**
+/// 类命令（编辑器装载 / dataURL 降级 / OCR / 贴图来源 / OCR 导出）只接受应用自己
+/// 的落盘根：保存目录（settings 或默认）、`$TMPDIR`（标注/贴图暂存）、抓帧缓存、
+/// 应用数据目录。超出即 Err（对照浏览器链路 `validate_capture_path` 的三重校验——
+/// 此前桌面 webview 面无任何目录约束）。双侧都 canonicalize：macOS `/tmp` ↔
+/// `/private/tmp`、Windows `\\?\` 逐字前缀的差异就此消除。
+///
+/// `editor_save` 不在本门内：其「只覆盖已存在的 .png」裁定不变（editor.rs 模块注），
+/// 且其目标恒为编辑器**装载过**的路径——装载已被本门把住，覆盖面即收口。
+pub(crate) fn validate_media_path(
+    app: &AppHandle,
+    path: &str,
+) -> Result<std::path::PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err(crate::errcode::coded("path_empty"));
+    }
+    let p = std::path::Path::new(path);
+    let canonical = p
+        .canonicalize()
+        .map_err(|_| crate::errcode::coded_kv("path_not_found", &[("path", path)]))?;
+    let mut roots: Vec<std::path::PathBuf> = vec![std::env::temp_dir()];
+    if let Ok(dir) = app.path().app_data_dir() {
+        roots.push(dir);
+    }
+    if let Some(cache) = grabs_cache_dir(app) {
+        roots.push(cache);
+    }
+    if let Some(dir) = resolve_save_dir(&crate::settings::Settings::load(app)) {
+        roots.push(dir);
+    }
+    for root in &roots {
+        if let Ok(root_c) = root.canonicalize() {
+            if canonical.starts_with(&root_c) {
+                return Ok(canonical);
+            }
+        }
+    }
+    Err(crate::errcode::coded_kv(
+        "media_path_outside_scope",
+        &[("path", path)],
+    ))
+}
+
 /// M0：把保存目录动态放行给 asset 协议（历史网格缩略图经前端 convertFileSrc 加载）。
 /// tauri.conf 的静态 scope 仅 `$CACHE/**`（覆盖层冻结帧所在），而缩略图落在保存目录
 /// （默认 ~/Pictures/HawkSnap，用户可自定义任意路径）——静态 glob 无法覆盖自定义目录，
