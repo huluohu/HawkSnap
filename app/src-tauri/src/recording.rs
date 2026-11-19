@@ -704,6 +704,17 @@ pub fn record_stop(app: AppHandle) -> Result<String, String> {
         #[cfg(target_os = "macos")]
         {
             let info = rt.recorder.stop()?;
+            // MP4 产物 0600（unix，best-effort）：屏幕内容隐私默认，与截图一致
+            // （2026-11-20 安全审计；录制期间文件由 AVAssetWriter 直建，此处收口）。
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) =
+                    std::fs::set_permissions(&rt.output_path, std::fs::Permissions::from_mode(0o600))
+                {
+                    eprintln!("[hawksnap] 录制产物权限收紧失败: {e}");
+                }
+            }
             (rt.output_path, info)
         }
         #[cfg(not(target_os = "macos"))]

@@ -196,5 +196,6 @@
   "err.gif_loop_set_failed": "GIF 循环设置失败：{detail}",
   "err.gif_frame_write_failed": "GIF 帧写入失败（第 {frame} 帧）：{detail}",
   "err.keycast_thread_failed": "按键显示线程启动失败：{detail}",
-  "err.file_manager_open_failed": "启动文件管理器失败：{detail}"
+  "err.file_manager_open_failed": "启动文件管理器失败：{detail}",
+  "err.save_name_exhausted": "无法生成不重名的文件名，请清理保存目录后重试"
 }

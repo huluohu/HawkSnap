@@ -89,6 +89,13 @@ pub(crate) fn encode_gif(frames: &[GifFrame], out: &Path) -> Result<GifOutcome, 
 
     let file = std::fs::File::create(out)
         .map_err(|e| crate::errcode::coded_kv("gif_file_create_failed", &[("path", &out.display().to_string()), ("detail", &e.to_string())]))?;
+    // GIF 产物同样 0600（unix，best-effort；2026-11-20 审计：屏幕内容隐私默认，
+    // 与截图/录制同一口径）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
     // gif crate 的宽高是 u16（抽帧通道已钳最长边 ≤800，必不溢出）
     let (w16, h16) = (u16::try_from(w).map_err(|_| crate::errcode::coded("gif_dim_exceeds"))?,
                      u16::try_from(h).map_err(|_| crate::errcode::coded("gif_dim_exceeds"))?);

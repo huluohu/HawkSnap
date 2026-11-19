@@ -463,7 +463,6 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
     let save = (|| -> Result<(std::path::PathBuf, String), String> {
         let dir = crate::commands::resolve_save_dir(&settings).ok_or("no picture dir")?;
         hawksnap_core::fsutil::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
-        let path = crate::commands::save_path_for(&dir, "HawkSnap", "png");
         // **零拷贝编码**：`rgba_to_png` 会把整幅长图 `to_vec()` 复制一份（长图可达
         // 128MB → 峰值翻倍）；`rgba_to_png_borrowed` 直接把切片交给编码器。
         let png = hawksnap_core::crop::rgba_to_png_borrowed(
@@ -472,9 +471,10 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
             stitched.height,
         )
         .map_err(|e| e.to_string())?;
-        // 长图 0600（fsutil：屏幕内容隐私默认）。
-        hawksnap_core::fsutil::write_private_bytes(&path, &png)
-            .map_err(|e| crate::errcode::coded_kv("scrollshot_save_failed", &[("detail", &e.to_string())]))?;
+        // 长图 0600 + create_new 占位（save_new_capture：屏幕内容隐私默认，防并发
+        // 同名互覆）。
+        let path = crate::commands::save_new_capture(&dir, "HawkSnap", "png", &png)
+            .map_err(|e| crate::errcode::coded_kv("scrollshot_save_failed", &[("detail", &e)]))?;
         // 缩略图 = **首帧**（plan 契约：thumb 取首帧——它是长图顶部，网格里一眼能认出）。
         // **旁路语义**：缩略图失败**不影响**主产物（长图已落盘）——记日志、缩略图
         // 留空（前端有占位块分支），绝不因缩略图把整次长截图判为失败。

@@ -62,9 +62,14 @@ END;";
 /// pub(crate)：M4 P1 的 native_messaging 用同一路径入库（浏览器截图），
 /// 免得再包一层 AppHandle 间接层。
 pub(crate) fn db_path(app: &AppHandle) -> std::path::PathBuf {
+    // 回退临时目录而非 "."（2026-11-20 审计）：app_data_dir 解析失败（罕见）时
+    // 落 CWD 会把 history.db 写进启动器决定的任意目录（可能是 / 或用户主目录根）。
     app.path()
         .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .unwrap_or_else(|_| {
+            eprintln!("[hawksnap] app_data_dir 不可用，历史库回退临时目录");
+            std::env::temp_dir()
+        })
         .join("history.db")
 }
 
@@ -73,6 +78,11 @@ pub(crate) fn db_path(app: &AppHandle) -> std::path::PathBuf {
 /// 不定），不持长连接、不引连接池。
 fn open_at(db: &std::path::Path) -> Result<Connection, String> {
     let conn = Connection::open(db).map_err(|e| e.to_string())?;
+    // 并发写闸（2026-11-20 审计修复）：浏览器 ingest（独立连接线程）与 UI 保存/
+    // OCR 回填/录屏入库并发写同一库，SQLite 默认 0 等待 → 立即 SQLITE_BUSY，
+    // 配合「已落盘却回执失败」会造成浏览器截图状态不一致。给 2s 重试窗口。
+    conn.busy_timeout(std::time::Duration::from_secs(2))
+        .map_err(|e| e.to_string())?;
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     ensure_ocr_text_column(&conn)?;
     ensure_duration_column(&conn)?;
@@ -414,6 +424,15 @@ pub(crate) fn delete_row_at(
     keep_media: bool,
 ) -> Result<(), String> {
     let conn = open_at(db)?;
+    delete_row_in(&conn, id, keep_media)
+}
+
+/// 单连接内的删行半程（[`prune_at`] 复用，免每行重开连接重跑 schema）。
+///
+/// 文件删除失败**仅记日志不回滚**（2026-11-20 审计修复）：行已删——回滚不可行，
+/// 向上抛错只会让「重试」必败（行已不在）并留下不可再触达的孤儿文件；NotFound
+/// 与失败同口径记日志（文件已不在 = 目标语义已达成）。
+fn delete_row_in(conn: &Connection, id: i64, keep_media: bool) -> Result<(), String> {
     let (path, thumb): (String, String) = conn
         .query_row("SELECT path, thumb_path FROM shots WHERE id = ?1", [id], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -433,17 +452,10 @@ pub(crate) fn delete_row_at(
         match std::fs::remove_file(&p) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // 文件已不在，忽略
-            Err(e) => return Err(e.to_string()),
+            Err(e) => eprintln!("[hawksnap] 历史媒体文件删除失败（行已删，文件留原处）: {p}: {e}"),
         }
     }
     Ok(())
-}
-
-/// 读回一行的 kind（该列此前「只写不读」；现在是裁剪策略与前端门控的唯一判据）。
-fn kind_of(db: &std::path::Path, id: i64) -> Result<String, String> {
-    let conn = open_at(db)?;
-    conn.query_row("SELECT kind FROM shots WHERE id = ?1", [id], |r| r.get::<_, String>(0))
-        .map_err(|e| e.to_string())
 }
 
 /// 保留最新 max 条：id 大于第 max 新的行的条目逐条 delete。
@@ -459,22 +471,25 @@ fn kind_of(db: &std::path::Path, id: i64) -> Result<String, String> {
 /// 其他 kind（截图 / 长截图）维持原口径：连带删文件（它们是缓存性质的产物，
 /// 可从原始内容重建价值低；长图同理）。
 pub(crate) fn prune_at(db: &std::path::Path, max: i64) -> Result<(), String> {
+    // 单连接完成整个裁剪（2026-11-20 审计修复）：此前每行 kind_of + delete_row_at
+    // 各开一个新连接并重跑全套 schema/迁移探测（2×N 次 open_at）——historyMaxRows
+    // 调到 10000 首次触顶时 ≈ 19000 次连接，在保存链路上阻塞秒级-十秒级。现在
+    // 一次 open_at，读回 (id, kind) 后同一连接内逐条 DELETE。
     let conn = open_at(db)?;
-    let mut stmt = conn
-        .prepare("SELECT id FROM shots ORDER BY id DESC")
-        .map_err(|e| e.to_string())?;
-    let ids = stmt
-        .query_map([], |r| r.get::<_, i64>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    drop(stmt);
-    drop(conn);
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, kind FROM shots ORDER BY id DESC")
+            .map_err(|e| e.to_string())?;
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+    };
     // 保留最新 max 条（id 最大的 max 个），其余逐条 delete。
-    for id in ids.into_iter().skip(max.max(0) as usize) {
+    for (id, kind) in rows.into_iter().skip(max.max(0) as usize) {
         // 录制条目：只删行、保留媒体文件（用户的录制产物不是缓存）。
-        let keep_media = kind_of(db, id).map(|k| k == "recording").unwrap_or(false);
-        delete_row_at(db, id, keep_media)?;
+        let keep_media = kind == "recording";
+        delete_row_in(&conn, id, keep_media)?;
     }
     Ok(())
 }

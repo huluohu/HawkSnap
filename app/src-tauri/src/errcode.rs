@@ -33,9 +33,12 @@ pub fn coded_kv(code: &str, kvs: &[(&str, &str)]) -> String {
     format!("{TAG}{code}>|{body}")
 }
 
-/// 参数值清洗：分隔符（`;`/`=`）与换行替换为空格（诊断信息折行可接受，解析不可破）。
+/// 参数值清洗：分隔符（`;`/`=`/`|`）与尖括号、换行替换为空格（诊断信息折行可
+/// 接受，解析不可破）。`|`/`<`/`>` 是哨兵语法的结构字符——前端 SENTINEL 正则的
+/// kv 值域为 `[^\|<>\n]`，值含它们时**整个正则失配**，用户会看到 `<hserr:…>` 原文
+/// 而非文案（2026-11-20 前端审计：两侧值域不对称，本函数以对齐前端值域收口）。
 fn sanitize_kv(v: &str) -> String {
-    v.replace([';', '=', '\n', '\r'], " ")
+    v.replace([';', '=', '\n', '\r', '|', '<', '>'], " ")
 }
 
 #[cfg(test)]
@@ -51,6 +54,13 @@ mod tests {
     fn coded_kv_joins_pairs_and_sanitizes_values() {
         let s = coded_kv("disk_low", &[("free", "0.8"), ("detail", "a;b=c\nd")]);
         assert_eq!(s, "<hserr:disk_low>|free=0.8;detail=a b c d");
+    }
+
+    #[test]
+    fn sanitize_kv_strips_sentinel_structural_chars() {
+        // detail 含 | < > 时不再破坏哨兵解析（前端正则值域 [^|<>\n]）。
+        let s = coded_kv("x", &[("detail", "a|b<c>d")]);
+        assert_eq!(s, "<hserr:x>|detail=a b c d");
     }
 
     #[test]

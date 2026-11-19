@@ -67,6 +67,42 @@ pub fn save_path_for(dir: &std::path::Path, app_name: &str, ext: &str) -> std::p
     dir.join(format!("{name}.{ext}"))
 }
 
+/// 落盘**新**截图产物（2026-11-20 审计整合）：save_path_for 命名 + `create_new`
+/// 原子占位 + 冲突后缀重试（`{stem} 2..10000`，与 expand 同款后缀语义）。
+///
+/// 为什么不用「探测名 + 直接写」：exists 探测与写盘之间存在窗口——并发同秒保存
+/// （双屏各确认一次、同名应用）会双方都探到「不存在」→ 后写覆盖先写，两张历史
+/// 行指向同一文件、一张截图内容丢失。互斥由文件系统原子性（create_new）保证；
+/// 0600 由 fsutil::write_private_bytes_new 保证。三个产物入口共用：finish_capture /
+/// editor 另存副本 / 长截图落盘。
+pub(crate) fn save_new_capture(
+    dir: &std::path::Path,
+    app_name: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, String> {
+    let base = save_path_for(dir, app_name, ext);
+    match hawksnap_core::fsutil::write_private_bytes_new(&base, bytes) {
+        Ok(()) => Ok(base),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stem = base
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "shot".into());
+            for i in 2..10_000u32 {
+                let cand = dir.join(format!("{stem} {i}.{ext}"));
+                match hawksnap_core::fsutil::write_private_bytes_new(&cand, bytes) {
+                    Ok(()) => return Ok(cand),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            Err(crate::errcode::coded("save_name_exhausted"))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// 抓帧缓存目录（`$CACHE/hawksnap/grabs`）——冻结帧的落盘位置。
 ///
 /// 冻结帧是**整屏原始物理 RGBA**（6K 屏单帧约 24MB），不是缩略图：这个目录每
@@ -265,10 +301,10 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
                 "png",
             )
         };
-        let path = save_path_for(&dir, &save_name, ext);
         // 截图产物 0600（2026-11-20 安全审计：屏幕内容默认仅本人可读；Windows
-        // 无位概念走 profile ACL，历史来源列/保存路径不受影响）。
-        hawksnap_core::fsutil::write_private_bytes(&path, &bytes).map_err(|e| e.to_string())?;
+        // 无位概念走 profile ACL，历史来源列/保存路径不受影响）。create_new 占位
+        // 防并发同名互覆（save_new_capture 模块注）。
+        let path = save_new_capture(&dir, &save_name, ext, &bytes)?;
         saved_to = Some(path.to_string_lossy().into_owned());
         // C4 保存即入库：缩略图落盘 + history::record。历史是旁路（裁定）：整条链任一步
         // 失败只 eprintln，绝不影响保存本身的成败——闭包包住全部步骤统一降级。

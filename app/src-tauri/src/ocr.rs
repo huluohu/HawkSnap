@@ -80,7 +80,11 @@ fn last_use_elapsed() -> Option<Duration> {
 
 /// 确保模型就绪（带进度事件 + 并发互斥）。
 fn ensure_models_with_progress(app: &AppHandle) -> Result<hawksnap_ocr::ModelPaths, String> {
-    let _guard = MODELS_READY_LOCK.lock().map_err(|e| e.to_string())?;
+    // 锁中毒也恢复（2026-11-20 审计修复，与全仓 into_inner 纪律对齐）：进度回调
+    // 内 panic 不应让此后所有模型装载永远失败。
+    let _guard = MODELS_READY_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = models_dir(app)?;
     let emitter = app.clone();
     let mut on_progress = |p: hawksnap_ocr::models::Progress| {
@@ -102,7 +106,13 @@ fn with_engine<T>(
     f: impl FnOnce(&mut hawksnap_ocr::OcrEngine) -> Result<T, String>,
 ) -> Result<T, String> {
     let paths = ensure_models_with_progress(app)?;
-    let mut slot = engine_slot().lock().map_err(|e| e.to_string())?;
+    // 锁中毒也恢复（2026-11-20 审计修复，与 LAST_USE_SLOT 同纪律）：ORT 推理
+    // panic 一旦毒化 ENGINE 锁，此前 `.map_err` 会让之后每次 OCR 永远 Err 直到
+    // 重启，且空闲卸载看护取不到锁 → 内存也不归还。装载失败本就以 slot.is_none()
+    // 重试语义表达，恢复锁后一切如常。
+    let mut slot = engine_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if slot.is_none() {
         *slot = Some(hawksnap_ocr::OcrEngine::load(&paths)?);
     }

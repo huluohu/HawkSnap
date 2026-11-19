@@ -196,5 +196,6 @@
   "err.gif_loop_set_failed": "Failed to set the GIF loop setting: {detail}",
   "err.gif_frame_write_failed": "Failed to write GIF frame {frame}: {detail}",
   "err.keycast_thread_failed": "Failed to start the keycast thread: {detail}",
-  "err.file_manager_open_failed": "Failed to launch the file manager: {detail}"
+  "err.file_manager_open_failed": "Failed to launch the file manager: {detail}",
+  "err.save_name_exhausted": "Could not generate a unique file name — clean up the save folder and retry"
 }

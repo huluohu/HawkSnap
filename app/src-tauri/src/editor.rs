@@ -289,11 +289,10 @@ fn save_annotate_to_history(
     let settings = crate::settings::Settings::load(app);
     let dir = crate::commands::resolve_save_dir(&settings).ok_or("no picture dir")?;
     hawksnap_core::fsutil::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
-    let path = crate::commands::save_path_for(&dir, "HawkSnap", "png");
     let png = hawksnap_core::crop::rgba_to_png(rgba, w, h)
         .map_err(|e| crate::errcode::coded_kv("annotate_encode_failed", &[("detail", &e.to_string())]))?;
-    hawksnap_core::fsutil::write_private_bytes(&path, &png)
-        .map_err(|e| crate::errcode::coded_kv("file_write_failed", &[("detail", &e.to_string())]))?;
+    // 0600 + create_new 占位（commands::save_new_capture 模块注）。
+    let path = crate::commands::save_new_capture(&dir, "HawkSnap", "png", &png)?;
     crate::commands::record_history(
         app,
         &path,

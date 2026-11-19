@@ -276,12 +276,15 @@ fn read_frame_line<R: BufRead>(reader: &mut R) -> Result<String, String> {
             available[..take_len].to_vec()
         };
         reader.consume(take_len);
+        // 上限检查**在 extend 之前**（2026-11-20 审计修复）：原先 extend 后才查，
+        // 缓冲可越限一个读段（~8KB），且以换行收尾的超限帧会先 break 跳过检查
+        // 直接通过——「超限即断连」的保证有缺口。先查后拷，语义严格成立。
+        if buf.len() + take_len > MAX_FRAME_BYTES {
+            return Err("帧过长".to_string());
+        }
         buf.extend_from_slice(&seg);
         if nl_pos.is_some() {
             break;
-        }
-        if buf.len() > MAX_FRAME_BYTES {
-            return Err("帧过长".to_string());
         }
     }
     String::from_utf8(buf).map_err(|_| "帧不是合法 UTF-8".to_string())
@@ -390,7 +393,11 @@ pub(crate) fn ingest_capture_at(
     hawksnap_core::fsutil::write_private_bytes(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
 
     if let Some(db) = db {
-        crate::history::record_at(
+        // 历史入库**旁路降级**（2026-11-20 审计修复，与 commands::finish_capture
+        // 同口径）：文件与缩略图已落盘——此前 record_at 的 `?` 把整条链判失败，
+        // 插件收到失败回执后重试 → 再次落盘重复产物，且已落盘文件成了无历史行的
+        // 孤儿（网格里看不见）。库被锁/满盘时以落盘为准、记日志继续。
+        if let Err(e) = crate::history::record_at(
             db,
             &saved_path.to_string_lossy(),
             &thumb_path.to_string_lossy(),
@@ -399,8 +406,17 @@ pub(crate) fn ingest_capture_at(
             "browser",
             "browser",
             None,
-        )?;
+        ) {
+            eprintln!("[hawksnap] 浏览器截图入库失败（文件已落盘）: {e}");
+        }
     }
+
+    // 入库成功后删除收件箱源文件（2026-11-20 审计修复，磁盘泄漏）：此前全仓无任何
+    // remove_file 指向 inbox——每张浏览器截图在 $TMPDIR/hawksnap-native-inbox 无界
+    // 累积（单张 ≤64MiB，macOS /tmp 周期清理滞后数天）。src 已过 validate_capture_path
+    // 三重校验（临时目录 + 前缀 + canonicalize），删除安全；失败路径（上方 ?）不删，
+    // 保留现场供诊断。
+    let _ = std::fs::remove_file(&src);
 
     Ok(IngestOutcome {
         saved_path,

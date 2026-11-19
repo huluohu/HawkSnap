@@ -164,13 +164,30 @@ impl StreamGate {
 
 /// 录屏输出路径：`<base>/<yyyy-MM-dd>-<HHmmss>.mp4`；目录不存在则创建（含父目录）。
 /// 创建失败（权限等）→ Err，调用方拒绝启动（不静默换路径）。
+/// 同秒冲突递增后缀（2026-11-20 审计修复）：上一段停止与下一段启动落在同一秒时，
+/// 原实现产出同一路径 → `ScreenRecorder::new` 的 exists 守卫直接拒绝启动。与截图
+/// expand 同款「 {i}」后缀语义。
 pub fn recording_output_path(
     base_dir: &std::path::Path,
     now: DateTime<Local>,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(base_dir)
         .map_err(|e| format!("创建录屏目录 {} 失败: {e}", base_dir.display()))?;
-    Ok(base_dir.join(format!("{}.mp4", now.format("%Y-%m-%d-%H%M%S"))))
+    let stem = now.format("%Y-%m-%d-%H%M%S").to_string();
+    let first = base_dir.join(format!("{stem}.mp4"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    for i in 2..10_000u32 {
+        let cand = base_dir.join(format!("{stem} {i}.mp4"));
+        if !cand.exists() {
+            return Ok(cand);
+        }
+    }
+    Err(format!(
+        "无法生成不重名的录屏输出路径: {}",
+        base_dir.display()
+    ))
 }
 
 /// MP4 容器时长（秒）：扫描 `mvhd` atom——version 0（32 位时长）与 version 1（64 位）

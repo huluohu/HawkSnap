@@ -37,6 +37,34 @@ pub fn write_private_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// `create_new` 语义的私密写：目标已存在即失败（AlreadyExists），绝不覆盖。
+/// 供「命名探测与落盘之间不允许窗口」的保存路径用——探测名只是首选，真互斥
+/// 由文件系统原子性保证（2026-11-20 审计：并发同秒保存可同名互覆）。
+pub fn write_private_bytes_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)?;
+        f.sync_all().ok();
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+}
+
 /// `create_dir_all` + 「仅当本次新建」时把目录权限收紧到 0700（Unix）。已存在
 /// 的目录**不改**权限——可能是用户自建或与其他产物共用（与
 /// `native_protocol::set_dir_mode` 同一纪律）。
@@ -93,6 +121,23 @@ mod tests {
         let p = dir.join("shot.png");
         std::fs::write(&p, b"loose").unwrap(); // umask 默认（一般 0644）
         write_private_bytes(&p, b"tight").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn create_new_refuses_existing_target() {
+        let dir = scratch("new-excl");
+        let p = dir.join("shot.png");
+        write_private_bytes_new(&p, b"first").unwrap();
+        let e = write_private_bytes_new(&p, b"second").unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&p).unwrap(), b"first"); // 原内容不被覆盖
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -41,9 +41,13 @@ impl Default for Settings {
 
 /// settings.json 落点（create_dir_all 父目录由 save 做，此处只拼路径）。
 pub fn settings_path(app: &AppHandle) -> std::path::PathBuf {
+    // 回退临时目录而非 "."（2026-11-20 审计，与 history::db_path 同口径）。
     app.path()
         .app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .unwrap_or_else(|_| {
+            eprintln!("[hawksnap] app_data_dir 不可用，设置回退临时目录");
+            std::env::temp_dir()
+        })
         .join("settings.json")
 }
 
@@ -74,7 +78,26 @@ impl Settings {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        // 原子落盘（2026-11-20 审计修复，数据丢失类）：直接截断覆盖写会在进程
+        // 中途被杀/满盘时留下半截 JSON——下次启动 load 失败回退默认，保存目录/
+        // 热键/保留策略等全部设置静默丢失。同目录 tmp+rename 与 editor.rs /
+        // native_protocol.rs 同一形态；失败清理 tmp 残留后上抛（旧文件保持完好）。
+        let tmp: std::path::PathBuf = {
+            let mut s = path.as_os_str().to_os_string();
+            s.push(".tmp");
+            s.into()
+        };
+        hawksnap_core::fsutil::write_private_bytes(&tmp, json.as_bytes())
+            .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+        Ok(())
     }
 
     pub(crate) fn load_from(path: &std::path::Path) -> Result<Settings, String> {
