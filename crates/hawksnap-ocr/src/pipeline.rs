@@ -166,14 +166,14 @@ impl OcrEngine {
             }
         }
         let tensor = ort::value::Tensor::from_array(input)
-            .map_err(|e| ocr_err("det_input", e))??;
+            .map_err(|e| ocr_err("det_input", e))?;
         let outputs = self
             .det
             .run(ort::inputs![tensor])
-            .map_err(|e| ocr_err("det_infer", e))??;
+            .map_err(|e| ocr_err("det_infer", e))?;
         let (_, prob_view) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| ocr_err("det_parse", e))??;
+            .map_err(|e| ocr_err("det_parse", e))?;
         let prob: Vec<f32> = prob_view.to_vec();
         Ok(det::boxes_from_probmap(
             &prob,
@@ -197,16 +197,16 @@ impl OcrEngine {
             (1, 3, 48, 192),
             preprocess::nchw_from_rgba(&scaled, Norm::ClsRec),
         )
-        .map_err(|e| ocr_err("cls_shape", e))??;
+        .map_err(|e| ocr_err("cls_shape", e))?;
         let tensor = ort::value::Tensor::from_array(input)
-            .map_err(|e| ocr_err("cls_input", e))??;
+            .map_err(|e| ocr_err("cls_input", e))?;
         let outputs = self
             .cls
             .run(ort::inputs![tensor])
-            .map_err(|e| ocr_err("cls_infer", e))??;
+            .map_err(|e| ocr_err("cls_infer", e))?;
         let (_, cls_view) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| ocr_err("cls_parse", e))??;
+            .map_err(|e| ocr_err("cls_parse", e))?;
         let rot = cls_view.get(1).copied().unwrap_or(0.0);
         if rot > CLS_THRESH {
             Ok(Some(image::imageops::rotate180(crop)))
@@ -225,16 +225,16 @@ impl OcrEngine {
             (1, 3, 48, tw as usize),
             preprocess::nchw_from_rgba(&scaled, Norm::ClsRec),
         )
-        .map_err(|e| ocr_err("rec_shape", e))??;
+        .map_err(|e| ocr_err("rec_shape", e))?;
         let tensor = ort::value::Tensor::from_array(input)
-            .map_err(|e| ocr_err("rec_input", e))??;
+            .map_err(|e| ocr_err("rec_input", e))?;
         let outputs = self
             .rec
             .run(ort::inputs![tensor])
-            .map_err(|e| ocr_err("rec_infer", e))??;
+            .map_err(|e| ocr_err("rec_infer", e))?;
         let (_, rec_view) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| ocr_err("rec_parse", e))??;
+            .map_err(|e| ocr_err("rec_parse", e))?;
         let flat: Vec<f32> = rec_view.to_vec();
         // [1, T, C]：T 从 logits 形状取（动态宽），C 取标签表长度（6625）。
         let classes = self.labels.len();
