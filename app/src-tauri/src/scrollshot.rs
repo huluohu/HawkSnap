@@ -452,10 +452,10 @@ pub fn scrollshot_stop(app: AppHandle) -> Result<String, String> {
         // 失败 → **放开单飞守卫**（会话留着 = 用户可重试；不放开的话重试会被
         // 「正在结束中」永久挡下 → 用户只能放弃）。
         session.finishing.store(false, Ordering::SeqCst);
-        let msg = "未能识别滚动位移：画面内容没有明显变化，或内容重复导致匹配歧义";
-        surface_failure(&app, &session, msg);
+        let msg = crate::errcode::coded("scrollshot_no_shift");
+        surface_failure(&app, &session, &msg);
         eprintln!("[hawksnap] 长截图拼接失败（会话与提示条保留，可重试或放弃）: {msg}");
-        return Err(msg.to_string());
+        return Err(msg);
     };
 
     // —— ② 落盘（画布已取出 → 失败不可重试）——
@@ -660,8 +660,9 @@ fn spawn_capture_thread(app: AppHandle, session: Arc<Session>) {
                             eprintln!("[hawksnap] 长截图匹配链停滞（画布停在 {height_after}px），停止采集");
                             crate::panel::show_capture_error(
                                 &app,
-                                format!(
-                                    "长截图：匹配已停滞（页面在动但无法对齐，画布停在 {height_after}px）——已停止采集，可点「完成」保存当前长图"
+                                crate::errcode::coded_kv(
+                                    "scrollshot_stall_stopped",
+                                    &[("detail", &height_after.to_string())],
                                 ),
                             );
                             break;
@@ -676,9 +677,9 @@ fn spawn_capture_thread(app: AppHandle, session: Arc<Session>) {
                 eprintln!("[hawksnap] 长截图已达最大长度（{}px），停止采集", session.max_height());
                 crate::panel::show_capture_error(
                     &app,
-                    format!(
-                        "长截图：已达最大长度（{}px）——请按 ⌘S 或点「完成」保存当前长图",
-                        session.max_height()
+                    crate::errcode::coded_kv(
+                        "scrollshot_max_height",
+                        &[("detail", &session.max_height().to_string())],
                     ),
                 );
                 break;
@@ -741,7 +742,7 @@ fn register_finish_hotkey(app: &AppHandle) -> bool {
             eprintln!("[hawksnap] 注册 ⌘S 完成热键失败: {e}");
             crate::panel::show_capture_error(
                 app,
-                format!("长截图：⌘S 完成热键注册失败（{e}）——请用提示条上的「完成」按钮结束"),
+                crate::errcode::coded_kv("scrollshot_finish_hotkey_failed", &[("detail", &e)]),
             );
             false
         }

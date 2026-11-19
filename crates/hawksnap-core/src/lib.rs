@@ -1,5 +1,6 @@
 pub mod capture;
 pub mod crop;
+pub mod errcode;
 pub mod fsutil;
 pub mod geometry;
 pub mod naming;

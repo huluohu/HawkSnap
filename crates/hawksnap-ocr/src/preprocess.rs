@@ -18,9 +18,13 @@ const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 pub fn rgba_to_image(rgba: &[u8], w: u32, h: u32) -> Result<image::RgbaImage, String> {
     let expect = w as usize * h as usize * 4;
     if rgba.len() != expect {
-        return Err(format!("RGBA 尺寸不匹配: 期望 {expect} 字节，实得 {}", rgba.len()));
+        return Err(hawksnap_core::errcode::coded_kv(
+            "ocr_rgba_size_mismatch",
+            &[("want", &expect.to_string()), ("got", &rgba.len().to_string())],
+        ));
     }
-    image::RgbaImage::from_raw(w, h, rgba.to_vec()).ok_or_else(|| "图像缓冲无法构成图像".into())
+    image::RgbaImage::from_raw(w, h, rgba.to_vec())
+        .ok_or_else(|| hawksnap_core::errcode::coded("ocr_rgba_invalid"))
 }
 
 /// 双线性缩放（image crate Triangle 滤波 ≈ cv2.INTER_LINEAR）。

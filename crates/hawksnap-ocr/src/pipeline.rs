@@ -52,14 +52,21 @@ pub struct OcrEngine {
     labels: Vec<String>,
 }
 
+/// OCR 推理链错误 → 哨兵码（`<hserr:ocr_{stage}>|detail=…`，词典 err.ocr_{stage}
+/// 双语渲染；2026-11-20 错误码扫尾——此前内嵌中文，en 用户在编辑器 OCR 横幅看到
+/// 中文）。stage 字面量保留在调用点，便于 grep 对照。
+fn ocr_err(stage: &str, e: impl std::fmt::Display) -> String {
+    hawksnap_core::errcode::coded_kv(&format!("ocr_{stage}"), &[("detail", &e.to_string())])
+}
+
 impl OcrEngine {
     /// 装载：init_from ORT dylib（load-dynamic）→ 三会话 + 字典。
     pub fn load(paths: &ModelPaths) -> Result<Self, String> {
         let env = ort::init_from(&paths.ort_dylib)
-            .map_err(|e| format!("ORT dylib 装载失败: {e}"))?
+            .map_err(|e| ocr_err("dylib_load", e))?
             .with_name("hawksnap-ocr")
             .build()
-            .map_err(|e| format!("ORT 环境创建失败: {e}"))?;
+            .map_err(|e| ocr_err("env_build", e))?;
         Self::with_env(&env, paths)
     }
 
@@ -67,14 +74,15 @@ impl OcrEngine {
     pub fn with_env(env: &ort::environment::Environment, paths: &ModelPaths) -> Result<Self, String> {
         let load = |p: &std::path::Path| -> Result<ort::session::Session, String> {
             let mut b = ort::session::Session::builder(env)
-                .map_err(|e| format!("会话构造失败: {e}"))?;
-            b.commit_from_file(p).map_err(|e| format!("装载模型 {} 失败: {e}", p.display()))
+                .map_err(|e| ocr_err("session_build", e))?;
+            b.commit_from_file(p)
+                .map_err(|e| ocr_err("model_load", format!("{}: {e}", p.display())))
         };
         let det = load(&paths.det)?;
         let cls = load(&paths.cls)?;
         let rec_s = load(&paths.rec)?;
         let dict = std::fs::read_to_string(&paths.dict)
-            .map_err(|e| format!("读取字典失败: {e}"))?;
+            .map_err(|e| ocr_err("dict_read", e))?;
         let labels = rec::build_labels(
             dict.lines().map(|s| s.to_string()).collect(),
             6625, // v4 rec mobile 输出类别（pipeline 内省兜底见 recognize）
@@ -129,14 +137,14 @@ impl OcrEngine {
             }
         }
         let tensor = ort::value::Tensor::from_array(input)
-            .map_err(|e| format!("det 输入构造失败: {e}"))?;
+            .map_err(|e| ocr_err("det_input", e))??;
         let outputs = self
             .det
             .run(ort::inputs![tensor])
-            .map_err(|e| format!("det 推理失败: {e}"))?;
+            .map_err(|e| ocr_err("det_infer", e))??;
         let (_, prob_view) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| format!("det 输出解析失败: {e}"))?;
+            .map_err(|e| ocr_err("det_parse", e))??;
         let prob: Vec<f32> = prob_view.to_vec();
         Ok(det::boxes_from_probmap(
             &prob,
@@ -160,16 +168,16 @@ impl OcrEngine {
             (1, 3, 48, 192),
             preprocess::nchw_from_rgba(&scaled, Norm::ClsRec),
         )
-        .map_err(|e| format!("cls 输入形状失败: {e}"))?;
+        .map_err(|e| ocr_err("cls_shape", e))??;
         let tensor = ort::value::Tensor::from_array(input)
-            .map_err(|e| format!("cls 输入构造失败: {e}"))?;
+            .map_err(|e| ocr_err("cls_input", e))??;
         let outputs = self
             .cls
             .run(ort::inputs![tensor])
-            .map_err(|e| format!("cls 推理失败: {e}"))?;
+            .map_err(|e| ocr_err("cls_infer", e))??;
         let (_, cls_view) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| format!("cls 输出解析失败: {e}"))?;
+            .map_err(|e| ocr_err("cls_parse", e))??;
         let rot = cls_view.get(1).copied().unwrap_or(0.0);
         if rot > CLS_THRESH {
             Ok(Some(image::imageops::rotate180(crop)))
@@ -188,16 +196,16 @@ impl OcrEngine {
             (1, 3, 48, tw as usize),
             preprocess::nchw_from_rgba(&scaled, Norm::ClsRec),
         )
-        .map_err(|e| format!("rec 输入形状失败: {e}"))?;
+        .map_err(|e| ocr_err("rec_shape", e))??;
         let tensor = ort::value::Tensor::from_array(input)
-            .map_err(|e| format!("rec 输入构造失败: {e}"))?;
+            .map_err(|e| ocr_err("rec_input", e))??;
         let outputs = self
             .rec
             .run(ort::inputs![tensor])
-            .map_err(|e| format!("rec 推理失败: {e}"))?;
+            .map_err(|e| ocr_err("rec_infer", e))??;
         let (_, rec_view) = outputs[0]
             .try_extract_tensor::<f32>()
-            .map_err(|e| format!("rec 输出解析失败: {e}"))?;
+            .map_err(|e| ocr_err("rec_parse", e))??;
         let flat: Vec<f32> = rec_view.to_vec();
         // [1, T, C]：T 从 logits 形状取（动态宽），C 取标签表长度（6625）。
         let classes = self.labels.len();

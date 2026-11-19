@@ -67,13 +67,15 @@ pub enum HotkeyKind {
 
 /// 注册失败的候选键建议（§4「给出候选键」）：静态表——逐个试注册动态探测可用组合
 /// 的代价与复杂度不成比例，候选只做引导。沿用 Snipaste 风格的同修饰系（Cmd/Alt + 数字
-/// 与功能键），实际占用情况以再次尝试为准。
+/// 与功能键），实际占用情况以再次尝试为准。**只回组合键列表**（语言中立）——
+/// 「候选键：」的措辞在词典 err.hotkey_register_failed 双语侧（2026-11-20 审计：
+/// 此处原内嵌中文，en 用户经 {candidates} 插值看到中文）。
 fn candidates_for(kind: HotkeyKind) -> &'static str {
     match kind {
-        HotkeyKind::Capture => "候选键：Cmd+Shift+1 / Cmd+Alt+1 / F7",
-        HotkeyKind::Pin => "候选键：Cmd+Shift+2 / Cmd+Alt+2 / F8",
-        HotkeyKind::Record => "候选键：Cmd+Shift+3 / Cmd+Alt+3 / F9",
-        HotkeyKind::Scrollshot => "候选键：Cmd+Shift+4 / Cmd+Alt+4 / F10",
+        HotkeyKind::Capture => "Cmd+Shift+1 / Cmd+Alt+1 / F7",
+        HotkeyKind::Pin => "Cmd+Shift+2 / Cmd+Alt+2 / F8",
+        HotkeyKind::Record => "Cmd+Shift+3 / Cmd+Alt+3 / F9",
+        HotkeyKind::Scrollshot => "Cmd+Shift+4 / Cmd+Alt+4 / F10",
     }
 }
 
@@ -138,14 +140,15 @@ pub(crate) fn register_in_order(
     first_err.map_or(Ok(()), Err)
 }
 
-/// 角色的用户可见名（重复绑定文案归因用）。Rust 侧文案当前为中文单语（错误码化
-/// 归后续文案统一轮），此处与横幅既有中文口径一致。
+/// 角色的稳定枚举键（重复绑定文案归因用，2026-11-20 审计：原内嵌中文「截图/贴图/
+/// 录屏/长截图」，en 用户经 {kindA}/{kindB} 插值看到中文）。词典 err.hotkey_duplicate
+/// 的 {kindA}/{kindB} 由前端正经 `hotkey.kind.*` 就地翻译（lib/errors.ts 值翻译表）。
 fn kind_label(kind: HotkeyKind) -> &'static str {
     match kind {
-        HotkeyKind::Capture => "截图",
-        HotkeyKind::Pin => "贴图",
-        HotkeyKind::Record => "录屏",
-        HotkeyKind::Scrollshot => "长截图",
+        HotkeyKind::Capture => "capture",
+        HotkeyKind::Pin => "pin",
+        HotkeyKind::Record => "record",
+        HotkeyKind::Scrollshot => "scrollshot",
     }
 }
 

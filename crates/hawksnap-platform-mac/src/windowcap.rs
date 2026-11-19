@@ -76,7 +76,7 @@ pub fn capture_global_rect(rect: GlobalRect) -> Result<RegionImage, String> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn capture_global_rect(_rect: GlobalRect) -> Result<RegionImage, String> {
-    Err("仅 macOS 支持长截图抓取".into())
+    Err(hawksnap_core::errcode::coded("windowcap_macos_only"))
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ fn capture_via_window(rect: GlobalRect) -> Result<RegionImage, String> {
 
     let (cx, cy) = rect.center();
     let Some((wid, bounds)) = topmost_window_at(cx, cy) else {
-        return Err("选区中心没有可抓取的窗口".into());
+        return Err(hawksnap_core::errcode::coded("windowcap_no_window"));
     };
     // 窗口必须完整覆盖选区：否则窗口抓取会缺边（内容不完整）→ 交兜底处理。
     let (bx, by, bw, bh) = bounds;
@@ -102,7 +102,7 @@ fn capture_via_window(rect: GlobalRect) -> Result<RegionImage, String> {
         || bx + bw < rect.x + rect.w - 0.5
         || by + bh < rect.y + rect.h - 0.5
     {
-        return Err("选区超出窗口边界".into());
+        return Err(hawksnap_core::errcode::coded("windowcap_outside_window"));
     }
     let image = create_image(
         CGRect::new(&CGPoint::new(rect.x, rect.y), &CGSize::new(rect.w, rect.h)),
@@ -110,14 +110,17 @@ fn capture_via_window(rect: GlobalRect) -> Result<RegionImage, String> {
         wid,
         kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution,
     )
-    .ok_or("CGWindowListCreateImage 返回空（未授权或窗口不可见）")?;
+    .map_err(|_| hawksnap_core::errcode::coded("windowcap_capture_null"))?;
     let (rgba, w, h) = cgimage_to_rgba(&image)?;
     // 尺寸自检：物理宽高必须是选区逻辑尺寸的同一比例（1x 或 2x）。比例不一致
     // 说明返回的不是我们要的那块 → 交兜底处理，绝不产出错位内容。
     let sx = w as f64 / rect.w;
     let sy = h as f64 / rect.h;
     if !(0.5..=4.0).contains(&sx) || (sx - sy).abs() > 0.2 {
-        return Err(format!("窗口抓取尺寸异常（{w}×{h} 对应选区 {rect:?}）"));
+        return Err(hawksnap_core::errcode::coded_kv(
+            "windowcap_bad_scale",
+            &[("detail", &format!("{w}x{h} for {rect:?}"))],
+        ));
     }
     Ok(RegionImage { width: w, height: h, rgba })
 }
@@ -203,7 +206,7 @@ fn cgimage_to_rgba(image: &core_graphics::image::CGImage) -> Result<(Vec<u8>, u3
     let w = image.width();
     let h = image.height();
     if w == 0 || h == 0 {
-        return Err("CGImage 尺寸为空".into());
+        return Err(hawksnap_core::errcode::coded("windowcap_empty_image"));
     }
     let mut buf = vec![0u8; w * h * 4];
     let space = CGColorSpace::create_device_rgb();
@@ -269,7 +272,7 @@ fn capture_via_screen(rect: GlobalRect) -> Result<RegionImage, String> {
         .map_err(|e| e.to_string())?;
         return Ok(RegionImage { width: pw, height: ph, rgba: cropped });
     }
-    Err("选区不在任何显示器范围内".into())
+    Err(hawksnap_core::errcode::coded("windowcap_outside_display"))
 }
 
 // ---------------------------------------------------------------------------

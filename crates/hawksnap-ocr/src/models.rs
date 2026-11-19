@@ -90,7 +90,7 @@ pub fn ort_spec() -> Result<OrtSpec, String> {
     }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
-        Err("ONNX Runtime 1.31.0 官方未发布 macOS x64 构建，OCR 暂不支持此平台".into())
+        Err(hawksnap_core::errcode::coded("ocr_mac_x64_unsupported"))
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
@@ -136,7 +136,7 @@ pub fn ort_spec() -> Result<OrtSpec, String> {
         all(target_os = "windows", target_arch = "x86_64")
     )))]
     {
-        Err("OCR 暂不支持当前平台".into())
+        Err(hawksnap_core::errcode::coded("ocr_platform_unsupported"))
     }
 }
 
@@ -166,7 +166,8 @@ pub fn ensure_models(
     dir: &std::path::Path,
     on_progress: &mut dyn FnMut(Progress),
 ) -> Result<ModelPaths, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建模型目录失败: {e}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_models_dir_failed", &[("detail", &e.to_string())]))?;
     let ort = ensure_ort_dylib(dir, on_progress)?;
     let mut paths = ensure_files(dir, &model_specs(), 1, on_progress)?;
     Ok(ModelPaths {
@@ -203,7 +204,8 @@ pub fn ensure_ort_dylib(
         // 解包到暂存目录（tar 支持单成员解包），校验内件 SHA256 后落盘。
         let stage = dir.join(format!(".ort-extract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&stage);
-        std::fs::create_dir_all(&stage).map_err(|e| format!("创建解包目录失败: {e}"))?;
+        std::fs::create_dir_all(&stage)
+            .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_stage_dir_failed", &[("detail", &e.to_string())]))?;
         let flag = if spec.is_zip { "-xf" } else { "-xzf" };
         let out = std::process::Command::new("tar")
             .arg(flag)
@@ -212,20 +214,28 @@ pub fn ensure_ort_dylib(
             .arg(&stage)
             .arg(spec.inner_path)
             .output()
-            .map_err(|e| format!("启动 tar 解包失败: {e}"))?;
+            .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_tar_spawn_failed", &[("detail", &e.to_string())]))?;
         let staged = stage.join(spec.inner_path);
         let extract_ok = out.status.success() && staged.is_file();
         if !extract_ok || !file_sha_matches(&staged, spec.dylib_sha256) {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let _ = std::fs::remove_dir_all(&stage);
             if !extract_ok {
-                return Err(format!("解包 ONNX Runtime 归档失败: {}", stderr.trim()));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "ocr_unpack_failed",
+                    &[("detail", stderr.trim())],
+                ));
             }
-            return Err("ONNX Runtime 库 SHA256 校验失败".into());
+            return Err(hawksnap_core::errcode::coded("ocr_ort_checksum_failed"));
         }
         if let Err(e) = std::fs::rename(&staged, &dest) {
             // 跨卷 rename 兜底：copy + 清暂存。
-            std::fs::copy(&staged, &dest).map_err(|e2| format!("落盘 ONNX Runtime 库失败: {e}/{e2}"))?;
+            std::fs::copy(&staged, &dest).map_err(|e2| {
+                hawksnap_core::errcode::coded_kv(
+                    "ocr_ort_install_failed",
+                    &[("detail", &format!("{e}/{e2}"))],
+                )
+            })?;
         }
         let _ = std::fs::remove_dir_all(&stage);
         let _ = std::fs::remove_file(&archive);
@@ -235,7 +245,10 @@ pub fn ensure_ort_dylib(
 
     if let Err(first) = attempt(on_progress) {
         if let Err(second) = attempt(on_progress) {
-            return Err(format!("ONNX Runtime 下载失败: {first} / 重试仍失败: {second}"));
+            return Err(hawksnap_core::errcode::coded_kv(
+                "ocr_ort_download_failed",
+                &[("detail", &format!("{first} / {second}"))],
+            ));
         }
     }
     Ok(dest)
@@ -249,7 +262,8 @@ pub fn ensure_files(
     file_base: usize,
     on_progress: &mut dyn FnMut(Progress),
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建模型目录失败: {e}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_models_dir_failed", &[("detail", &e.to_string())]))?;
     let mut out = Vec::with_capacity(specs.len());
     for (i, spec) in specs.iter().enumerate() {
         let idx = file_base + i;
@@ -264,7 +278,10 @@ pub fn ensure_files(
             // 重试前清掉续传基线（半成品可能被写坏）。
             let _ = std::fs::remove_file(dir.join(tmp_name(&spec.name)));
             if let Err(second) = download_verified(dir, spec, idx, on_progress) {
-                return Err(format!("下载 {name} 失败: {first} / 重试仍失败: {second}", name = spec.name));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "ocr_model_download_failed",
+                    &[("name", &spec.name), ("detail", &format!("{first} / {second}"))],
+                ));
             }
         }
         out.push(target);
@@ -290,16 +307,21 @@ fn download_verified(
         let total = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
         on_progress(Progress { file: file_idx, phase: ProgressPhase::Verify, downloaded: total, total });
     }
-    let actual = sha256_file(&tmp).ok_or_else(|| "校验失败：临时文件不可读".to_string())?;
+    let actual = sha256_file(&tmp)
+        .ok_or_else(|| hawksnap_core::errcode::coded("ocr_tmp_unreadable"))?;
     if !actual.eq_ignore_ascii_case(&spec.sha256) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "SHA256 校验失败（{name}）：期望 {want}，实测 {actual}",
-            name = spec.name,
-            want = spec.sha256
+        return Err(hawksnap_core::errcode::coded_kv(
+            "ocr_sha_mismatch",
+            &[("name", &spec.name), ("want", &spec.sha256), ("actual", &actual)],
         ));
     }
-    std::fs::rename(&tmp, &target).map_err(|e| format!("落盘 {name} 失败: {e}", name = spec.name))?;
+    std::fs::rename(&tmp, &target).map_err(|e| {
+        hawksnap_core::errcode::coded_kv(
+            "ocr_model_install_failed",
+            &[("name", &spec.name), ("detail", &e.to_string())],
+        )
+    })?;
     Ok(target)
 }
 
@@ -340,17 +362,23 @@ fn download_to(
     if offset > 0 {
         req = req.header("Range", &format!("bytes={offset}-"));
     }
-    let mut resp = req.call().map_err(|e| format!("HTTP 请求失败: {e}"))?;
+    let mut resp = req
+        .call()
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_http_failed", &[("detail", &e.to_string())]))?;
     let mut status = resp.status().as_u16();
     match status {
         200 | 206 => {}
         416 => {
             // Range 不可满足（半成品不小于远端）：清空后全量重来。
-            std::fs::File::create(tmp).map_err(|e| format!("重建临时文件失败: {e}"))?;
-            resp = agent.get(url).call().map_err(|e| format!("HTTP 请求失败: {e}"))?;
+            std::fs::File::create(tmp)
+                .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_tmpfile_create_failed", &[("detail", &e.to_string())]))?;
+            resp = agent
+                .get(url)
+                .call()
+                .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_http_failed", &[("detail", &e.to_string())]))?;
             status = resp.status().as_u16();
         }
-        s => return Err(format!("HTTP {s}")),
+        s => return Err(hawksnap_core::errcode::coded_kv("ocr_http_status", &[("detail", &s.to_string())])),
     }
     // 206：追加续写；200/416 重来：截断重写。
     let total_from_header: u64 = resp
@@ -392,23 +420,31 @@ fn download_to(
     } else {
         std::fs::File::create(tmp)
     }
-    .map_err(|e| format!("打开临时文件失败: {e}"))?;
+    .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_tmpfile_create_failed", &[("detail", &e.to_string())]))?;
     let mut written: u64 = if status == 206 { offset } else { 0 };
     loop {
         use std::sync::mpsc::RecvTimeoutError;
         let chunk = match rx.recv_timeout(stall) {
             Ok(Ok(c)) if c.is_empty() => break, // EOF
             Ok(Ok(c)) => c,
-            Ok(Err(e)) => return Err(format!("下载中断: {e}")),
+            Ok(Err(e)) => {
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "ocr_download_interrupted",
+                    &[("detail", &e.to_string())],
+                ))
+            }
             Err(RecvTimeoutError::Timeout) => {
-                return Err(format!(
-                    "下载停滞：超过 {}s 未收到新数据（网络中断或服务端无响应）",
-                    stall.as_secs()
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "ocr_download_stalled",
+                    &[("detail", &stall.as_secs().to_string())],
                 ));
             }
-            Err(RecvTimeoutError::Disconnected) => return Err("下载线程意外退出".into()),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(hawksnap_core::errcode::coded("ocr_download_thread_lost"))
+            }
         };
-        file.write_all(&chunk).map_err(|e| format!("写入临时文件失败: {e}"))?;
+        file.write_all(&chunk)
+            .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_tmpfile_write_failed", &[("detail", &e.to_string())]))?;
         written += chunk.len() as u64;
         on_progress(Progress {
             file: file_idx,
@@ -417,7 +453,8 @@ fn download_to(
             total: total_from_header.max(written),
         });
     }
-    file.flush().map_err(|e| format!("写入临时文件失败: {e}"))?;
+    file.flush()
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_tmpfile_write_failed", &[("detail", &e.to_string())]))?;
     Ok(())
 }
 
@@ -588,7 +625,7 @@ mod tests {
         let dir = temp_dir("mismatch");
         let spec = FileSpec { name: "model.bin".into(), url: url.clone(), sha256: sha256_hex(&good) };
         let err = ensure_files(&dir, &[spec], 0, &mut |_| {}).unwrap_err();
-        assert!(err.contains("SHA256 校验失败"), "got: {err}");
+        assert!(err.contains("<hserr:ocr_sha_mismatch>"), "got: {err}");
         assert!(!dir.join("model.bin").exists(), "坏文件不落盘");
         assert!(!dir.join("model.bin.tmp").exists(), "半成品清理");
         assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 2, "重试一次");

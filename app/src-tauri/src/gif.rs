@@ -111,9 +111,9 @@ pub(crate) fn encode_gif(frames: &[GifFrame], out: &Path) -> Result<GifOutcome, 
     for (i, f) in frames.iter().enumerate() {
         // 逐帧硬超时（gif crate 无 gifski 式 ProgressReporter 中止——同步写里查时钟）
         if Instant::now() > deadline {
-            return Err(format!(
-                "GIF 编码超时（>{GIF_ENCODE_DEADLINE:?}，帧 {i}/{}）——录制通道异常",
-                frames.len()
+            return Err(crate::errcode::coded_kv(
+                "gif_encode_timeout",
+                &[("detail", &format!("{i}/{}", frames.len()))],
             ));
         }
         // from_rgba_speed 需要 &mut（量化原地做）——每帧一次拷贝 ~1.4MB，

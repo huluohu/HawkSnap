@@ -10,7 +10,13 @@ const SENTINEL = /^<hserr:([a-z0-9_]+)>(?:\|((?:[^|<>\n]|:(?!hserr:))*))?$/;
  * 把后端错误串渲染为当前语言的文案：哨兵码 → t("err.<code>", vars)；
  * 非哨兵串（含历史消息/第三方原始串）原样返回。词典缺键时 t() 回退 key 本身，
  * 与原串不同 → 返回原串（宁 show 原文不 show 码）。
+ *
+ * 值翻译（2026-11-20）：kind/kindA/kindB 三类枚举参数的值是稳定键
+ * （capture/pin/…，Rust 侧 kind_label 只出键），经 `hotkey.kind.*` 就地翻译；
+ * 未命中翻译表时保留原值（向前兼容）。
  */
+const TRANSLATED_VARS = new Set(["kind", "kindA", "kindB"]);
+
 export function formatError(raw: string): string {
   const m = SENTINEL.exec(raw);
   if (!m) return raw;
@@ -19,7 +25,16 @@ export function formatError(raw: string): string {
   if (m[2]) {
     for (const pair of m[2].split(";")) {
       const i = pair.indexOf("=");
-      if (i > 0) vars[pair.slice(0, i)] = pair.slice(i + 1);
+      if (i > 0) {
+        const k = pair.slice(0, i);
+        let v = pair.slice(i + 1);
+        if (TRANSLATED_VARS.has(k)) {
+          const tk = `hotkey.kind.${v}`;
+          const tv = t(tk);
+          if (tv !== tk) v = tv;
+        }
+        vars[k] = v;
+      }
     }
   }
   const out = t(key, vars);

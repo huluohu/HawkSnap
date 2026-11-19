@@ -171,8 +171,12 @@ pub fn recording_output_path(
     base_dir: &std::path::Path,
     now: DateTime<Local>,
 ) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(base_dir)
-        .map_err(|e| format!("创建录屏目录 {} 失败: {e}", base_dir.display()))?;
+    std::fs::create_dir_all(base_dir).map_err(|e| {
+        hawksnap_core::errcode::coded_kv(
+            "recording_dir_create_failed",
+            &[("detail", &format!("{}: {e}", base_dir.display()))],
+        )
+    })?;
     let stem = now.format("%Y-%m-%d-%H%M%S").to_string();
     let first = base_dir.join(format!("{stem}.mp4"));
     if !first.exists() {
@@ -358,19 +362,23 @@ pub fn region_stream_params(
     scale: f64,
 ) -> Result<RegionStreamParams, String> {
     if !scale.is_finite() || scale <= 0.0 {
-        return Err(format!("显示器缩放异常: {scale}"));
+        return Err(hawksnap_core::errcode::coded_kv(
+            "recording_bad_scale",
+            &[("detail", &scale.to_string())],
+        ));
     }
     if !display_logical_w.is_finite() || !display_logical_h.is_finite()
         || display_logical_w <= 0.0 || display_logical_h <= 0.0
     {
-        return Err(format!(
-            "显示器逻辑尺寸异常: {display_logical_w}x{display_logical_h}"
+        return Err(hawksnap_core::errcode::coded_kv(
+            "recording_bad_display",
+            &[("detail", &format!("{display_logical_w}x{display_logical_h}"))],
         ));
     }
     if !region.x.is_finite() || !region.y.is_finite()
         || !region.w.is_finite() || !region.h.is_finite()
     {
-        return Err("选区坐标异常（非有限值）".into());
+        return Err(hawksnap_core::errcode::coded("recording_region_not_finite"));
     }
     // 夹取进显示边界（display 本地 points，[0, W]×[0, H]）。
     let x0 = region.x.clamp(0.0, display_logical_w);
@@ -379,7 +387,10 @@ pub fn region_stream_params(
     let y1 = (region.y + region.h).clamp(y0, display_logical_h);
     let (w, h) = (x1 - x0, y1 - y0);
     if w < 1.0 || h < 1.0 {
-        return Err(format!("选区尺寸过小: {w:.1}x{h:.1}"));
+        return Err(hawksnap_core::errcode::coded_kv(
+            "recording_region_too_small",
+            &[("detail", &format!("{w:.1}x{h:.1}"))],
+        ));
     }
     let out_w = even_px(w * scale).max(2);
     let out_h = even_px(h * scale).max(2);
@@ -1382,21 +1393,23 @@ impl CameraSession {
                 }
                 match rx.recv_timeout(std::time::Duration::from_secs(15)) {
                     Ok(true) => {}
-                    Ok(false) => return Err("相机权限未授予：画中画保持关闭（录制不受影响）".into()),
-                    Err(_) => return Err("相机授权请求超时：画中画保持关闭（录制不受影响）".into()),
+                    Ok(false) => return Err(hawksnap_core::errcode::coded("pip_camera_denied")),
+                    Err(_) => return Err(hawksnap_core::errcode::coded("pip_camera_timeout")),
                 }
             } else {
                 // Denied / Restricted
-                return Err("相机权限未授予：画中画保持关闭（录制不受影响）".into());
+                return Err(hawksnap_core::errcode::coded("pip_camera_denied"));
             }
         }
         // 2. 默认视频设备（FaceTime HD 等；discovery session 对单设备场景是过度设计）。
         let Some(device) = (unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media) }) else {
-            return Err("未找到可用相机：画中画保持关闭（录制不受影响）".into());
+            return Err(hawksnap_core::errcode::coded("pip_no_camera"));
         };
         // 3. 设备输入（打开设备可能失败：被独占/拔出）。
         let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }
-            .map_err(|e| format!("相机输入打开失败: {e}（画中画保持关闭，录制不受影响）"))?;
+            .map_err(|e| {
+                hawksnap_core::errcode::coded_kv("pip_camera_input_failed", &[("detail", &e.to_string())])
+            })?;
         // 4. 会话组装：默认 preset（高分辨率档），输出固定 32BGRA（合成按内存序
         //    B,G,R,A 直算；与 SCStream 帧同格式，零 swizzle）。
         let session = unsafe { AVCaptureSession::new() };
@@ -1424,11 +1437,11 @@ impl CameraSession {
             );
         }
         if !unsafe { session.canAddInput(&input) } {
-            return Err("AVCaptureSession 拒绝相机输入（画中画保持关闭，录制不受影响）".into());
+            return Err(hawksnap_core::errcode::coded("pip_session_reject_input"));
         }
         unsafe { session.addInput(&input) };
         if !unsafe { session.canAddOutput(&output) } {
-            return Err("AVCaptureSession 拒绝视频输出（画中画保持关闭，录制不受影响）".into());
+            return Err(hawksnap_core::errcode::coded("pip_session_reject_output"));
         }
         unsafe { session.addOutput(&output) };
         unsafe { session.startRunning() };
@@ -1508,17 +1521,26 @@ impl PipLane {
         // 先验证数值合法性（不合法整包拒绝，状态零变化）。
         if let Some(Some(x)) = patch.x {
             if !x.is_finite() {
-                return Err(format!("画中画 x 坐标非法: {x}"));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "pip_bad_x",
+                    &[("detail", &x.to_string())],
+                ));
             }
         }
         if let Some(Some(y)) = patch.y {
             if !y.is_finite() {
-                return Err(format!("画中画 y 坐标非法: {y}"));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "pip_bad_y",
+                    &[("detail", &y.to_string())],
+                ));
             }
         }
         if let Some(size) = patch.size {
             if !size.is_finite() || size <= 0.0 {
-                return Err(format!("画中画尺寸非法: {size}"));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "pip_bad_size",
+                    &[("detail", &size.to_string())],
+                ));
             }
         }
         let turning_on = patch.visible == Some(true);
@@ -1959,7 +1981,10 @@ impl ScreenRecorder {
         opts: StreamOpts,
     ) -> Result<ScreenRecorder, String> {
         if output_path.exists() {
-            return Err(format!("输出文件已存在: {}", output_path.display()));
+            return Err(hawksnap_core::errcode::coded_kv(
+                "recording_output_exists",
+                &[("detail", &output_path.display().to_string())],
+            ));
         }
         let shared = std::sync::Arc::new(RecShared {
             phase: std::sync::atomic::AtomicU8::new(0),
@@ -2007,7 +2032,10 @@ impl ScreenRecorder {
             unsafe { cg_display_ffi::CGDisplayPixelsHigh(display_id) },
         );
         if pw == 0 || ph == 0 {
-            return Err(format!("显示器物理尺寸异常: {pw}x{ph}"));
+            return Err(hawksnap_core::errcode::coded_kv(
+                "recording_bad_display_px",
+                &[("detail", &format!("{pw}x{ph}"))],
+            ));
         }
         // N1：输出帧尺寸 + 可选裁剪源。全屏 = 显示器物理像素（既有口径不变）；
         // 区域 = 选区 points × 缩放（偶数取整——h264 4:2:0 色度子采样，见 even_px 注）。
@@ -2034,7 +2062,10 @@ impl ScreenRecorder {
             }
         };
         if w == 0 || h == 0 {
-            return Err(format!("输出帧尺寸异常: {w}x{h}"));
+            return Err(hawksnap_core::errcode::coded_kv(
+                "recording_bad_frame_size",
+                &[("detail", &format!("{w}x{h}"))],
+            ));
         }
 
         // 2. filter = 所选显示器 + 排除**整个本应用**（终审修复：原实现排除窗口列表为空，
@@ -2126,7 +2157,9 @@ impl ScreenRecorder {
                 AVFileTypeMPEG4.unwrap(),
             )
         }
-        .map_err(|e| format!("AVAssetWriter 初始化失败: {e}"))?;
+        .map_err(|e| {
+            hawksnap_core::errcode::coded_kv("recording_writer_init_failed", &[("detail", &e.to_string())])
+        })?;
 
         // 注意：AVVideoCodecH264 常量的值是 "avc1"（非字面 "AVVideoCodecH264"）——
         // 字典的 KEY 是头文件宏名字面量，VALUE 必须读真常量。
@@ -2168,11 +2201,11 @@ impl ScreenRecorder {
         unsafe { audio_input.setExpectsMediaDataInRealTime(true) };
 
         if !unsafe { writer.canAddInput(&video_input) } {
-            return Err("AVAssetWriter 拒绝视频 input".into());
+            return Err(hawksnap_core::errcode::coded("recording_video_input_rejected"));
         }
         unsafe { writer.addInput(&video_input) };
         if !unsafe { writer.canAddInput(&audio_input) } {
-            return Err("AVAssetWriter 拒绝音频 input".into());
+            return Err(hawksnap_core::errcode::coded("recording_audio_input_rejected"));
         }
         unsafe { writer.addInput(&audio_input) };
         // startWriting：Unknown → Writing（首样本 PTS 即会话起点——writer 对未显式
@@ -2180,9 +2213,9 @@ impl ScreenRecorder {
         // 「首帧落位 = t0」语义；显式调用反而抛 NSInternalInconsistencyException
         // （status 必须已是 Writing，实测见任务报告））。
         if !unsafe { writer.startWriting() } {
-            return Err(format!(
-                "AVAssetWriter startWriting 失败: {:?}",
-                unsafe { writer.error() }.map(|e| e.to_string())
+            return Err(hawksnap_core::errcode::coded_kv(
+                "recording_start_writing_failed",
+                &[("detail", &format!("{:?}", unsafe { writer.error() }.map(|e| e.to_string())))],
             ));
         }
 
@@ -2210,14 +2243,18 @@ impl ScreenRecorder {
                     SCStreamOutputType::Screen,
                     Some(&*video_queue),
                 )
-                .map_err(|e| format!("注册视频输出失败: {e}"))?;
+                .map_err(|e| {
+                    hawksnap_core::errcode::coded_kv("recording_video_output_failed", &[("detail", &e.to_string())])
+                })?;
             stream
                 .addStreamOutput_type_sampleHandlerQueue_error(
                     ProtocolObject::from_ref(&*output),
                     SCStreamOutputType::Audio,
                     Some(&*audio_queue),
                 )
-                .map_err(|e| format!("注册音频输出失败: {e}"))?;
+                .map_err(|e| {
+                    hawksnap_core::errcode::coded_kv("recording_audio_output_failed", &[("detail", &e.to_string())])
+                })?;
         }
 
         // 6. startCapture（completion 同步等待）。
@@ -2227,12 +2264,15 @@ impl ScreenRecorder {
                 Ok(())
             } else {
                 // SAFETY: 非空即系统投递的合法 NSError。
-                Err(format!("startCapture 失败: {}", unsafe { &*err }))
+                Err(hawksnap_core::errcode::coded_kv(
+                    "recording_start_failed",
+                    &[("detail", &unsafe { &*err }.to_string())],
+                ))
             });
         });
         unsafe { stream.startCaptureWithCompletionHandler(Some(&block)) };
         rx.recv_timeout(std::time::Duration::from_secs(10))
-            .map_err(|_| "startCapture 完成回调超时".to_string())??;
+            .map_err(|_| hawksnap_core::errcode::coded("recording_start_timeout"))??;
 
         // 全部就绪 → 装载会话（帧回调自此有完整上下文）。
         *shared.state.lock().unwrap_or_else(|e| e.into_inner()) = Some(RecSession {
@@ -2325,7 +2365,7 @@ impl ScreenRecorder {
             .store(2, std::sync::atomic::Ordering::SeqCst);
         let mut session = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(mut s) = session.take() else {
-            return Err("录屏会话不存在（重复停止）".into());
+            return Err(hawksnap_core::errcode::coded("recording_no_session"));
         };
 
         // 1. 停流（completion 同步收口；此间残余回调因 phase=2 丢帧）。
@@ -2335,7 +2375,10 @@ impl ScreenRecorder {
                 let _ = tx.send(if err.is_null() {
                     Ok(())
                 } else {
-                    Err(format!("stopCapture 失败: {}", unsafe { &*err }))
+                    Err(hawksnap_core::errcode::coded_kv(
+                        "recording_stop_failed",
+                        &[("detail", &unsafe { &*err }.to_string())],
+                    ))
                 });
             });
             unsafe { stream.stopCaptureWithCompletionHandler(Some(&block)) };
@@ -2351,29 +2394,38 @@ impl ScreenRecorder {
                 unsafe { writer.cancelWriting() };
             }
             let _ = std::fs::remove_file(&s.output_path);
-            return Err("录屏未捕获到任何画面（首帧未到）".into());
+            return Err(hawksnap_core::errcode::coded("recording_no_frames"));
         }
 
         // 4. finishWriting（阻塞等 mux 落盘）。
-        let writer = s.writer.take().ok_or("AVAssetWriter 缺失")?;
+        let writer = s
+            .writer
+            .take()
+            .ok_or_else(|| hawksnap_core::errcode::coded("recording_writer_missing"))?;
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let block = block2::RcBlock::new(move || {
             let _ = tx.send(());
         });
         unsafe { writer.finishWritingWithCompletionHandler(&block) };
         if rx.recv_timeout(std::time::Duration::from_secs(15)).is_err() {
-            return Err("finishWriting 超时（15s）".into());
+            return Err(hawksnap_core::errcode::coded("recording_finish_timeout"));
         }
 
         let status = unsafe { writer.status() };
         if status != AVAssetWriterStatus::Completed {
             let detail = unsafe { writer.error() }
                 .map(|e| e.to_string())
-                .unwrap_or_else(|| "未知错误".into());
-            return Err(format!("MP4 收尾失败: {detail}"));
+                .unwrap_or_else(|| "unknown".into());
+            return Err(hawksnap_core::errcode::coded_kv(
+                "recording_mux_failed",
+                &[("detail", &detail)],
+            ));
         }
         if let Some(err) = s.error.take() {
-            return Err(format!("录屏管线曾报错（文件已生成，请核查）: {err}"));
+            return Err(hawksnap_core::errcode::coded_kv(
+                "recording_pipeline_error",
+                &[("detail", &err)],
+            ));
         }
         Ok(s.info)
     }
@@ -2391,11 +2443,14 @@ fn get_shareable_content() -> Result<Retained<SCShareableContent>, String> {
                 // SAFETY: err 为空即系统交付的合法 +1 引用。
                 match unsafe { Retained::retain(content) } {
                     Some(c) => Ok(c),
-                    None => Err("getShareableContent 返回空内容".to_string()),
+                    None => Err(hawksnap_core::errcode::coded("recording_shareable_empty")),
                 }
             } else {
                 // SAFETY: 非空即系统投递的合法 NSError。
-                Err(format!("getShareableContent 失败: {}", unsafe { &*err }))
+                Err(hawksnap_core::errcode::coded_kv(
+                    "recording_shareable_failed",
+                    &[("detail", &unsafe { &*err }.to_string())],
+                ))
             };
             let _ = tx.send(res);
         },
@@ -2411,7 +2466,7 @@ fn get_shareable_content() -> Result<Retained<SCShareableContent>, String> {
         );
     }
     rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "getShareableContent 回调超时".to_string())?
+        .map_err(|_| hawksnap_core::errcode::coded("recording_shareable_timeout"))?
 }
 
 #[cfg(target_os = "macos")]
@@ -2505,17 +2560,26 @@ impl PipLane {
     pub fn update(&self, patch: PipUpdate) -> Result<(), String> {
         if let Some(Some(x)) = patch.x {
             if !x.is_finite() {
-                return Err(format!("画中画 x 坐标非法: {x}"));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "pip_bad_x",
+                    &[("detail", &x.to_string())],
+                ));
             }
         }
         if let Some(Some(y)) = patch.y {
             if !y.is_finite() {
-                return Err(format!("画中画 y 坐标非法: {y}"));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "pip_bad_y",
+                    &[("detail", &y.to_string())],
+                ));
             }
         }
         if let Some(size) = patch.size {
             if !size.is_finite() || size <= 0.0 {
-                return Err(format!("画中画尺寸非法: {size}"));
+                return Err(hawksnap_core::errcode::coded_kv(
+                    "pip_bad_size",
+                    &[("detail", &size.to_string())],
+                ));
             }
         }
         if patch.visible == Some(true) {

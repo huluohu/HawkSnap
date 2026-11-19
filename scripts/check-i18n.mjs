@@ -196,5 +196,67 @@ try {
   process.exit(1);
 }
 
+// —— errcode 双向对齐门（2026-11-20 错误码扫尾轮）——Rust 侧发射的每个码都必须
+// 在词典 err.* 有键（漏键 = en/zh 用户看到原始哨兵串）；词典 err.* 死键 = 词典债
+//（前端审计实测曾 75↔75 零缺口，本门防回退）。扫描形态（战役教训：扫描器必须
+// 覆盖全部错误构造形态）：
+//   ① coded("X") / coded_kv("X"
+//   ② ocr_err("stage" → ocr_stage（pipeline.rs 的本地构造器）
+//   ③ 字面量哨兵 "<hserr:X>"（flow.rs 等直接拼串的豁免族发射点）
+const ERR_RUST_DIRS = [
+  join(ROOT, "app", "src-tauri", "src"),
+  join(ROOT, "crates", "hawksnap-core", "src"),
+  join(ROOT, "crates", "hawksnap-ocr", "src"),
+  join(ROOT, "crates", "hawksnap-platform-mac", "src"),
+];
+const emitted = new Set();
+function walkRust(dir, out = []) {
+  for (const name of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, name.name);
+    if (name.isDirectory()) walkRust(p, out);
+    else if (/\.rs$/.test(name.name)) out.push(p);
+  }
+  return out;
+}
+for (const file of walkRust(ERR_RUST_DIRS[0], walkRust(ERR_RUST_DIRS[1], walkRust(ERR_RUST_DIRS[2], walkRust(ERR_RUST_DIRS[3]))))) {
+  const lines = readFileSync(file, "utf8").split("\n");
+  // ① 跳过 #[cfg(test)] 模块（本仓约定：mod 体以列 0 的 `}` 收口）——测试夹具码
+  //   （如 errcode.rs 的 coded_kv("x")）不是产品发射面。
+  // ② 去掉注释行后**全文**跑正则：coded_kv 的首参常在下一行（多行调用形态，
+  //   本轮扫尾实测漏扫 32 个——逐行匹配是错误形态假设）。
+  let skipping = false;
+  const kept = [];
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (!skipping && trimmed.startsWith("#[cfg(test)]")) {
+      skipping = true;
+      continue;
+    }
+    if (skipping) {
+      if (line === "}") skipping = false;
+      continue;
+    }
+    if (trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) continue;
+    kept.push(line);
+  }
+  const src = kept.join("\n");
+  for (const m of src.matchAll(/\bcoded(?:_kv)?\(\s*"([a-z0-9_]+)"/g)) emitted.add(m[1]);
+  for (const m of src.matchAll(/\bocr_err\(\s*"([a-z0-9_]+)"/g)) emitted.add(`ocr_${m[1]}`);
+  for (const m of src.matchAll(/"<hserr:([a-z0-9_]+)>"/g)) emitted.add(m[1]);
+}
+const errKeys = new Set([...Z].filter((k) => k.startsWith("err.")).map((k) => k.slice(4)));
+const missingKeys = [...emitted].filter((c) => !errKeys.has(c));
+const deadErrKeys = [...errKeys].filter((k) => !emitted.has(k));
+console.log(`[i18n] errcode 门：Rust 发射 ${emitted.size} 个码，词典 err.* ${errKeys.size} 个键`);
+if (missingKeys.length || deadErrKeys.length) {
+  failed = true;
+  if (missingKeys.length) {
+    console.error(`[i18n] Rust 发射码缺词典键（用户将看到原始哨兵）:\n  ${missingKeys.map((c) => `err.${c}`).join("\n  ")}`);
+  }
+  if (deadErrKeys.length) {
+    console.error(`[i18n] 词典 err.* 死键（Rust 已不再发射）:\n  ${deadErrKeys.map((c) => `err.${c}`).join("\n  ")}`);
+  }
+}
+
 if (failed) process.exit(1);
 console.log("[i18n] OK：A⊆Z、A⊆E 且 Z==E");
