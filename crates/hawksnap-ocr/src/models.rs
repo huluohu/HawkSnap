@@ -245,10 +245,12 @@ pub fn ensure_ort_dylib(
 
     if let Err(first) = attempt(on_progress) {
         if let Err(second) = attempt(on_progress) {
-            return Err(hawksnap_core::errcode::coded_kv(
-                "ocr_ort_download_failed",
-                &[("detail", &format!("{first} / {second}"))],
-            ));
+            // 内层错误**直接透传**（2026-11-20 CI 实测）：first/second 多已是哨兵码
+            //（如 ocr_sha_mismatch）——再包一层 coded_kv 会经 sanitize_kv 剥掉内层
+            // 的 < >，前端看到的是剥壳后的原始码文本。首试原因记日志（诊断面），
+            // 回执给更具体的内层码。
+            eprintln!("[hawksnap] ORT 首试失败（重试后仍败）: {first}");
+            return Err(second);
         }
     }
     Ok(dest)
@@ -278,10 +280,10 @@ pub fn ensure_files(
             // 重试前清掉续传基线（半成品可能被写坏）。
             let _ = std::fs::remove_file(dir.join(tmp_name(&spec.name)));
             if let Err(second) = download_verified(dir, spec, idx, on_progress) {
-                return Err(hawksnap_core::errcode::coded_kv(
-                    "ocr_model_download_failed",
-                    &[("name", &spec.name), ("detail", &format!("{first} / {second}"))],
-                ));
+                // 内层错误直接透传（同 ensure_ort_dylib 注：嵌套哨兵会被 sanitize
+                // 剥壳）；首试原因记日志。
+                eprintln!("[hawksnap] 模型 {} 首试失败（重试后仍败）: {first}", spec.name);
+                return Err(second);
             }
         }
         out.push(target);
@@ -770,7 +772,8 @@ mod tests {
             &mut |_| {},
         )
         .unwrap_err();
-        assert!(err.contains("停滞"), "必须是停滞错误，got: {err}");
+        // 错误码化（2026-11-20）：停滞断言走哨兵码（词典 err.ocr_download_stalled 双语）。
+        assert!(err.contains("<hserr:ocr_download_stalled>"), "必须是停滞错误，got: {err}");
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
             "必须有界时间内返回，实测 {:?}",
