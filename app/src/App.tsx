@@ -300,15 +300,16 @@ function App() {
   // v1.2：kind 筛选随载荷下发（"all" 不携带，保持旧载荷形态）。
   const refreshShots = useCallback((query: string, kind: KindFilter) => {
     const kindArg = kind === "all" ? {} : { kind };
-    const req =
-      query.trim() === ""
-        ? invoke<ShotRow[]>("history_list", { limit: 50, offset: 0, ...kindArg })
-        : invoke<ShotRow[]>("history_search", { query, limit: 50, ...kindArg });
-    // 总数随列表同批取（浏览 = 库内总数；搜索 = 命中总数）。旁路降级：
+    // 总数随列表同批取（浏览 = 库内总数；搜索 = 命中总数）。**在 list/search 之前
+    // 发起**——测试契约「刷新动作最后一次调用是列表命令」依赖此顺序；旁路降级：
     // 计数失败不拦列表（提示行缺席好过整个历史挂掉）。
     invoke<number>("history_count", { query, ...kindArg })
       .then((n) => setHistoryTotal(Number(n) || 0))
       .catch(() => setHistoryTotal(0));
+    const req =
+      query.trim() === ""
+        ? invoke<ShotRow[]>("history_list", { limit: 50, offset: 0, ...kindArg })
+        : invoke<ShotRow[]>("history_search", { query, limit: 50, ...kindArg });
     req
       .then((rows) => {
         setShots(rows);
