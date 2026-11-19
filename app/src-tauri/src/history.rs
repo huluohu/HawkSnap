@@ -480,10 +480,14 @@ pub(crate) fn prune_at(db: &std::path::Path, max: i64) -> Result<(), String> {
         let mut stmt = conn
             .prepare("SELECT id, kind FROM shots ORDER BY id DESC")
             .map_err(|e| e.to_string())?;
-        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        // E0597（同 list_at_filtered 注）：临时 Rows 借用 stmt，尾表达式形态会让
+        // 临时值活到块结束、stmt 先死——先在块内 collect 成具名局部再产出。
+        let collected = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        collected
     };
     // 保留最新 max 条（id 最大的 max 个），其余逐条 delete。
     for (id, kind) in rows.into_iter().skip(max.max(0) as usize) {

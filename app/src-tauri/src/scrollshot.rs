@@ -742,7 +742,7 @@ fn register_finish_hotkey(app: &AppHandle) -> bool {
             eprintln!("[hawksnap] 注册 ⌘S 完成热键失败: {e}");
             crate::panel::show_capture_error(
                 app,
-                crate::errcode::coded_kv("scrollshot_finish_hotkey_failed", &[("detail", &e)]),
+                crate::errcode::coded_kv("scrollshot_finish_hotkey_failed", &[("detail", &e.to_string())]),
             );
             false
         }
