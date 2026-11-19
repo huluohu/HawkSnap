@@ -572,12 +572,9 @@ function App() {
               </span>
             </div>
           </div>
-          <div className="hs-field">
-            <span className="hs-field-label">{t("plugin.extIdLabel")}</span>
-            <div className="hs-field-control">
-              <code className="hs-code">{t("plugin.extIdPlaceholder")}</code>
-            </div>
-          </div>
+          {/* v1.2.1（审计修复）：原「扩展 ID + <填入扩展 ID>」假输入框已删——
+              ID 实际经桥接宿主安装脚本的 --ext-id 传入，面板无可填写入口，
+              文案不得宣称不存在的交互（产品纪律⑦）。 */}
           <p className="hs-field-hint">{t("plugin.installHint")}</p>
         </section>
       </div>

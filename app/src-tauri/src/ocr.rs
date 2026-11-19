@@ -210,7 +210,9 @@ pub fn ocr_export_txt(path: String, text: String) -> Result<String, String> {
         return Err(crate::errcode::coded_kv("ocr_source_missing", &[("path", &path)]));
     }
     let txt_path = p.with_extension("txt");
-    std::fs::write(&txt_path, text.as_bytes()).map_err(|e| crate::errcode::coded_kv("txt_write_failed", &[("detail", &e.to_string())]))?;
+    // OCR 导出的文本 = 屏幕内容的文字版，同样 0600。
+    hawksnap_core::fsutil::write_private_bytes(&txt_path, text.as_bytes())
+        .map_err(|e| crate::errcode::coded_kv("txt_write_failed", &[("detail", &e.to_string())]))?;
     Ok(txt_path.to_string_lossy().into_owned())
 }
 

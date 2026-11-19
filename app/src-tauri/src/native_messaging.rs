@@ -310,8 +310,8 @@ pub fn native_ingest(
 
     let settings = crate::settings::Settings::load(&app);
     let save_dir = crate::commands::resolve_save_dir(&settings)
-        .ok_or_else(|| "未配置保存目录".to_string())?;
-    std::fs::create_dir_all(&save_dir).map_err(|e| e.to_string())?;
+        .ok_or_else(|| crate::errcode::coded("save_dir_missing"))?;
+    hawksnap_core::fsutil::ensure_private_dir(&save_dir).map_err(|e| e.to_string())?;
 
     let db = crate::history::db_path(&app);
     // 帧声明的宽高一并传下去（悬殊不符 → 拒；轻微差异 → 以实际为准并记日志）。
@@ -373,11 +373,12 @@ pub(crate) fn ingest_capture_at(
     let saved_path = crate::commands::save_path_for(save_dir, "browser", "png");
     // 保存目录兜底创建（生产路径在调用前已建；此处再建一次 → 幂等，且让
     // 「落盘 + 入库」这个核心函数自带目录保证，测试可直接调用）。
-    std::fs::create_dir_all(save_dir).map_err(|e| e.to_string())?;
-    std::fs::write(&saved_path, &bytes).map_err(|e| e.to_string())?;
+    hawksnap_core::fsutil::ensure_private_dir(save_dir).map_err(|e| e.to_string())?;
+    // 浏览器整页截图同样 0600（与桌面端产物同一隐私默认）。
+    hawksnap_core::fsutil::write_private_bytes(&saved_path, &bytes).map_err(|e| e.to_string())?;
 
     let thumbs_dir = save_dir.join("thumbs");
-    std::fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    hawksnap_core::fsutil::ensure_private_dir(&thumbs_dir).map_err(|e| e.to_string())?;
     let stem = saved_path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -386,7 +387,7 @@ pub(crate) fn ingest_capture_at(
     let (thumb_rgba, tw, th) =
         hawksnap_core::crop::rgba_thumbnail(&rgba, w, h, 320).map_err(|e| e.to_string())?;
     let thumb_png = hawksnap_core::crop::rgba_to_png(&thumb_rgba, tw, th).map_err(|e| e.to_string())?;
-    std::fs::write(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
+    hawksnap_core::fsutil::write_private_bytes(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
 
     if let Some(db) = db {
         crate::history::record_at(

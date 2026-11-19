@@ -59,17 +59,20 @@ for (const file of files) {
     }
     for (const m of line.matchAll(NON_LITERAL_T)) {
       dynamicCalls.push(
-        `${rel}:${i + 1}  t(${m[1]}…  — 动态 key，检查器盲区（约定豁免族：hotkey.kind.* / lib/errors.ts 的 err.*——两族由单测与词典成对性兜底）`,
+        `${rel}:${i + 1}  t(${m[1]}…  — 动态 key，检查器盲区（约定豁免族：hotkey.kind.* / lib/errors.ts 的 err.* / editor/export.ts 的 ExportError.dictKey——三族由单测与词典成对性兜底）`,
       );
     }
   });
 }
 
-// 读词典（扁平 key 集合；解析失败即红）。
+// 读词典（扁平 key 集合；解析失败即红）。en 值语言守卫需要完整对象，一并保留。
 const dicts = {};
+const dictObjs = {};
 for (const [lang, path] of Object.entries(LOCALE_FILES)) {
   try {
-    dicts[lang] = Object.keys(JSON.parse(readFileSync(path, "utf8")));
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    dictObjs[lang] = parsed;
+    dicts[lang] = Object.keys(parsed);
   } catch (e) {
     console.error(`[i18n] 词典不可读/非法 JSON: ${path}\n  ${e.message}`);
     process.exit(1);
@@ -99,6 +102,22 @@ if (missingInEn.length) {
 if (orphans.length) {
   failed = true;
   console.error(`[i18n] 词典孤儿（Z≠E，双向不一致）:\n  ${orphans.join("\n  ")}`);
+}
+
+// —— en 值语言守卫（2026-11-20 审计修复）——键集合门抓不到「值漏翻」：en-US.json
+// 曾出现值仍是中文的键（saveDirPlaceholder），外语用户在 UI 直接看到中文。
+// en 值含 CJK 统一表意字符即红（U+3400-9FFF + 兼容表意；⌘/—/全角标点不在列，
+// 不误伤）。豁免：语言选项键（*.language.zh）的值**有意**用原生文字（英文界面
+// 里语言名也显示「简体中文」，i18n 惯例）。设置 COPY en 表同门（见下方 COPY 门）。
+const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+const NATIVE_NAME_KEY = /\.(language|lang)\.[a-z-]+$/;
+const cjkEn = Object.entries(dictObjs["en-US"])
+  .filter(([, v]) => typeof v === "string" && CJK.test(v))
+  .map(([k]) => k)
+  .filter((k) => !NATIVE_NAME_KEY.test(k));
+if (cjkEn.length) {
+  failed = true;
+  console.error(`[i18n] en-US.json 值残留中文（漏翻）:\n  ${cjkEn.join("\n  ")}`);
 }
 
 // —— 设置窗口 COPY 表门（v1.2）——
@@ -161,6 +180,15 @@ try {
   if (colliding.length) {
     copyFailed = true;
     console.error(`[i18n] COPY 键与主词典同名（双源必漂移）: ${colliding.join(", ")}`);
+  }
+  // COPY en 表值语言守卫（与主词典同一纪律；语言选项原生名豁免）。
+  const cjkCopy = [...enBody.matchAll(/"([^"]+)"\s*:\s*"([^"]*)"/g)]
+    .filter(([, , v]) => CJK.test(v))
+    .map(([, k]) => k)
+    .filter((k) => !NATIVE_NAME_KEY.test(k));
+  if (cjkCopy.length) {
+    copyFailed = true;
+    console.error(`[i18n] 设置 COPY en 表值残留中文（漏翻）: ${cjkCopy.join(", ")}`);
   }
   if (copyFailed) process.exit(1);
 } catch (e) {

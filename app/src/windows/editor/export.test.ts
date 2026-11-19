@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exportToPng, type CanvasFactory } from "./export";
+import { exportToPng, ExportError, type CanvasFactory } from "./export";
 import type { EditorBitmap } from "./draw";
 import type { Shape } from "./shapes";
 
@@ -96,7 +96,11 @@ describe("exportToPng", () => {
       getContext: () => ctx,
       toBlob: (cb: (b: Blob | null) => void) => cb(null),
     } as unknown as HTMLCanvasElement);
-    await expect(exportToPng(bitmap, [rect], 100, 100, nullFactory)).rejects.toThrow("PNG 编码失败");
+    // v1.2.1：编码失败改抛 ExportError（词典键），不再内联中文文案。
+    await expect(exportToPng(bitmap, [rect], 100, 100, nullFactory)).rejects.toThrow(ExportError);
+    await expect(exportToPng(bitmap, [rect], 100, 100, nullFactory)).rejects.toMatchObject({
+      dictKey: "editor.pngEncodeFailed",
+    });
   });
 
   it("rejects when the 2d context is unavailable", async () => {
@@ -106,6 +110,9 @@ describe("exportToPng", () => {
       getContext: () => null,
       toBlob: () => undefined,
     } as unknown as HTMLCanvasElement);
-    await expect(exportToPng(bitmap, [], 10, 10, factory)).rejects.toThrow("无法创建离屏画布上下文");
+    await expect(exportToPng(bitmap, [], 10, 10, factory)).rejects.toThrow(ExportError);
+    await expect(exportToPng(bitmap, [], 10, 10, factory)).rejects.toMatchObject({
+      dictKey: "editor.canvasCtxFailed",
+    });
   });
 });

@@ -17,7 +17,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t, subscribe, getLanguage } from "../../lib/i18n";
 import { formatError } from "../../lib/errors";
 import EditorCanvas, { ZOOM_MAX, ZOOM_MIN, type EditorStyle, type Tool } from "./EditorCanvas";
-import { exportToPng } from "./export";
+import { exportToPng, ExportError } from "./export";
 import { useEditorHistory } from "./history";
 import { createLoadGuard } from "./loadGuard";
 import { applyCrop, translate, withColor, withSize, withWidth, type BBox, type MosaicMode, type Shape } from "./shapes";
@@ -439,7 +439,9 @@ export default function EditorWindow() {
       window.clearTimeout(flashTimer.current);
       flashTimer.current = window.setTimeout(() => setSavedFlash(false), 2000);
     } catch (e) {
-      setSaveError(String(e));
+      // ExportError.dictKey → 词典键就地翻译（错误串不再内联中文，见 export.ts）；
+      // 其余（invoke 回来的 hserr 哨兵等）走原样/formatError 链。
+      setSaveError(e instanceof ExportError ? t(e.dictKey) : String(e));
     } finally {
       setSaving(false);
     }
@@ -464,7 +466,7 @@ export default function EditorWindow() {
       const lines = await invoke<OcrLine[]>("ocr_recognize_png", { pngBase64 });
       setOcrLines(lines);
     } catch (e) {
-      setOcrError(String(e));
+      setOcrError(e instanceof ExportError ? t(e.dictKey) : String(e));
       setOcrLines(null);
     } finally {
       setOcrRunning(false);

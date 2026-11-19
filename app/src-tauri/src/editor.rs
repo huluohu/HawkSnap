@@ -265,7 +265,7 @@ fn save_png_bytes(path: &str, png_base64: &str) -> Result<(Vec<u8>, u32, u32), S
         s.push(".tmp");
         s.into()
     };
-    if let Err(e) = std::fs::write(&tmp, &bytes) {
+    if let Err(e) = hawksnap_core::fsutil::write_private_bytes(&tmp, &bytes) {
         let _ = std::fs::remove_file(&tmp);
         return Err(crate::errcode::coded_kv("file_write_failed", &[("detail", &e.to_string())]));
     }
@@ -288,11 +288,12 @@ fn save_annotate_to_history(
 ) -> Result<String, String> {
     let settings = crate::settings::Settings::load(app);
     let dir = crate::commands::resolve_save_dir(&settings).ok_or("no picture dir")?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    hawksnap_core::fsutil::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
     let path = crate::commands::save_path_for(&dir, "HawkSnap", "png");
     let png = hawksnap_core::crop::rgba_to_png(rgba, w, h)
         .map_err(|e| crate::errcode::coded_kv("annotate_encode_failed", &[("detail", &e.to_string())]))?;
-    std::fs::write(&path, &png).map_err(|e| crate::errcode::coded_kv("file_write_failed", &[("detail", &e.to_string())]))?;
+    hawksnap_core::fsutil::write_private_bytes(&path, &png)
+        .map_err(|e| crate::errcode::coded_kv("file_write_failed", &[("detail", &e.to_string())]))?;
     crate::commands::record_history(
         app,
         &path,

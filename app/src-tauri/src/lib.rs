@@ -527,11 +527,14 @@ pub fn run() {
         // 托盘「退出」走 app.exit(0) → 会走到 RunEvent::Exit；最后一个窗口关闭
         // 被上面的 prevent_exit 拦下 → 进程还活着 → 配置保留（正确：桌面端还在跑）。
         tauri::RunEvent::Exit => {
-            crate::native_messaging::cleanup_host_config();
-            // 抓帧缓存清空（2026-11-04 泄漏修复，闸二）：本次运行写下的冻结帧
-            // 不留尾巴。**仅主实例**——第二实例拿不到锁后走 app.exit(0) 也会
-            // 到达 Exit，无差别清空会删掉正在运行的主实例的当前帧。
+            // 宿主配置删除与抓帧缓存清空**都仅主实例**（2026-11-20 审计修复）：
+            // 第二实例拿不到锁后走 app.exit(0) 同样到达 Exit——无差别删除会把
+            // 正在运行的主实例的 native-host.json（含一次性令牌）删掉，浏览器
+            // 桥此后静默断链（宿主每次转发前重读配置，读不到即失败）。
             if single_instance::is_primary() {
+                crate::native_messaging::cleanup_host_config();
+                // 抓帧缓存清空（2026-11-04 泄漏修复，闸二）：本次运行写下的冻结帧
+                // 不留尾巴。
                 crate::commands::purge_grab_cache(_app);
             }
         }

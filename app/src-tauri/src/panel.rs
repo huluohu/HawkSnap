@@ -118,9 +118,11 @@ pub fn open_path(path: String) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "打开目录失败: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+        // 非零退出与启动失败同码：detail 带回 stderr，词典 err.file_manager_open_failed
+        // 双语渲染（2026-11-20 审计：此处曾是漏网的中文字面量）。
+        Err(crate::errcode::coded_kv(
+            "file_manager_open_failed",
+            &[("detail", String::from_utf8_lossy(&out.stderr).trim())],
         ))
     }
 }

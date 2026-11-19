@@ -142,7 +142,7 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
     let mut grabber = hawksnap_platform_mac::XcapGrabber::new();
     let frames = grabber.grab_all().map_err(|e| e.to_string())?;
     let cache = grabs_cache_dir(&app).ok_or_else(|| crate::errcode::coded("cache_dir_missing"))?;
-    std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    hawksnap_core::fsutil::ensure_private_dir(&cache).map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(frames.len());
     let mut captures = CAPTURES.lock().unwrap_or_else(|e| e.into_inner());
     for f in frames {
@@ -167,7 +167,8 @@ pub async fn capture_screens(app: AppHandle) -> Result<Vec<DisplayPayload>, Stri
             f.display_id,
             chrono::Local::now().timestamp_millis()
         ));
-        std::fs::write(&file, &f.rgba).map_err(|e| e.to_string())?;
+        // 冻结帧 = 整屏内容，0600 落盘（fsutil 模块注：隐私默认）。
+        hawksnap_core::fsutil::write_private_bytes(&file, &f.rgba).map_err(|e| e.to_string())?;
         // raw-RGBA 捕获缓存（Plan B Task 2）：物理尺寸按 (width*scale).round() 计算，
         // finish_capture 直通行复制裁剪与剪贴板，全程不再读冻结帧文件。frame_path 仅供
         // 下一轮删除上一轮冻结帧。
@@ -249,7 +250,7 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
         // C7 保存目录接线（控制器追加）：settings.save_dir Some(非空) → 用户目录；
         // None → 默认 ~/Pictures/HawkSnap（与 C2 之前行为一致）。
         let dir = resolve_save_dir(&settings).ok_or_else(|| crate::errcode::coded("save_dir_missing"))?;
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        hawksnap_core::fsutil::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
         let (bytes, ext) = if settings.output_format == "jpeg" {
             (
                 hawksnap_core::crop::rgba_to_jpeg(
@@ -265,7 +266,9 @@ pub async fn finish_capture(app: AppHandle, req: FinishReq) -> Result<CaptureOut
             )
         };
         let path = save_path_for(&dir, &save_name, ext);
-        std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+        // 截图产物 0600（2026-11-20 安全审计：屏幕内容默认仅本人可读；Windows
+        // 无位概念走 profile ACL，历史来源列/保存路径不受影响）。
+        hawksnap_core::fsutil::write_private_bytes(&path, &bytes).map_err(|e| e.to_string())?;
         saved_to = Some(path.to_string_lossy().into_owned());
         // C4 保存即入库：缩略图落盘 + history::record。历史是旁路（裁定）：整条链任一步
         // 失败只 eprintln，绝不影响保存本身的成败——闭包包住全部步骤统一降级。
@@ -345,7 +348,8 @@ fn write_annotate_png(rgba: &[u8], w: u32, h: u32) -> Result<std::path::PathBuf,
         "hawksnap-annotate-{}-{seq}.png",
         chrono::Local::now().timestamp_millis()
     ));
-    std::fs::write(&path, &png).map_err(|e| crate::errcode::coded_kv("tmp_write_failed", &[("detail", &e.to_string())]))?;
+    hawksnap_core::fsutil::write_private_bytes(&path, &png)
+        .map_err(|e| crate::errcode::coded_kv("tmp_write_failed", &[("detail", &e.to_string())]))?;
     Ok(path)
 }
 
@@ -499,14 +503,14 @@ pub(crate) fn record_history(
         hawksnap_core::crop::rgba_thumbnail(cropped, physical.w, physical.h, 320)
             .map_err(|e| e.to_string())?;
     let thumbs_dir = dir.join("thumbs");
-    std::fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    hawksnap_core::fsutil::ensure_private_dir(&thumbs_dir).map_err(|e| e.to_string())?;
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "shot".into());
     let thumb_path = thumbs_dir.join(format!("{stem}.png"));
     let thumb_png = rgba_to_png(&thumb_rgba, tw, th).map_err(|e| e.to_string())?;
-    std::fs::write(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
+    hawksnap_core::fsutil::write_private_bytes(&thumb_path, &thumb_png).map_err(|e| e.to_string())?;
     crate::history::record(
         app,
         &path.to_string_lossy(),

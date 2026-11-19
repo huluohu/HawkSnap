@@ -302,7 +302,8 @@ fn open_pin_editor(
     let png = hawksnap_core::crop::rgba_to_png(&rgba, w_px, h_px)
         .map_err(|e| crate::errcode::coded_kv("pin_frame_encode_failed", &[("detail", &e.to_string())]))?;
     let path = pin_temp_path(id);
-    std::fs::write(&path, &png).map_err(|e| crate::errcode::coded_kv("tmp_write_failed", &[("detail", &e.to_string())]))?;
+    hawksnap_core::fsutil::write_private_bytes(&path, &png)
+        .map_err(|e| crate::errcode::coded_kv("tmp_write_failed", &[("detail", &e.to_string())]))?;
     crate::editor::editor_open(
         app,
         path.to_string_lossy().into_owned(),
