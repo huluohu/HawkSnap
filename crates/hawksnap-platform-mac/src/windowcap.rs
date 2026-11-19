@@ -110,7 +110,7 @@ fn capture_via_window(rect: GlobalRect) -> Result<RegionImage, String> {
         wid,
         kCGWindowImageBoundsIgnoreFraming | kCGWindowImageBestResolution,
     )
-    .map_err(|_| hawksnap_core::errcode::coded("windowcap_capture_null"))?;
+    .ok_or_else(|| hawksnap_core::errcode::coded("windowcap_capture_null"))?;
     let (rgba, w, h) = cgimage_to_rgba(&image)?;
     // 尺寸自检：物理宽高必须是选区逻辑尺寸的同一比例（1x 或 2x）。比例不一致
     // 说明返回的不是我们要的那块 → 交兜底处理，绝不产出错位内容。
