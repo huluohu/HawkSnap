@@ -50,7 +50,8 @@ export default function KeycastWindow() {
 
   return (
     <div style={wrap} data-testid="keycast-root">
-      <style>{`@keyframes hawksnap-keycast-fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }`}</style>
+      <style>{`@keyframes hawksnap-keycast-fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+        @media (prefers-reduced-motion: reduce) { div[style*=hawksnap-keycast-fade] { animation: none; opacity: 1; } }`}</style>
       {combo !== null && (
         <div key={seq} style={pill} aria-hidden="true">{combo}</div>
       )}

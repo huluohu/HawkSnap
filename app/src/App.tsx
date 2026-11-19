@@ -57,6 +57,24 @@ interface HotkeyErrorPayload {
 }
 
 
+/** 横幅关闭钮（2026-11-20 UI 审计：错误/状态条此前不可关、不消退）。 */
+function BannerClose({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="hs-banner-close"
+      aria-label={t("banner.dismiss")}
+      title={t("banner.dismiss")}
+      onClick={onClick}
+    >
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+        strokeWidth={2} strokeLinecap="round" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18" />
+      </svg>
+    </button>
+  );
+}
+
 function App() {
   // 订阅 i18n 语言态：语言切换触发本组件重渲染，全部文案即时换新（不重载）。
   useSyncExternalStore(subscribe, getLanguage);
@@ -80,6 +98,9 @@ function App() {
   const [historyQuery, setHistoryQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [historyError, setHistoryError] = useState<string | null>(null);
+  // 总数（2026-11-20 UI 审计：面板恒取 50 条且无提示——第 51 条起像「数据丢失」）。
+  // 数值仅在 > shots.length 时展示「显示最新 N · 共 M 条」。
+  const [historyTotal, setHistoryTotal] = useState<number>(0);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   // —— 类型筛选（v1.2，§3.6「按类型」）：chips 只作用于列表/搜索的 kind 条件；
   // "all" 不携带 kind 字段（载荷与旧版一致，兼容测试断言）。
@@ -87,6 +108,28 @@ function App() {
   // —— 贴图管理（v1.2 最小版，§3.2）：贴图清单 + 单张关闭。清单 10s 轮询 + 贴图
   // 动作后即时刷新（贴图也可经 F2/托盘增减——轮询兜住非本面板路径）。
   const [pins, setPins] = useState<PinInfo[]>([]);
+
+  // 横幅自动消退（2026-11-20 UI 审计）：错误 8s、浏览器入库告知 5s；清理由 effect
+  // 返回函数统一接手（任一横幅变化即重置全部计时，避免旧计时误杀新横幅）。
+  useEffect(() => {
+    const timers: number[] = [];
+    if (hotkeyError) timers.push(window.setTimeout(() => setHotkeyError(null), 8000));
+    if (captureError) timers.push(window.setTimeout(() => setCaptureError(null), 8000));
+    if (recordError) timers.push(window.setTimeout(() => setRecordError(null), 8000));
+    if (browserCapture) timers.push(window.setTimeout(() => setBrowserCapture(null), 5000));
+    return () => timers.forEach((h) => window.clearTimeout(h));
+  }, [hotkeyError, captureError, recordError, browserCapture]);
+
+  // 两步删除确认态（2026-11-20 UI 审计 P3）：Esc 取消确认 + 确认钮聚焦——此前
+  // Esc 无效、确认态重渲染后焦点落 body，键盘用户需重新 Tab。
+  useEffect(() => {
+    if (confirmDeleteId === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirmDeleteId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmDeleteId]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -252,6 +295,11 @@ function App() {
       query.trim() === ""
         ? invoke<ShotRow[]>("history_list", { limit: 50, offset: 0, ...kindArg })
         : invoke<ShotRow[]>("history_search", { query, limit: 50, ...kindArg });
+    // 总数随列表同批取（浏览 = 库内总数；搜索 = 命中总数）。旁路降级：
+    // 计数失败不拦列表（提示行缺席好过整个历史挂掉）。
+    invoke<number>("history_count", { query, ...kindArg })
+      .then((n) => setHistoryTotal(Number(n) || 0))
+      .catch(() => setHistoryTotal(0));
     req
       .then((rows) => {
         setShots(rows);
@@ -352,31 +400,45 @@ function App() {
       </header>
 
       {/* 通知条区域：五路错误（热键/截图/录屏/设置/更新）红色系，浏览器截图入库
-          为状态告知绿色系；允许多条堆叠，视觉安静（浅色底 + 细描边）。 */}
+          为状态告知绿色系；允许多条堆叠，视觉安静（浅色底 + 细描边）。
+          v1.2.1（UI 审计）：错误/状态条可手动关闭 + 自动消退（错误 8s、浏览器入库
+          5s）——此前常驻整个会话，旧错误视觉污染后续使用；updateAvailable 是待办
+          引导，保持常驻。 */}
       <div className="hs-banners">
         {hotkeyError && (
           <div role="alert" className="hs-banner hs-banner-error">
-            {t("banner.hotkeyError", {
-              kind: t(`hotkey.kind.${hotkeyError.kind}`),
-              message: formatError(hotkeyError.message),
-            })}
+            <span className="hs-banner-text">
+              {t("banner.hotkeyError", {
+                kind: t(`hotkey.kind.${hotkeyError.kind}`),
+                message: formatError(hotkeyError.message),
+              })}
+            </span>
+            <BannerClose onClick={() => setHotkeyError(null)} />
           </div>
         )}
         {captureError && (
           <div role="alert" className="hs-banner hs-banner-error">
-            {t("banner.captureError", { message: formatError(captureError) })}
+            <span className="hs-banner-text">
+              {t("banner.captureError", { message: formatError(captureError) })}
+            </span>
+            <BannerClose onClick={() => setCaptureError(null)} />
           </div>
         )}
         {recordError && (
           <div role="alert" className="hs-banner hs-banner-error">
-            {t("banner.recordError", { message: formatError(recordError) })}
+            <span className="hs-banner-text">
+              {t("banner.recordError", { message: formatError(recordError) })}
+            </span>
+            <BannerClose onClick={() => setRecordError(null)} />
           </div>
         )}
         {/* 发现新版本 → 引导去设置窗口安装（安装/重启流程在设置窗口统一实现，
             主面板不重复一套，避免两处状态机打架）。 */}
         {updateInfo && (
           <div role="status" className="hs-banner hs-banner-info">
-            <span>{t("banner.updateAvailable", { version: updateInfo.version })}</span>
+            <span className="hs-banner-text">
+              {t("banner.updateAvailable", { version: updateInfo.version })}
+            </span>
             <button
               type="button"
               className="hs-btn hs-btn-secondary hs-btn-sm"
@@ -388,7 +450,10 @@ function App() {
         )}
         {browserCapture && (
           <div role="status" className="hs-banner hs-banner-info">
-            {t("banner.browserCapture", { path: browserCapture })}
+            <span className="hs-banner-text">
+              {t("banner.browserCapture", { path: browserCapture })}
+            </span>
+            <BannerClose onClick={() => setBrowserCapture(null)} />
           </div>
         )}
       </div>
@@ -429,6 +494,11 @@ function App() {
             <div role="alert" className="hs-banner hs-banner-error hs-banner-sm">
               {t("history.actionError", { message: formatError(historyError) })}
             </div>
+          )}
+          {shots.length > 0 && historyTotal > shots.length && (
+            <p className="hs-total-hint" role="status">
+              {t("history.shownTotal", { shown: shots.length, total: historyTotal })}
+            </p>
           )}
           {shots.length === 0 ? (
             <div className="hs-empty">
@@ -482,9 +552,12 @@ function App() {
                         {t("history.openFolder")}
                       </button>
                       {confirmDeleteId === shot.id ? (
-                        // 两步删除第二步：确认态红底白字（逻辑同旧实现，仅换皮）
+                        // 两步删除第二步：确认态红底白字（逻辑同旧实现，仅换皮）。
+                        // autoFocus（2026-11-20 UI 审计）：确认态出现即持焦点，Enter
+                        // 直接确认、Esc 取消（监听见上方 effect）。
                         <button
                           className="hs-tile-btn hs-tile-btn-danger"
+                          autoFocus
                           onClick={() => removeShot(shot.id)}
                         >
                           {t("history.confirmDelete")}

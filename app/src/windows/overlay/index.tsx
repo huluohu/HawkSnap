@@ -731,6 +731,16 @@ export default function OverlayWindow() {
   if (!display) return null;
   return (
     <>
+      {/* 交互态（2026-11-20 UI 审计 P2）：动作浮条与录制开关此前无 hover/active/
+          focus-visible 反馈——暗底浮条上 7 个同色按钮鼠标扫过毫无反馈。overlay 窗口
+          不加载 App.css（main.tsx 按窗路由），故就地注入样式；`!important` 压过
+          内联底色（App.css .hs-editor 同款纪律）。 */}
+      <style>{`
+        .hs-ov-btn { transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease; }
+        .hs-ov-btn:hover { background-color: #2C568A !important; color: #FFFFFF !important; border-color: #4AA3FF !important; }
+        .hs-ov-btn:active { background-color: #1A3A5C !important; }
+        .hs-ov-btn:focus-visible { outline: 2px solid #4AA3FF; outline-offset: 1px; }
+      `}</style>
       <canvas ref={canvasRef}
         style={{ position: "fixed", inset: 0,
           // 光标统一由自绘十字准线承担（0.1 hotfix 3：WKWebView 上 CSS crosshair 不可
@@ -831,7 +841,7 @@ export default function OverlayWindow() {
               { id: "mp4" as const, label: t("record.format.mp4") },
               { id: "gif" as const, label: t("record.format.gif") },
             ]).map(({ id, label }) => (
-              <button key={id} type="button" aria-pressed={recordFormat === id}
+              <button key={id} type="button" className="hs-ov-btn" aria-pressed={recordFormat === id}
                 onClick={() => setRecordFormat(id)}
                 style={{ padding: "4px 10px", fontSize: 12, lineHeight: "16px",
                   cursor: "pointer", border: "none",
@@ -845,7 +855,7 @@ export default function OverlayWindow() {
           <div role="group" aria-label={t("record.fps")} style={{ display: "flex", background: "#0D1522",
             border: "1px solid #22405F", borderRadius: 8, overflow: "hidden" }}>
             {([30, 60] as const).map((fps) => (
-              <button key={fps} type="button" aria-pressed={recordFps === fps}
+              <button key={fps} type="button" className="hs-ov-btn" aria-pressed={recordFps === fps}
                 onClick={() => setRecordFps(fps)}
                 style={{ padding: "4px 10px", fontSize: 12, lineHeight: "16px",
                   cursor: "pointer", border: "none",
@@ -855,7 +865,7 @@ export default function OverlayWindow() {
               </button>
             ))}
           </div>
-          <button type="button" aria-pressed={recordCursor}
+          <button type="button" className="hs-ov-btn" aria-pressed={recordCursor}
             title={t("record.cursorTip")}
             onClick={() => setRecordCursor((c) => !c)}
             style={{ padding: "4px 10px", fontSize: 12, lineHeight: "16px", cursor: "pointer",
@@ -877,35 +887,35 @@ export default function OverlayWindow() {
           visibility: barPos ? "visible" : "hidden",
           background: "#0D1522", border: "1px solid #22405F", borderRadius: 8,
           padding: "6px 10px", zIndex: 10 }}>
-          <button type="button" onClick={() => confirm("copy")}
+          <button type="button" className="hs-ov-btn" onClick={() => confirm("copy")}
             style={{ padding: "4px 12px", background: "#22405F", color: "#FFFFFF",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.copy")}</button>
-          <button type="button" onClick={() => confirm("save")}
+          <button type="button" className="hs-ov-btn" onClick={() => confirm("save")}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.save")}</button>
           {/* M2 Task M3：标注启用——当前选区直进编辑器（annotate_crop，见上方 annotate 注） */}
-          <button type="button" onClick={() => void annotate()}
+          <button type="button" className="hs-ov-btn" onClick={() => void annotate()}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.annotate")}</button>
           {/* §3.1 七动作补齐（v1.2）：贴图=选区直建贴图窗；OCR=标注链直跑识别；
               GIF=按选区以 GIF 格式录制；更多设置=独立设置窗。全部实装，无占位。 */}
-          <button type="button" onClick={() => void pinSelection()}
+          <button type="button" className="hs-ov-btn" onClick={() => void pinSelection()}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.pin")}</button>
-          <button type="button" onClick={() => void annotate(true)}
+          <button type="button" className="hs-ov-btn" onClick={() => void annotate(true)}
             title={t("overlay.ocrTip")}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.ocr")}</button>
-          <button type="button" onClick={() => void gifFromSelection()}
+          <button type="button" className="hs-ov-btn" onClick={() => void gifFromSelection()}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.gif")}</button>
-          <button type="button" onClick={openSettingsFromBar}
+          <button type="button" className="hs-ov-btn" onClick={openSettingsFromBar}
             style={{ padding: "4px 12px", background: "transparent", color: "#D8E2EE",
               border: "1px solid #22405F", borderRadius: 6,
               fontSize: 13, cursor: "pointer" }}>{t("overlay.settings")}</button>

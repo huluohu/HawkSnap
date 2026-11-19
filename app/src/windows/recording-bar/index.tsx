@@ -116,6 +116,17 @@ export default function RecordingBarWindow() {
     });
   };
 
+  // 卸载清理（2026-11-20 UI 审计 P3，对齐 editor flashTimer 范式）：条窗口常驻
+  // 复用、销毁即 webview 死亡——实害 ≈ 0，但卸载后 setState 在 React 18 下有
+  // 告警面，统一清理。
+  useEffect(
+    () => () => {
+      if (pipTimerRef.current !== null) window.clearTimeout(pipTimerRef.current);
+      if (keycastTimerRef.current !== null) window.clearTimeout(keycastTimerRef.current);
+    },
+    [],
+  );
+
   const bar: CSSProperties = {
     position: "fixed", inset: 0, display: "flex", alignItems: "center",
     gap: 8, padding: "0 12px", boxSizing: "border-box", background: "#0D1522",
@@ -164,7 +175,8 @@ export default function RecordingBarWindow() {
 
   return (
     <div style={bar} role="status" aria-label={t("record.barLabel")}>
-      <style>{`@keyframes hawksnap-rec-pulse { 50% { opacity: 0.35; } }`}</style>
+      <style>{`@keyframes hawksnap-rec-pulse { 50% { opacity: 0.35; } }
+        @media (prefers-reduced-motion: reduce) { span[aria-hidden] { animation: none; opacity: 1; } }`}</style>
       <span style={dot} aria-hidden="true" />
       {format === "gif" && (
         <span style={formatChip} title={t("record.format.gif")}>{t("record.format.gif")}</span>
@@ -178,7 +190,19 @@ export default function RecordingBarWindow() {
         {paused ? <span style={{ color: "#FFB020", fontSize: 12, marginRight: 6 }}>{t("record.paused")}</span> : null}
         {seconds === null ? "00:00" : mmss(seconds)}
       </span>
-      {error && <span style={{ fontSize: 10, color: "#E5484D", maxWidth: 80, overflow: "hidden" }} title={error}>{error}</span>}
+      {/* 错误槽（2026-11-20 UI 审计 P2）：ellipsis 截断而非硬切——scrollshot-bar
+          同款问题修过（缺 textOverflow 会把长文案切成上下两行残句），此处漏修。 */}
+      {error && (
+        <span
+          style={{
+            fontSize: 10, color: "#E5484D", maxWidth: 120, overflow: "hidden",
+            whiteSpace: "nowrap", textOverflow: "ellipsis", flexShrink: 1, minWidth: 0,
+          }}
+          title={error}
+        >
+          {error}
+        </span>
+      )}
       <button style={pipBtn} onClick={togglePip} aria-pressed={pipOn} title={t("record.pip")}>
         {t("record.pip")}
       </button>

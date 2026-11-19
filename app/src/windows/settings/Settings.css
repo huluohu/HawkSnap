@@ -964,3 +964,25 @@ body[data-set-window="1"][data-theme="dark"] {
   font-family: var(--set-font-mono);
   font-size: 12px;
 }
+
+/* —— 保存钮进行中态（2026-11-20 UI 审计 P2）：旋转齿轮替代纯 disabled 半透明，
+   与「已保存」成功态、「保存失败」错误条同属完整的动作反馈链。 —— */
+.hs-saving-icon {
+  display: inline-flex;
+}
+
+.hs-saving-icon.is-saving svg {
+  animation: hs-saving-spin 0.9s linear infinite;
+}
+
+@keyframes hs-saving-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hs-saving-icon.is-saving svg {
+    animation: none;
+  }
+}

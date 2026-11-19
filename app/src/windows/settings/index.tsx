@@ -414,7 +414,11 @@ export default function SettingsWindow() {
               title={saving ? tx("action.saving") : tx("action.saveTip")}
               aria-label={saving ? tx("action.saving") : tx("action.save")}
             >
-              <Icon name="save" />
+              {/* saving 态旋转（2026-11-20 UI 审计 P2）：此前 saving 与未加载共用
+                  disabled 半透明，鼠标用户看不出「保存中」。 */}
+              <span className={saving ? "hs-saving-icon is-saving" : "hs-saving-icon"}>
+                <Icon name="save" />
+              </span>
             </button>
           </div>
         </header>

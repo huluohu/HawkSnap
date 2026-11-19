@@ -232,6 +232,45 @@ body.hs-panel-body {
   font-size: 13px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+  /* v1.2.1（UI 审计）：文本槽 + 关闭钮的横向布局。 */
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.hs-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.hs-banner-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin-top: -1px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.65;
+  cursor: pointer;
+}
+
+.hs-banner-close:hover,
+.hs-banner-close:focus-visible {
+  opacity: 1;
+  background: rgba(127, 127, 127, 0.18);
+}
+
+/* 历史总数提示（v1.2.1：面板恒取 50 条，超出必须有可见解释——此前像数据丢失）。 */
+.hs-total-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--hs-text-dim, #8a8f98);
 }
 
 .hs-banner-error {
@@ -869,4 +908,17 @@ div.hs-thumb {
 /* 主面板空态图标（SVG 替换字形后 inherit 文字色） */
 .hs-empty-icon {
   color: var(--hs-text-3);
+}
+
+/* —— 动效可达性（2026-11-20 UI 审计 P3）：系统「减少动态效果」开启时，把无限
+   脉冲（录制红点/长截图黄点/按键淡出）与过渡压到瞬时——前庭敏感用户不会被
+   持续闪烁打断；`!important` 用于压过各组件内的内联动画声明。 —— */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

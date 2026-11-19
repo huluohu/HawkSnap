@@ -533,6 +533,62 @@ pub fn history_search(
 /// 类型筛选白名单（§3.6 kind 列取值 + browser 插件来源）。
 const KIND_FILTERS: [&str; 4] = ["region", "recording", "scrollshot", "browser"];
 
+/// 条数统计（2026-11-20 UI 审计修复：面板只取最新 50 条且无任何提示——第 51 条起
+/// 像「数据丢失」）。query 空 = 浏览总数；非空 = 搜索命中总数。kind 与 history_list
+/// 同白名单。前端据此显示「显示最新 50 条 · 共 N 条」。
+#[tauri::command]
+pub fn history_count(
+    app: AppHandle,
+    query: Option<String>,
+    kind: Option<String>,
+) -> Result<i64, String> {
+    let kind = kind.as_deref().filter(|k| KIND_FILTERS.contains(&k));
+    let q = query.unwrap_or_default();
+    if q.trim().is_empty() {
+        count_filtered(&app, kind)
+    } else {
+        search_count(&app, &q, kind)
+    }
+}
+
+/// 浏览总数（单连接单查询；与 list_at_filtered 同 kind 过滤语义）。
+fn count_filtered(app: &AppHandle, kind: Option<&str>) -> Result<i64, String> {
+    let conn = open_at(&db_path(app))?;
+    let n: i64 = if let Some(kind) = kind {
+        conn.query_row("SELECT COUNT(*) FROM shots WHERE kind = ?1", [kind], |r| r.get(0))
+    } else {
+        conn.query_row("SELECT COUNT(*) FROM shots", [], |r| r.get(0))
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// 搜索命中总数（FTS MATCH 转义与 search_at 同源）。
+fn search_count(app: &AppHandle, query: &str, kind: Option<&str>) -> Result<i64, String> {
+    if query.trim().is_empty() {
+        return Ok(0);
+    }
+    let conn = open_at(&db_path(app))?;
+    let escaped = escape_match(query);
+    let n: i64 = if let Some(kind) = kind {
+        conn.query_row(
+            "SELECT COUNT(*) FROM shots_fts
+             JOIN shots s ON s.id = shots_fts.rowid
+             WHERE shots_fts MATCH ?1 AND s.kind = ?2",
+            rusqlite::params![escaped, kind],
+            |r| r.get(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM shots_fts WHERE shots_fts MATCH ?1",
+            rusqlite::params![escaped],
+            |r| r.get(0),
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
 /// 类型筛选入口（v1.2）：AppHandle 版走 db_path。
 pub fn list_filtered(
     app: &AppHandle,

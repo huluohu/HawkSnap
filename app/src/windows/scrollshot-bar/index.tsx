@@ -161,7 +161,8 @@ export default function ScrollshotBarWindow() {
 
   return (
     <div style={bar} role="status" aria-label={hintText}>
-      <style>{`@keyframes hawksnap-ss-pulse { 50% { opacity: 0.35; } }`}</style>
+      <style>{`@keyframes hawksnap-ss-pulse { 50% { opacity: 0.35; } }
+        @media (prefers-reduced-motion: reduce) { span[aria-hidden] { animation: none; opacity: 1; } }`}</style>
       <span style={dot} aria-hidden="true" />
       <span style={hint}>{hintText}</span>
       {error && <span style={err} title={error}>{formatError(error)}</span>}
