@@ -184,6 +184,28 @@ jobs:
           path: smoke-macos.png
           if-no-files-found: ignore
 
+  # ---- OCR 端到端自检（真模型，唯一覆盖「模型下载 → 装载 → 推理 → 坐标」的腿）----
+  # 本轮动了 OCR 的大图路径（整图降采样 → 分块检测），纯逻辑单测覆盖分块与坐标
+  # 链路，但没跑过真模型 —— 这条腿补上：自带点阵字体现场渲染带文字的图，验小图
+  # （单块路径）与大图（分块路径）都能识别出文本、且框坐标落在原图范围内。
+  # 只在 ubuntu 跑：模型/ORT 下载一次即可，macOS/Windows 由本 job 的结论代表。
+  ocr-e2e:
+    name: ocr-e2e (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable (pinned 2026-11-20)
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # ONNX Runtime 的运行依赖（libgomp）+ 解包工具。
+      - name: Install OCR runtime deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgomp1 tar
+      - name: Run OCR end-to-end (real models)
+        run: cargo run -p hawksnap-ocr --example ocr_e2e --release
+        env:
+          HAWKSNAP_OCR_MODELS: ${{ github.workspace }}/target/ocr-models
+
   size:
     # G1 体积断言（≤15MB dmg，plan D2 落地、D6 起为正式门）。tauri build 慢是预期；
     # continue-on-error: false——此 job 即 G1 断言本体，红 = 不达标，不允许静默。
