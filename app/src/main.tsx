@@ -1,5 +1,6 @@
 import React, { Suspense, lazy } from "react";
 import ReactDOM from "react-dom/client";
+import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 
 // 覆盖层窗口由 Rust 侧 WebviewUrl::App("overlay?window=overlay")、倒计时浮窗由
@@ -28,6 +29,15 @@ const ScrollshotBarWindow = lazy(() => import("./windows/scrollshot-bar"));
 const SettingsWindow = lazy(() => import("./windows/settings"));
 
 const route = new URLSearchParams(window.location.search).get("window");
+
+// 前端就绪握手（2026-11-20 真机验收）：挂载后立即 invoke 一次 → 后端落一行
+// `[hawksnap] frontend ready: <window>`。它是「CSP 放行了 script + connect-src
+// 放行了 IPC」的运行时证据（CSP 写错时页面会加载但空白，日志里**没有**这行）。
+// 失败（invoke 被拦/后端不可用）只记 console——握手不该影响任何功能。
+void invoke("frontend_ready", { window: route ?? "main" }).catch(() => {
+  // 握手失败不阻断渲染；仅提示（真机排障线索）。
+  console.warn("[hawksnap] frontend_ready 握手未成功");
+});
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

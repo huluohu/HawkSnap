@@ -13,6 +13,7 @@
 
 mod bench_mode;
 mod commands;
+mod diagnostics;
 mod editor;
 mod errcode;
 mod g4;
@@ -224,7 +225,8 @@ pub fn run() {
             scrollshot::scrollshot_abort,
             keycast::keycast_set,
             updater::check_for_updates, updater::install_update, updater::restart_app,
-            native_messaging::native_messaging_status, native_messaging::native_ingest
+            native_messaging::native_messaging_status, native_messaging::native_ingest,
+            diagnostics::frontend_ready
         ])
         .setup(|app| {
             // 单实例守卫（Task 13）：setup 第一步。锁文件在临时目录，flock 独占；
@@ -466,6 +468,10 @@ pub fn run() {
             // 在此接管：开面板 → 打点 → stderr 汇总 → 退出（见 g4.rs）。
             crate::perf::mark_tray_ready();
             crate::g4::maybe_run(app.handle());
+            // 自检模式（HAWKSNAP_SMOKE=1）：自动打开主面板 → 前端加载 → 握手落日志。
+            // CI 真机 runner 与用户本机自检用（零窗口架构下启动不建面板，否则
+            // 前端加载链路无从验证）。生产未设该变量 → no-op。
+            crate::diagnostics::maybe_run_smoke(app.handle());
 
             // v1.2（审计修复）：启动静默检查更新——此前检查只挂在主面板挂载时机，
             // 零窗口常驻架构下只碰托盘的用户可能永不触发（§9「更新检查失败静默降级
