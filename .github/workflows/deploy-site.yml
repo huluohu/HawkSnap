@@ -23,7 +23,7 @@ jobs:
     steps:
       # fetch-depth: 0 —— gate 步要 diff github.event.before..sha；浅克隆取不到
       # before 对象 → diff 失败 → changed=false → 部署步骤全跳过（b401b55 实挂）。
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Detect site/ changes (push only)
