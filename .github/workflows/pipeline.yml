@@ -188,16 +188,24 @@ jobs:
   # 本轮动了 OCR 的大图路径（整图降采样 → 分块检测），纯逻辑单测覆盖分块与坐标
   # 链路，但没跑过真模型 —— 这条腿补上：自带点阵字体现场渲染带文字的图，验小图
   # （单块路径）与大图（分块路径）都能识别出文本、且框坐标落在原图范围内。
-  # 只在 ubuntu 跑：模型/ORT 下载一次即可，macOS/Windows 由本 job 的结论代表。
+  #
+  # **两条腿都要**：Linux 走 PyPI wheel（zip 解包 + .so dlopen），macOS 走 NuGet
+  # 包（zip 解包 + **.dylib dlopen**——macOS 对未签名 dylib 的加载策略与 Linux
+  # 不同，必须真机验过才算数）。
   ocr-e2e:
-    name: ocr-e2e (ubuntu-24.04)
-    runs-on: ubuntu-24.04
+    name: ocr-e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable (pinned 2026-11-20)
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      # ONNX Runtime 的运行依赖（libgomp）+ 解包工具。
+      # ONNX Runtime 的运行依赖（Linux：libgomp）+ 解包工具（tar 已不用，留作兜底）。
       - name: Install OCR runtime deps
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgomp1 tar
