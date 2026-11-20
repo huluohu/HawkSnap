@@ -94,22 +94,15 @@ impl OcrEngine {
     /// 高亮契约）。失败 Err（码化文案，见 ocr_err）。
     pub fn recognize(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<OcrLine>, String> {
         let img = preprocess::rgba_to_image(rgba, w, h)?;
-        // 分辨率门（R-F2，2026-11-20 性能审计）：det 输入张量按原图线性膨胀——
-        // 编辑器合法上限（8192²）导出 → f32 张量 + nchw 各 ~800MB（瞬时 ~1.9GB，
-        // 有 OOM 面）。PP-OCR 惯例 det 限长 960-1280：处理前把最长边降到
-        // OCR_MAX_EDGE=2400（识别质量在此区间无可感损失，rec 本就把行裁剪重采样到
-        // 48×192）；box 坐标按比例映射回原图，前端高亮契约不变。≤2400 的常规路径
-        // 零影响（scale = 1.0）。
-        const OCR_MAX_EDGE: f32 = 2400.0;
-        let (mw, mh) = img.dimensions();
-        let downscale = (mw.max(mh) as f32 / OCR_MAX_EDGE).max(1.0);
-        let img = if downscale > 1.0 {
-            let nw = ((mw as f32 / downscale).round() as u32).max(1);
-            let nh = ((mh as f32 / downscale).round() as u32).max(1);
-            preprocess::resize(&img, nw, nh)
-        } else {
-            img
-        };
+        // 大图分块检测（R-F2，2026-11-20 性能审计 + 质量复核）：
+        // det 输入张量按**整图**线性膨胀——编辑器合法上限（8192²）导出 → f32 张量
+        // + nchw 各 ~800MB（瞬时 ~1.9GB，有 OOM 面）。
+        //
+        // **为什么是分块而不是整图降采样**（2026-11-20 自检复核拍板）：整图缩到
+        // 2400 会把 8192² 图里的 20px 小字压成 6px → det 大概率漏检——那是用
+        // 内存换质量的**功能回归**。分块（paddleocr 大图模式的通行做法）两块兼得：
+        // 每块 ≤2400² → 张量 ≈ 69MB（有界），且每块按**原尺寸**推理（与中等图
+        // 同口径）→ 文字尺度不缩、质量不降，框按块偏移即回原图坐标。
         let boxes = self.detect(&img)?;
         #[cfg(feature = "ocr-debug")]
         for b in &boxes {
@@ -117,8 +110,7 @@ impl OcrEngine {
         }
         let mut out = Vec::with_capacity(boxes.len());
         for b in &boxes {
-            // 裁剪与 cls/rec 都在**处理坐标系**（检测框就是该系的）；仅输出行把
-            // box 映射回原图坐标（前端画布高亮契约）。
+            // 框已是**原图坐标** → 直接在原图上裁剪（cls/rec 输入与画布高亮同源）。
             let mut crop = crop_box(&img, b);
             {
                 let (cw, ch) = crop.dimensions();
@@ -132,23 +124,36 @@ impl OcrEngine {
             if text.trim().is_empty() {
                 continue;
             }
-            let out_box = if downscale > 1.0 {
-                let mut nb = b.clone();
-                for p in &mut nb.pts {
-                    p.0 *= downscale;
-                    p.1 *= downscale;
-                }
-                nb
-            } else {
-                b.clone()
-            };
-            out.push(OcrLine::from_box(&out_box, text, score));
+            out.push(OcrLine::from_box(b, text, score));
         }
         Ok(out)
     }
 
-    /// det：预处理 → 推理 → 概率图后处理（回原图坐标）。
+    /// det：大图分块 → 逐块检测 → 框偏移回原图 → 重叠区去重。
+    ///
+    /// ≤ 一块时走单块路径（**与旧实现逐位等价**，常规截图零行为变化）。
     fn detect(&mut self, img: &image::RgbaImage) -> Result<Vec<TextBox>, String> {
+        let (w, h) = img.dimensions();
+        if detect_tiles(w, h).len() <= 1 {
+            return self.detect_one(img);
+        }
+        let mut err: Option<String> = None;
+        // 分块骨架（可注入检测器 → 单测覆盖坐标链路）。
+        let boxes = detect_with(img, |tile, _tx, _ty| match self.detect_one(tile) {
+            Ok(v) => v,
+            Err(e) => {
+                err = Some(e);
+                Vec::new()
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+        Ok(boxes)
+    }
+
+    /// 单块 det：预处理 → 推理 → 概率图后处理（回**块内**原尺寸坐标）。
+    fn detect_one(&mut self, img: &image::RgbaImage) -> Result<Vec<TextBox>, String> {
         let (w, h) = img.dimensions();
         let (iw, ih, ratio) = preprocess::det_input_size(w, h, DET_LIMIT);
         let rw = ((w as f32 * ratio).round() as u32).max(1).min(iw);
@@ -253,3 +258,221 @@ fn crop_box(img: &image::RgbaImage, b: &TextBox) -> image::RgbaImage {
     let y1 = (br.1.round() as i32).clamp(0, ih as i32) as u32;
     image::imageops::crop_imm(img, x0, y0, (x1 - x0).max(1), (y1 - y0).max(1)).to_image()
 }
+
+/// det 分块边长（像素）：大图按此切块检测。
+///
+/// **内存有界**：块 2400² 的 f32 张量 ≈ 69MB（+nchw 同量级），而非整图 8192² 的
+/// ≈ 806MB。**质量不降**：每块按**原尺寸**推理（与中等图同口径）——文字尺度不缩。
+pub const DET_TILE: u32 = 2400;
+/// 相邻块重叠边长：避免文字正好被块边界切断（边界字会半检/漏检）。
+pub const DET_TILE_OVERLAP: u32 = 160;
+
+/// 分块矩形（纯函数）：覆盖 w×h，步长 = TILE - OVERLAP；边缘块按剩余尺寸裁短。
+/// 返回 (x, y, w, h) 列表。
+pub fn detect_tiles(w: u32, h: u32) -> Vec<(u32, u32, u32, u32)> {
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for &y in &tile_starts(h) {
+        for &x in &tile_starts(w) {
+            out.push((x, y, DET_TILE.min(w - x), DET_TILE.min(h - y)));
+        }
+    }
+    out
+}
+
+/// 分块检测骨架（纯逻辑，**可注入检测器** → 单测覆盖坐标链路，无需模型）：
+/// 逐块切图 → 交给检测器（返回**块内**坐标的框）→ 偏移到原图 → 重叠区去重。
+fn detect_with<F>(img: &image::RgbaImage, mut per_tile: F) -> Vec<TextBox>
+where
+    F: FnMut(&image::RgbaImage, u32, u32) -> Vec<TextBox>,
+{
+    let (w, h) = img.dimensions();
+    let mut all: Vec<TextBox> = Vec::new();
+    for (tx, ty, tw, th) in detect_tiles(w, h) {
+        let tile = image::imageops::crop_imm(img, tx, ty, tw, th).to_image();
+        let mut boxes = per_tile(&tile, tx, ty);
+        // 块内坐标 → 原图坐标（偏移即得，无需缩放因子）。
+        for b in &mut boxes {
+            for p in &mut b.pts {
+                p.0 += tx as f32;
+                p.1 += ty as f32;
+            }
+        }
+        all.extend(boxes);
+    }
+    dedup_boxes(all)
+}
+
+/// 单轴分块起点（纯函数）：0, step, 2*step… 直到覆盖到末端。
+fn tile_starts(extent: u32) -> Vec<u32> {
+    let mut starts = vec![0u32];
+    if extent <= DET_TILE {
+        return starts;
+    }
+    let step = DET_TILE.saturating_sub(DET_TILE_OVERLAP).max(1);
+    let mut x = 0u32;
+    while x + DET_TILE < extent {
+        x += step;
+        starts.push(x);
+    }
+    starts
+}
+
+/// 跨块重复框去重（纯函数）：重叠区里的同一文字会被相邻两块各检一次。
+/// 按 score 降序保留，IoU > 0.3 视为同一处。
+pub fn dedup_boxes(mut boxes: Vec<TextBox>) -> Vec<TextBox> {
+    boxes.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut kept: Vec<TextBox> = Vec::with_capacity(boxes.len());
+    for b in boxes {
+        if kept.iter().any(|k| box_iou(k, &b) > 0.3) {
+            continue;
+        }
+        kept.push(b);
+    }
+    kept
+}
+
+/// 轴对齐外接矩形的 IoU（纯函数）：det 框为轴对齐（det.rs 口径）。
+fn box_iou(a: &TextBox, b: &TextBox) -> f32 {
+    let rect = |t: &TextBox| {
+        let xs = [t.pts[0].0, t.pts[1].0, t.pts[2].0, t.pts[3].0];
+        let ys = [t.pts[0].1, t.pts[1].1, t.pts[2].1, t.pts[3].1];
+        (
+            xs.iter().cloned().fold(f32::INFINITY, f32::min),
+            ys.iter().cloned().fold(f32::INFINITY, f32::min),
+            xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+            ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        )
+    };
+    let (ax0, ay0, ax1, ay1) = rect(a);
+    let (bx0, by0, bx1, by1) = rect(b);
+    let ix = (ax1.min(bx1) - ax0.max(bx0)).max(0.0);
+    let iy = (ay1.min(by1) - ay0.max(by0)).max(0.0);
+    let inter = ix * iy;
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let area_a = ((ax1 - ax0).max(0.0)) * ((ay1 - ay0).max(0.0));
+    let area_b = ((bx1 - bx0).max(0.0)) * ((by1 - by0).max(0.0));
+    let union = area_a + area_b - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn box_at(x: f32, y: f32, w: f32, h: f32, score: f32) -> TextBox {
+        TextBox {
+            pts: [
+                (x, y),
+                (x + w, y),
+                (x + w, y + h),
+                (x, y + h),
+            ],
+            score,
+        }
+    }
+
+    #[test]
+    fn small_image_is_a_single_tile() {
+        // ≤ 块边长 → 单块（常规截图路径逐位等价于旧实现）。
+        let tiles = detect_tiles(800, 600);
+        assert_eq!(tiles, vec![(0, 0, 800, 600)]);
+    }
+
+    #[test]
+    fn large_image_tiles_cover_everything_and_overlap() {
+        let (w, h) = (8192u32, 4000u32);
+        let tiles = detect_tiles(w, h);
+        assert!(tiles.len() > 1, "大图必须切块");
+        // 覆盖性：任一像素都落在某块内（用块起点网格粗验：每块起点 ≤ 维度和
+        // 块宽能覆盖到末端）。
+        for &(x, y, tw, th) in &tiles {
+            assert!(x + tw <= w && y + th <= h, "块越界: {x},{y},{tw},{th}");
+        }
+        // 末块必须贴到末端。
+        let max_x = tiles.iter().map(|t| t.0 + t.2).max().unwrap();
+        let max_y = tiles.iter().map(|t| t.1 + t.3).max().unwrap();
+        assert_eq!(max_x, w, "横向必须覆盖到右缘");
+        assert_eq!(max_y, h, "纵向必须覆盖到下缘");
+        // 重叠：相邻起点间距 = TILE - OVERLAP < TILE → 有重叠带。
+        let mut xs: Vec<u32> = tiles.iter().map(|t| t.0).collect();
+        xs.sort_unstable();
+        xs.dedup();
+        if xs.len() > 1 {
+            assert!(xs[1] - xs[0] < DET_TILE, "相邻块必须有重叠");
+        }
+    }
+
+    #[test]
+    fn dedup_removes_overlapping_duplicates_and_keeps_distinct() {
+        let a = box_at(100.0, 100.0, 200.0, 40.0, 0.9);
+        let dup = box_at(102.0, 101.0, 200.0, 40.0, 0.8); // 高度重叠
+        let far = box_at(1000.0, 1000.0, 100.0, 30.0, 0.7); // 远处独立
+        let out = dedup_boxes(vec![a, dup, far]);
+        assert_eq!(out.len(), 2, "重复框应被合并，独立框保留");
+        // 保留的是高分那个。
+        assert!(out.iter().any(|b| (b.pts[0].0 - 100.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn iou_is_zero_for_disjoint_boxes() {
+        let a = box_at(0.0, 0.0, 10.0, 10.0, 0.9);
+        let b = box_at(100.0, 100.0, 10.0, 10.0, 0.9);
+        assert_eq!(box_iou(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn multi_tile_boxes_land_in_their_own_tile_region() {
+        // 大图分块后的**坐标链路**（不依赖模型）：假检测器在每块返回一块内框 →
+        // 骨架偏移后，每个框必须落在自己那块的原图区域里。
+        let (w, h) = (8192u32, 100u32);
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+        let mut seen_tiles: Vec<(u32, u32)> = Vec::new();
+        let boxes = detect_with(&img, |_tile, tx, ty| {
+            seen_tiles.push((tx, ty));
+            // 块内坐标：一个 20×20 的框，落在块内 (10,10)。
+            vec![box_at(10.0, 10.0, 20.0, 20.0, 0.9)]
+        });
+        assert!(seen_tiles.len() > 1, "大图必须切多块");
+        assert_eq!(boxes.len(), seen_tiles.len(), "每块一个框");
+        // 每个框的原图坐标应 ≈ (tx+10, ty+10)——偏移正确。
+        for (i, b) in boxes.iter().enumerate() {
+            let (tx, ty) = seen_tiles[i];
+            assert!(
+                (b.pts[0].0 - (tx as f32 + 10.0)).abs() < 0.01,
+                "第 {i} 块 x 偏移错: {:?} vs tx={tx}",
+                b.pts[0].0
+            );
+            assert!(
+                (b.pts[0].1 - (ty as f32 + 10.0)).abs() < 0.01,
+                "第 {i} 块 y 偏移错: {:?} vs ty={ty}",
+                b.pts[0].1
+            );
+        }
+    }
+
+    #[test]
+    fn single_tile_path_is_untouched() {
+        // 小图 → 一块 → 偏移 0 → 框坐标原样（常规截图零行为变化）。
+        let img = image::RgbaImage::from_pixel(640, 480, image::Rgba([1, 2, 3, 255]));
+        let boxes = detect_with(&img, |_t, _tx, _ty| {
+            vec![box_at(5.0, 7.0, 30.0, 10.0, 0.95)]
+        });
+        assert_eq!(boxes.len(), 1);
+        assert!((boxes[0].pts[0].0 - 5.0).abs() < 0.01);
+        assert!((boxes[0].pts[0].1 - 7.0).abs() < 0.01);
+    }
+}
+
