@@ -166,6 +166,54 @@ pub fn ort_spec() -> Result<OrtSpec, String> {
     }
 }
 
+/// zip 归档单成员解包（纯 Rust，`zip` crate）：跨平台一致，不依赖外部 tar
+/// （Linux 的 GNU tar 不支持 zip——2026-11-20 CI 实测）。成员路径用 '/' 分隔
+/// （zip 规范），落盘时按平台分隔符重建父目录。
+fn extract_zip_member(
+    archive: &std::path::Path,
+    member: &str,
+    stage: &std::path::Path,
+) -> Result<(), String> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_archive_open_failed", &[("detail", &e.to_string())]))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_unpack_failed", &[("detail", &e.to_string())]))?;
+    let mut entry = zip
+        .by_name(member)
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_unpack_failed", &[("detail", &e.to_string())]))?;
+    let out_path = stage.join(member);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_stage_dir_failed", &[("detail", &e.to_string())]))?;
+    }
+    let mut out = std::fs::File::create(&out_path)
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_unpack_failed", &[("detail", &e.to_string())]))?;
+    std::io::copy(&mut entry, &mut out)
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_unpack_failed", &[("detail", &e.to_string())]))?;
+    Ok(())
+}
+
+/// tgz 归档单成员解包（外部 tar；仅在将来引入非 zip 源时才走——当前三平台均为 zip）。
+fn extract_tar_member(
+    archive: &std::path::Path,
+    member: &str,
+    stage: &std::path::Path,
+) -> Result<(), String> {
+    let out = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(stage)
+        .arg(member)
+        .output()
+        .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_tar_spawn_failed", &[("detail", &e.to_string())]))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 /// 三模型 + 字典规格（固定顺序：det/cls/rec/dict，进度 file 下标 = base + i）。
 pub fn model_specs() -> Vec<FileSpec> {
     vec![
@@ -227,29 +275,34 @@ pub fn ensure_ort_dylib(
             sha256: spec.archive_sha256.into(),
         };
         let archive = download_verified(dir, &archive_spec, 0, on_progress)?;
-        // 解包到暂存目录（tar 支持单成员解包），校验内件 SHA256 后落盘。
+        // 解包到暂存目录，校验内件 SHA256 后落盘。
         let stage = dir.join(format!(".ort-extract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&stage);
         std::fs::create_dir_all(&stage)
             .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_stage_dir_failed", &[("detail", &e.to_string())]))?;
-        let flag = if spec.is_zip { "-xf" } else { "-xzf" };
-        let out = std::process::Command::new("tar")
-            .arg(flag)
-            .arg(&archive)
-            .arg("-C")
-            .arg(&stage)
-            .arg(spec.inner_path)
-            .output()
-            .map_err(|e| hawksnap_core::errcode::coded_kv("ocr_tar_spawn_failed", &[("detail", &e.to_string())]))?;
+        // zip 走 **Rust 的 zip crate**，不调外部 tar：
+        //   ① Linux 的 GNU tar **不支持 zip**（只有 macOS/Windows 的 bsdtar 支持）
+        //      —— 2026-11-20 CI 实测：Linux 上 `tar -xf` 报 "This does not look like
+        //      a tar archive"，ORT 安装必失败；
+        //   ② 少一个外部进程依赖（Linux 最小镜像可能没 tar）。
+        // zip crate 4.x 已在依赖树中（MIT / Apache-2.0），无需新增依赖。
+        let extract = if spec.is_zip {
+            extract_zip_member(&archive, spec.inner_path, &stage)
+        } else {
+            extract_tar_member(&archive, spec.inner_path, &stage)
+        };
         let staged = stage.join(spec.inner_path);
-        let extract_ok = out.status.success() && staged.is_file();
+        let extract_ok = extract.is_ok() && staged.is_file();
         if !extract_ok || !file_sha_matches(&staged, spec.dylib_sha256) {
-            let stderr = String::from_utf8_lossy(&out.stderr);
             let _ = std::fs::remove_dir_all(&stage);
             if !extract_ok {
+                let detail = match extract {
+                    Err(e) => e,
+                    Ok(()) => "member missing after extraction".to_string(),
+                };
                 return Err(hawksnap_core::errcode::coded_kv(
                     "ocr_unpack_failed",
-                    &[("detail", stderr.trim())],
+                    &[("detail", &detail)],
                 ));
             }
             return Err(hawksnap_core::errcode::coded("ocr_ort_checksum_failed"));

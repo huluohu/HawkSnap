@@ -212,6 +212,7 @@
   "err.ocr_stage_dir_failed": "创建解包目录失败：{detail}",
   "err.ocr_tar_spawn_failed": "启动 tar 解包失败：{detail}",
   "err.ocr_unpack_failed": "解包 ONNX Runtime 归档失败：{detail}",
+  "err.ocr_archive_open_failed": "打开 ONNX Runtime 归档失败：{detail}",
   "err.ocr_ort_checksum_failed": "ONNX Runtime 库 SHA256 校验失败",
   "err.ocr_ort_install_failed": "落盘 ONNX Runtime 库失败：{detail}",
   "err.ocr_tmp_unreadable": "校验失败：临时文件不可读",

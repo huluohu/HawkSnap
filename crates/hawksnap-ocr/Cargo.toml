@@ -15,12 +15,18 @@ sha2 = "0.10"
 # 模型/ORT dylib 下载器（默认 features = rustls(ring) + gzip；阻塞式小依赖，
 # 仅在首次 OCR 触发的下载线程中使用，不进常驻路径）。
 ureq = "3"
+# zip 解包（ORT 运行时归档：PyPI wheel / NuGet nupkg 均为 zip）。**不调外部 tar**：
+# Linux 的 GNU tar 不支持 zip（2026-11-20 CI 实测），且最小镜像可能没装 tar。
+# zip 4.x 已在 workspace 依赖树中（MIT / Apache-2.0）。**最小 feature 集**：
+# 只开 deflate（wheel/nupkg 的成员压缩方式），不开 bzip2/zstd/lzma/xz/aes —— 少一批
+# 依赖与供应链面。
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
-# RapidOCR ONNX 推理。load-dynamic：不链 ORT——dylib（microsoft/onnxruntime
-# 官方 release，SHA256 校验）随模型一起按需下载到 app_data_dir/models，
-# ort::init_from(path) 装载。选型理由见 task-4-report.md（download-binaries 需要
-# 构建期联网拉 pyke CDN，离线/vendored 构建破裂；load-dynamic 把外联收束到与
-# 模型同一「官方 release + SHA256」下载通道）。版本必须与 ORT dylib 1.31.0 对齐。
+# RapidOCR ONNX 推理。load-dynamic：不链 ORT——dylib（官方包源，SHA256 校验）
+# 随模型一起按需下载到 app_data_dir/models，ort::init_from(path) 装载。选型理由见
+# task-4-report.md（download-binaries 需要构建期联网拉 pyke CDN，离线/vendored
+# 构建破裂；load-dynamic 把外联收束到与模型同一「官方源 + SHA256」下载通道）。
+# 版本：ORT dylib 1.19.2（ort-sys 的 ORT_API_VERSION=17 是最低要求 → 兼容）。
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "ndarray"] }
 # ort 的 ndarray feature 依赖（Array4 输入构造直接引用，版本对齐 ort 0.16）。
 ndarray = "0.17"

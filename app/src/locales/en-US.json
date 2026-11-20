@@ -212,6 +212,7 @@
   "err.ocr_stage_dir_failed": "Failed to create the extraction directory: {detail}",
   "err.ocr_tar_spawn_failed": "Failed to start tar extraction: {detail}",
   "err.ocr_unpack_failed": "Failed to unpack the ONNX Runtime archive: {detail}",
+  "err.ocr_archive_open_failed": "Failed to open the ONNX Runtime archive: {detail}",
   "err.ocr_ort_checksum_failed": "ONNX Runtime library SHA256 verification failed",
   "err.ocr_ort_install_failed": "Failed to install the ONNX Runtime library: {detail}",
   "err.ocr_tmp_unreadable": "Verification failed: temp file unreadable",
