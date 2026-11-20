@@ -1,9 +1,10 @@
 //! 模型与 ORT dylib 管理（M2 Task M4）：
 //!
 //! - 落点：调用方传入的模型目录（app 侧为 `app_data_dir()/models/`）。
-//! - 下载：官方 release URL（RapidOCR v3.10.0 modelscope 通道 / microsoft onnxruntime
-//!   v1.31.0 GitHub release）+ **SHA256 常量校验**（实现者于 2026-10-23 实测，来源与
-//!   实测值见 task-4-report.md）。
+//! - 下载：官方源（RapidOCR v3.10.0 modelscope 通道 / ONNX Runtime 1.19.2 ——
+//!   Linux·Windows 取 PyPI 官方 wheel，macOS 取 NuGet 官方 Microsoft.ML.OnnxRuntime
+//!   包；**原 microsoft/onnxruntime GitHub release 源已整体下线，2026-11-20 换源**）
+//!   + **SHA256 常量校验**（归档与解包内件双层；实测值见下）。
 //! - 断点续传：`.tmp` 半成品 + `Range: bytes={len}-`（服务端 206 → 续写；200 → 重来；
 //!   416/异常 → 清空重来）。
 //! - 校验失败语义：删除半成品 → 整体重下一次 → 仍不匹配 → Err（绝不落坏文件）。
@@ -57,24 +58,24 @@ pub const DICT_SHA256: &str = "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05
 
 // —— ORT 动态库（**ONNX Runtime 1.19.2**，2026-11-20 换源）——
 //
-//! **为什么换源（真实供应链故障，端到端验收抓出）**：原规格指向
-//! `github.com/microsoft/onnxruntime/releases/download/v1.31.0/…`，而该仓库的
-//! releases **已整体下线**（2026-11-20 实测：所有版本 404、仓库页与 API 均 404，
-//! 两个独立网络路径一致）——意味着**所有用户首次 OCR 必然失败**（HTTP 404）。
-//!
-//! **新源与选型**：
-//! - Linux / Windows：**PyPI 官方 wheel**（`onnxruntime` 1.19.2）——capi 下是独立
-//!   的 C API 动态库（与 Python ABI 无关），12/10MB。
-//! - macOS：**NuGet 官方包** `Microsoft.ML.OnnxRuntime` 1.19.2 ——PyPI 的 macOS
-//!   wheel 里**没有**独立 dylib（只有 Python 扩展 .so），NuGet 包则按
-//!   `runtimes/<os>-<arch>/native/` 提供三平台原生库。
-//! - 版本 **1.19.2** 的理由：① ort-sys 2.0.0-rc.15 的 `ORT_API_VERSION = 17`
-//!   是**最低**版本要求 → ORT 1.19（API 19）向后兼容可用；② macOS 侧提供
-//!   `macosx_11_0_universal2`（macOS 11+），与我们声明的 macOS 12.3 下限相容
-//!   （ORT ≥1.20 的 wheel 只到 macOS 13+）。
-//! - 双层 SHA256：归档 + 解包内件，均实测于 2026-11-20。
-//!
-//! macOS x64 保留（NuGet 内含 osx-x64 库）；非上述目标显式 Err（不做无校验降级）。
+// **为什么换源（真实供应链故障，端到端验收抓出）**：原规格指向
+// `github.com/microsoft/onnxruntime/releases/download/v1.31.0/…`，而该仓库的
+// releases **已整体下线**（2026-11-20 实测：所有版本 404、仓库页与 API 均 404，
+// 两个独立网络路径一致）——意味着**所有用户首次 OCR 必然失败**（HTTP 404）。
+//
+// **新源与选型**：
+// - Linux / Windows：**PyPI 官方 wheel**（`onnxruntime` 1.19.2）——capi 下是独立
+//   的 C API 动态库（与 Python ABI 无关），12/10MB。
+// - macOS：**NuGet 官方包** `Microsoft.ML.OnnxRuntime` 1.19.2 ——PyPI 的 macOS
+//   wheel 里**没有**独立 dylib（只有 Python 扩展 .so），NuGet 包则按
+//   `runtimes/<os>-<arch>/native/` 提供三平台原生库。
+// - 版本 **1.19.2** 的理由：① ort-sys 2.0.0-rc.15 的 `ORT_API_VERSION = 17`
+//   是**最低**版本要求 → ORT 1.19（API 19）向后兼容可用；② macOS 侧提供
+//   `macosx_11_0_universal2`（macOS 11+），与我们声明的 macOS 12.3 下限相容
+//   （ORT ≥1.20 的 wheel 只到 macOS 13+）。
+// - 双层 SHA256：归档 + 解包内件，均实测于 2026-11-20。
+//
+// macOS x64 保留（NuGet 内含 osx-x64 库）；非上述目标显式 Err（不做无校验降级）。
 
 /// 当前平台的 ORT 归档规格（档案 SHA256 + 归档内库路径 + 解包后库 SHA256）。
 pub struct OrtSpec {
