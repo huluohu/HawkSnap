@@ -189,16 +189,17 @@ jobs:
   # 链路，但没跑过真模型 —— 这条腿补上：自带点阵字体现场渲染带文字的图，验小图
   # （单块路径）与大图（分块路径）都能识别出文本、且框坐标落在原图范围内。
   #
-  # **两条腿都要**：Linux 走 PyPI wheel（zip 解包 + .so dlopen），macOS 走 NuGet
-  # 包（zip 解包 + **.dylib dlopen**——macOS 对未签名 dylib 的加载策略与 Linux
-  # 不同，必须真机验过才算数）。
+  # **三条腿都要**：三平台的运行时**源与加载规则都不同**——Linux 走 PyPI wheel
+  # （.so dlopen + libgomp）、macOS 走 NuGet 包（.dylib dlopen，签名策略不同）、
+  # Windows 走 PyPI wheel（.dll dlopen + VC 运行时）。任一腿漏验都可能藏
+  # 「某平台 OCR 必坏」——两起真实缺陷（源下线 / GNU tar 不认 zip）都是这样漏掉的。
   ocr-e2e:
     name: ocr-e2e (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable (pinned 2026-11-20)
