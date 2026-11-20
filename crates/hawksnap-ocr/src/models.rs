@@ -55,76 +55,101 @@ pub const REC_SHA256: &str = "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c3
 pub const DICT_URL: &str = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/paddle/PP-OCRv4/rec/ch_PP-OCRv4_rec_mobile/ppocr_keys_v1.txt";
 pub const DICT_SHA256: &str = "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7";
 
-// —— ORT dylib（microsoft/onnxruntime v1.31.0 官方 release；版本与 ort 2.0.0-rc.15
-// —— 的 ort-sys 绑定目标 1.31.0 对齐）。归档/内件 SHA256 实测于 2026-10-23。 ——
+// —— ORT 动态库（**ONNX Runtime 1.19.2**，2026-11-20 换源）——
+//
+//! **为什么换源（真实供应链故障，端到端验收抓出）**：原规格指向
+//! `github.com/microsoft/onnxruntime/releases/download/v1.31.0/…`，而该仓库的
+//! releases **已整体下线**（2026-11-20 实测：所有版本 404、仓库页与 API 均 404，
+//! 两个独立网络路径一致）——意味着**所有用户首次 OCR 必然失败**（HTTP 404）。
+//!
+//! **新源与选型**：
+//! - Linux / Windows：**PyPI 官方 wheel**（`onnxruntime` 1.19.2）——capi 下是独立
+//!   的 C API 动态库（与 Python ABI 无关），12/10MB。
+//! - macOS：**NuGet 官方包** `Microsoft.ML.OnnxRuntime` 1.19.2 ——PyPI 的 macOS
+//!   wheel 里**没有**独立 dylib（只有 Python 扩展 .so），NuGet 包则按
+//!   `runtimes/<os>-<arch>/native/` 提供三平台原生库。
+//! - 版本 **1.19.2** 的理由：① ort-sys 2.0.0-rc.15 的 `ORT_API_VERSION = 17`
+//!   是**最低**版本要求 → ORT 1.19（API 19）向后兼容可用；② macOS 侧提供
+//!   `macosx_11_0_universal2`（macOS 11+），与我们声明的 macOS 12.3 下限相容
+//!   （ORT ≥1.20 的 wheel 只到 macOS 13+）。
+//! - 双层 SHA256：归档 + 解包内件，均实测于 2026-11-20。
+//!
+//! macOS x64 保留（NuGet 内含 osx-x64 库）；非上述目标显式 Err（不做无校验降级）。
 
 /// 当前平台的 ORT 归档规格（档案 SHA256 + 归档内库路径 + 解包后库 SHA256）。
 pub struct OrtSpec {
     pub url: &'static str,
     pub archive_name: &'static str,
     pub archive_sha256: &'static str,
-    /// 归档内的库文件相对路径（tar 解包成员）。
+    /// 归档内的库文件相对路径（zip/tar 解包成员）。
     pub inner_path: &'static str,
     /// 解包落盘的文件名（models 目录内）。
     pub dylib_name: &'static str,
     /// 解包后库文件自身的 SHA256（二次校验：档案对 ≠ 内件坏）。
     pub dylib_sha256: &'static str,
-    /// true = zip（bsdtar `tar -xf`）；false = tgz。
+    /// true = zip（`tar -xf`）；false = tgz。
     pub is_zip: bool,
 }
 
-/// 按编译目标平台返回 ORT 归档规格。上游 v1.31.0 未发布 macOS x64 包 → 明确报错
-/// （不做无校验的降级下载）。未覆盖目标同样显式 Err。
+/// 按编译目标平台返回 ORT 归档规格。未覆盖目标显式 Err（不静默降级）。
 pub fn ort_spec() -> Result<OrtSpec, String> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         Ok(OrtSpec {
-            url: "https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-osx-arm64-1.31.0.tgz",
-            archive_name: "onnxruntime-osx-arm64-1.31.0.tgz",
-            archive_sha256: "1031b36dd3bdaa8d976a6130d9cf2a05e9be320b93ae804f8427b91dc3432afc",
-            inner_path: "onnxruntime-osx-arm64-1.31.0/lib/libonnxruntime.1.31.0.dylib",
-            dylib_name: "libonnxruntime.1.31.0.dylib",
-            dylib_sha256: "2a50a63e7f41f8d4d551d3ee47248df3864f6540109fce8ad520ca3b51af4b70",
-            is_zip: false,
+            url: "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.19.2/microsoft.ml.onnxruntime.1.19.2.nupkg",
+            archive_name: "microsoft.ml.onnxruntime.1.19.2.nupkg",
+            archive_sha256: "fa133c8fe6238445a0dd3e8447baa5c7d16f418caa8e576c7e253ba77b27b61b",
+            inner_path: "runtimes/osx-arm64/native/libonnxruntime.dylib",
+            dylib_name: "libonnxruntime.dylib",
+            dylib_sha256: "183dca3132c8f0e2f0a1a30da3bcf7dee634cd6a7d5bf99b47f3d7ffe2791799",
+            is_zip: true,
         })
     }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
-        Err(hawksnap_core::errcode::coded("ocr_mac_x64_unsupported"))
+        Ok(OrtSpec {
+            url: "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.19.2/microsoft.ml.onnxruntime.1.19.2.nupkg",
+            archive_name: "microsoft.ml.onnxruntime.1.19.2.nupkg",
+            archive_sha256: "fa133c8fe6238445a0dd3e8447baa5c7d16f418caa8e576c7e253ba77b27b61b",
+            inner_path: "runtimes/osx-x64/native/libonnxruntime.dylib",
+            dylib_name: "libonnxruntime.dylib",
+            dylib_sha256: "f06335b436437d9efcdbc4ced5f1c27f1bc3ced9ffddf1c1913e7200613ea2c1",
+            is_zip: true,
+        })
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         Ok(OrtSpec {
-            url: "https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-linux-x64-1.31.0.tgz",
-            archive_name: "onnxruntime-linux-x64-1.31.0.tgz",
-            archive_sha256: "cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57",
-            inner_path: "onnxruntime-linux-x64-1.31.0/lib/libonnxruntime.so.1.31.0",
-            dylib_name: "libonnxruntime.so.1.31.0",
-            dylib_sha256: "469849977cb60744ea160927e1a3a0643fd4c55c0aff743251c6d293402e334e",
-            is_zip: false,
+            url: "https://files.pythonhosted.org/packages/60/ce/be4152da5c1030ab5a159a4a792ed9abad6ba498d79ef0aeba593ff7b5bf/onnxruntime-1.19.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+            archive_name: "onnxruntime-1.19.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+            archive_sha256: "a36511dc07c5c964b916697e42e366fa43c48cdb3d3503578d78cef30417cb84",
+            inner_path: "onnxruntime/capi/libonnxruntime.so.1.19.2",
+            dylib_name: "libonnxruntime.so.1.19.2",
+            dylib_sha256: "4ff01702cba83d4162e87752deb6f09a8bb9297185880e2b54067ef3ffb334f1",
+            is_zip: true,
         })
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
         Ok(OrtSpec {
-            url: "https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-linux-aarch64-1.31.0.tgz",
-            archive_name: "onnxruntime-linux-aarch64-1.31.0.tgz",
-            archive_sha256: "c5b8b3cca31f3d643a3b313b8f42e2d0f16a4fcefd02cda343d97bd5306afaab",
-            inner_path: "onnxruntime-linux-aarch64-1.31.0/lib/libonnxruntime.so.1.31.0",
-            dylib_name: "libonnxruntime.so.1.31.0",
-            dylib_sha256: "595c7f7a6775f5c7b3d567c3ed94c04f722092575abcc092560f5208a54daf99",
-            is_zip: false,
+            url: "https://files.pythonhosted.org/packages/f3/78/e29f5fb76e0f6524f3520e8e5b9d53282784b45d14068c5112db9f712b0a/onnxruntime-1.19.2-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+            archive_name: "onnxruntime-1.19.2-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+            archive_sha256: "c1dfe4f660a71b31caa81fc298a25f9612815215a47b286236e61d540350d7b6",
+            inner_path: "onnxruntime/capi/libonnxruntime.so.1.19.2",
+            dylib_name: "libonnxruntime.so.1.19.2",
+            dylib_sha256: "4a8b12f35d553899a064ae577dc6d9be44c47a5ba4530ac0cf2e1454e4567afc",
+            is_zip: true,
         })
     }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
         Ok(OrtSpec {
-            url: "https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip",
-            archive_name: "onnxruntime-win-x64-1.31.0.zip",
-            archive_sha256: "3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195",
-            inner_path: "onnxruntime-win-x64-1.31.0/lib/onnxruntime.dll",
+            url: "https://files.pythonhosted.org/packages/1e/f5/9d995a685f97508b3254f17015b4a78641b0625e79480a7aed7a7a105d7c/onnxruntime-1.19.2-cp311-cp311-win_amd64.whl",
+            archive_name: "onnxruntime-1.19.2-cp311-cp311-win_amd64.whl",
+            archive_sha256: "1c3e5d415b78337fa0b1b75291e9ea9fb2a4c1f148eb5811e7212fed02cfffa8",
+            inner_path: "onnxruntime/capi/onnxruntime.dll",
             dylib_name: "onnxruntime.dll",
-            dylib_sha256: "0c42dc4e278f0968fdf9ebf1b1e54a74c657a9942e70803e453c91993451cf4c",
+            dylib_sha256: "d1b2538368cc16979a6e4506eb01094f17ac3c3e7fe5dfd2aec35409c10b4dc0",
             is_zip: true,
         })
     }

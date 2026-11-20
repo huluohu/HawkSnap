@@ -207,7 +207,6 @@
   "err.windowcap_bad_scale": "Window capture size looks wrong: {detail}",
   "err.windowcap_empty_image": "Window capture returned an empty image",
   "err.windowcap_outside_display": "Selection is outside every display",
-  "err.ocr_mac_x64_unsupported": "OCR is not supported on this platform (no official ONNX Runtime build for macOS x64)",
   "err.ocr_platform_unsupported": "OCR is not supported on this platform",
   "err.ocr_models_dir_failed": "Failed to create the models directory: {detail}",
   "err.ocr_stage_dir_failed": "Failed to create the extraction directory: {detail}",

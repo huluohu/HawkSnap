@@ -98,7 +98,7 @@ Linux 捕获后端面向 X11；Wayland 会话暂不支持（捕获会得到可�
 - Windows 安装器未代码签名（首次运行 SmartScreen 会告警）；macOS dmg 未做公证。
 - GIF 导出无音频、不含画中画；GIF 抽帧队列有界（约 22 帧），长录制产出的 GIF 只覆盖收尾窗口（MP4 始终是全程）。
 - 长截图只支持单轴纵向滚动；周期性内容（聊天气泡等）可能被拒绝拼接（宁可不拼，绝不产出重影图）。
-- OCR 模型首次使用需联网下载约 60MB（此后离线可用）；OCR 不支持 Intel macOS。
+- OCR 首次使用需联网下载模型与 ONNX Runtime（此后离线可用）；Intel 与 Apple Silicon macOS 均支持 OCR。
 - 录屏中退出应用会产生损坏的 MP4（退出不收尾录制器）。
 - Rust 侧错误文案暂为中文（界面已双语）。
 

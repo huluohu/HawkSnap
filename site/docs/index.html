@@ -129,7 +129,7 @@
               <tr id="f-capture"><td>基础截图</td><td><kbd>F1</kbd> / 托盘「截图」</td><td>区域 = 拖拽框选；全屏 = Enter / 双击；支持延时截图（1/2/3/5 秒）与多显示器。</td></tr>
               <tr id="f-hover"><td>智能吸附</td><td>截图悬停时自动</td><td>悬停高亮元素 / 窗口，单击选中；需辅助功能授权，未授权降级为手动画框。</td></tr>
               <tr id="f-annotate"><td>标注编辑器</td><td>覆盖层浮条「标注」/ 贴图双击 / 历史「重新编辑」</td><td>10 类工具（矩形/椭圆/箭头/画笔/荧光笔/马赛克/序号/文字/裁剪/选择），⌘S 保存。</td></tr>
-              <tr id="f-ocr"><td>OCR</td><td>编辑器工具栏「OCR」</td><td>中英双语本地识别；首次需下载模型（约 60MB，见 <a href="#faq-model">FAQ</a>）；不支持 Intel（见 <a href="#faq-intel">FAQ</a>）。</td></tr>
+              <tr id="f-ocr"><td>OCR</td><td>编辑器工具栏「OCR」</td><td>中英双语本地识别；首次需下载模型与 ONNX Runtime（见 <a href="#faq-model">FAQ</a>）；Intel 与 Apple Silicon 均支持（见 <a href="#faq-intel">FAQ</a>）。</td></tr>
               <tr id="f-pin"><td>贴图 Pin</td><td><kbd>F2</kbd> / 托盘 / 主面板</td><td>拖拽移动、滚轮缩放（10%–3200%）、Ctrl+滚轮调透明度（20%–100%）、Esc 关闭。</td></tr>
               <tr id="f-record"><td>录屏</td><td><kbd>F6</kbd> 选区模式</td><td>覆盖层横幅可切 MP4 / GIF（格式仅本轮有效）；录制中可开摄像头画中画与按键显示；系统声音随录（GIF 无音频）。</td></tr>
               <tr id="f-scrollshot"><td>长截图</td><td>托盘「长截图」</td><td>拖选区域 → 滚动页面 → <kbd>⌘S</kbd> 完成；单轴纵向拼接，画布上界 256MB / 40000px。</td></tr>
@@ -187,12 +187,12 @@ npm run build</code></pre>
           智能吸附无高亮、按键显示不工作则是缺「辅助功能」授权（见<a href="#accessibility">安装</a>一节）。</p>
 
         <h3 id="faq-model">OCR 模型要下载多大？断网能用吗？</h3>
-        <p>首次触发 OCR 时联网下载约 60MB（PP-OCRv4 mobile 三模型，官方 release 源 + SHA256 校验，进度条可见），
+        <p>首次触发 OCR 时联网下载模型（PP-OCRv4 mobile 三模型，约 60MB）与 ONNX Runtime 运行时（官方包源 + SHA256 校验，进度条可见），
           之后<strong>完全离线可用</strong>；推理纯本地，识别结果不上传。引擎空闲 10 分钟自动卸载（单会话峰值内存约 580MB）。</p>
 
         <h3 id="faq-intel">Intel Mac 支持吗？</h3>
-        <p>基础截图、智能吸附、标注、贴图、录屏 / GIF、长截图、历史等均支持（macOS 12.3+ Intel / Apple Silicon 同包）。
-          <strong>OCR 不支持 Intel macOS</strong>——ONNX Runtime 官方未发布 macOS x64 构建，Intel 机器上会明确报错而非静默失败。</p>
+        <p>基础截图、智能吸附、标注、贴图、录屏 / GIF、长截图、历史、OCR 均支持（macOS 12.3+ Intel / Apple Silicon 同包）。
+          OCR 运行时在 Intel 与 Apple Silicon 上均可用（各取对应架构的官方构建）。</p>
 
         <h3 id="faq-history">历史和文件保存在哪？会传到云端吗？</h3>
         <p>全部纯本地：截图在 <code>~/Pictures/HawkSnap</code>，录屏 / GIF 在 <code>~/Movies/HawkSnap</code>，

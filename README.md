@@ -100,7 +100,7 @@ All hotkeys can be customized in the main panel’s settings (a conflicting bind
 - Windows installers are not code-signed (SmartScreen warns on first run); macOS dmg is not notarized.
 - GIF export is silent and excludes picture-in-picture; the GIF frame queue is bounded (~22 frames), so long recordings yield a GIF covering only the closing window (MP4 is always the full take).
 - Scrolling screenshots support vertical scrolling only; repetitive layouts (chat bubbles, galleries) may be rejected rather than stitched wrong.
-- OCR models download ~60MB on first use (offline afterwards); OCR is not available on Intel Macs.
+- OCR downloads the models plus the ONNX Runtime on first use (offline afterwards); OCR works on both Intel and Apple Silicon Macs.
 - Quitting the app mid-recording produces a broken MP4 (the recorder isn’t finalized on quit).
 - Rust-side error strings are Chinese for now (the UI is bilingual).
 

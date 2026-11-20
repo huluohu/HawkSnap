@@ -207,7 +207,6 @@
   "err.windowcap_bad_scale": "窗口抓取尺寸异常：{detail}",
   "err.windowcap_empty_image": "窗口抓取返回空图像",
   "err.windowcap_outside_display": "选区不在任何显示器范围内",
-  "err.ocr_mac_x64_unsupported": "OCR 暂不支持此平台（官方未发布 macOS x64 的 ONNX Runtime 构建）",
   "err.ocr_platform_unsupported": "OCR 暂不支持当前平台",
   "err.ocr_models_dir_failed": "创建模型目录失败：{detail}",
   "err.ocr_stage_dir_failed": "创建解包目录失败：{detail}",
