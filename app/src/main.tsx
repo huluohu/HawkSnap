@@ -66,7 +66,12 @@ function probeAssetProtocol(windowLabel: string) {
     img.addEventListener("error", () => report("fail"), { once: true });
   };
   const tryBind = () => {
-    const img = document.querySelector<HTMLImageElement>(".hs-thumb img");
+    // 选择器：缩略图的 class 在 **img 自身**（App.tsx: className="hs-thumb"），
+    // 不是父容器 —— 2026-11-20 首轮 CI 自检实测：写成 `.hs-thumb img` 永远匹配
+    // 不到（报 fail:no-thumb）。两种形态都收，避免将来结构调整再踩。
+    const img = document.querySelector<HTMLImageElement>(
+      "img.hs-thumb, .hs-thumb img",
+    );
     if (!img) return false;
     settle(img);
     return true;
@@ -80,7 +85,7 @@ function probeAssetProtocol(windowLabel: string) {
   // 兜底：15s 后若仍未见缩略图（历史为空等），回报 fail（自检据此判红）。
   window.setTimeout(() => {
     obs.disconnect();
-    if (!document.querySelector(".hs-thumb img")) report("fail:no-thumb");
+    if (!document.querySelector("img.hs-thumb, .hs-thumb img")) report("fail:no-thumb");
   }, 15000);
 }
 
