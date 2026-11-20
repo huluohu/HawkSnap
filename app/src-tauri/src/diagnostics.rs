@@ -67,7 +67,10 @@ pub fn frontend_ready(
     eprintln!("[hawksnap] frontend ready: {label}");
     if let Some(a) = asset.as_deref() {
         eprintln!("[hawksnap] asset probe: {a}");
-        let ok = a.eq_ignore_ascii_case("ok");
+        // 前端回报形如 `ok:320x200`（带自然尺寸，便于确认加载的是缩略图而非
+        // 别的图）——判据取前缀，**不是**严格相等（2026-11-20 CI 实测教训：
+        // 严格相等会把「ok:320x200」误判为失败）。
+        let ok = a.eq_ignore_ascii_case("ok") || a.to_ascii_lowercase().starts_with("ok:");
         if let Ok(mut r) = report().lock() {
             r.asset = Some(ok);
         }
