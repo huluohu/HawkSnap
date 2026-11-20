@@ -590,13 +590,6 @@ pub(crate) fn validate_media_path(
     app: &AppHandle,
     path: &str,
 ) -> Result<std::path::PathBuf, String> {
-    if path.trim().is_empty() {
-        return Err(crate::errcode::coded("path_empty"));
-    }
-    let p = std::path::Path::new(path);
-    let canonical = p
-        .canonicalize()
-        .map_err(|_| crate::errcode::coded_kv("path_not_found", &[("path", path)]))?;
     let mut roots: Vec<std::path::PathBuf> = vec![std::env::temp_dir()];
     if let Ok(dir) = app.path().app_data_dir() {
         roots.push(dir);
@@ -607,7 +600,27 @@ pub(crate) fn validate_media_path(
     if let Some(dir) = resolve_save_dir(&crate::settings::Settings::load(app)) {
         roots.push(dir);
     }
-    for root in &roots {
+    validate_media_path_in(&roots, path)
+}
+
+/// 白名单判定本体（**AppHandle-free 纯函数** → 可单测；2026-11-20 真机验收轮
+/// 补 CI 覆盖——白名单是本轮新加的安全面，不该只靠人工验收）。
+///
+/// 判定：路径必须能 canonicalize（存在且可解析），且落在**任一 root 之下**
+/// （root 也 canonicalize —— macOS 的 `/tmp` ↔ `/private/tmp`、Windows 的
+/// `\\?\` 前缀差异在此消除）。越界 → `media_path_outside_scope` 哨兵码。
+pub(crate) fn validate_media_path_in(
+    roots: &[std::path::PathBuf],
+    path: &str,
+) -> Result<std::path::PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err(crate::errcode::coded("path_empty"));
+    }
+    let p = std::path::Path::new(path);
+    let canonical = p
+        .canonicalize()
+        .map_err(|_| crate::errcode::coded_kv("path_not_found", &[("path", path)]))?;
+    for root in roots {
         if let Ok(root_c) = root.canonicalize() {
             if canonical.starts_with(&root_c) {
                 return Ok(canonical);
@@ -863,5 +876,51 @@ mod tests {
         assert_ne!(p1, p2, "毫秒时间戳命名必须保证两次标注不互撞");
         std::fs::remove_file(p1).ok();
         std::fs::remove_file(p2).ok();
+    }
+
+    // —— 媒体路径白名单（2026-11-20 真机验收轮：白名单是本轮新加的安全面，
+    // 补 CI 三平台覆盖，不依赖人工验收）——
+
+    #[test]
+    fn media_path_allows_files_under_a_root() {
+        let dir = std::env::temp_dir().join(format!("hs-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("shot.png");
+        std::fs::write(&png, b"x").unwrap();
+        let roots = vec![dir.clone()];
+        let ok = validate_media_path_in(&roots, &png.to_string_lossy()).unwrap();
+        assert!(ok.ends_with("shot.png"), "应放行 root 下的文件: {ok:?}");
+        // 另一 root 之外 → 拒（哨兵码 media_path_outside_scope）。
+        let other = std::env::temp_dir().join(format!("hs-other-{}", std::process::id()));
+        std::fs::create_dir_all(&other).unwrap();
+        let outside = other.join("evil.png");
+        std::fs::write(&outside, b"x").unwrap();
+        let err = validate_media_path_in(&roots, &outside.to_string_lossy()).unwrap_err();
+        assert!(err.contains("<hserr:media_path_outside_scope>"), "实际: {err}");
+        // 不存在的路径 → path_not_found（不是越界）。
+        let missing = dir.join("nope.png");
+        let err = validate_media_path_in(&roots, &missing.to_string_lossy()).unwrap_err();
+        assert!(err.contains("<hserr:path_not_found>"), "实际: {err}");
+        // 空路径 → path_empty。
+        let err = validate_media_path_in(&roots, "  ").unwrap_err();
+        assert!(err.contains("<hserr:path_empty>"), "实际: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn media_path_does_not_escape_root_by_prefix() {
+        // 前缀相同但不同目录（「/tmp/hs-scope-123-evil」 vs root「/tmp/hs-scope-123」）
+        // 不得因字符串前缀而放行 —— starts_with 作用在**路径分量**上。
+        let root = std::env::temp_dir().join(format!("hs-scope-{}", std::process::id()));
+        let sibling = std::env::temp_dir().join(format!("hs-scope-{}-evil", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let png = sibling.join("evil.png");
+        std::fs::write(&png, b"x").unwrap();
+        let err = validate_media_path_in(&vec![root.clone()], &png.to_string_lossy()).unwrap_err();
+        assert!(err.contains("<hserr:media_path_outside_scope>"), "实际: {err}");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
     }
 }
