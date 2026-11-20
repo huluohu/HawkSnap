@@ -141,19 +141,21 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
-      # Linux 运行库（**运行库**而非 -dev 包——rust-test job 装的是编译期依赖）：
-      # webkit2gtk（webview）、ayatana-appindicator（托盘）、librsvg（图标）、
-      # xvfb（无头 X）、dbus-x11（会话总线——缺它 tray build 失败 → 应用退出）。
+      # Linux 运行库。**用 -dev 包**（与 rust-test job 同款）：-dev 会自动拉入对应
+      # 运行库，且避开 Ubuntu 24.04 的 t64 包名转型坑（librsvg2-1t64 等直接写
+      # 运行库包名会在 24.04 上「Unable to locate package」——2026-11-20 实测）。
+      # 另加 xvfb（无头 X）与 dbus-x11（会话总线——缺它 tray build 失败 → 应用退出）。
       - name: Install Linux runtime deps (webkit2gtk / tray / xvfb / dbus)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-0 \
-            libayatana-appindicator3-1 \
-            librsvg2-1 \
-            libssl3 \
-            libxdo3 \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libx11-dev libxext-dev libxrandr-dev libxtst-dev \
+            libxkbcommon-dev libdbus-1-dev \
             xvfb \
             dbus-x11
       - name: npm ci
