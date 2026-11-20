@@ -54,7 +54,19 @@ PID=$!
 
 # 等自检完成（应用自检结束后自行退出；上限 90s 兜底）。
 EXIT_CODE=""
+SHOTTEN=0
 for _ in $(seq 1 90); do
+  # 取证时机：应用**还活着**时截（主面板是临时窗口，应用一退就没了）。
+  if [ "$SHOTTEN" = "0" ] && [ -n "$SHOT" ] && grep -q "smoke summary:" "$LOG" 2>/dev/null; then
+    SHOTTEN=1
+    if [ "${RUNNER_OS:-}" = "macOS" ] || [ "$(uname -s)" = "Darwin" ]; then
+      # 提到前台（Accessory 策略的进程在 runner 上可能被 Finder 盖住）。
+      osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "hawksnap") to true' >/dev/null 2>&1 || true
+      sleep 1
+      screencapture -x "$SHOT" >/dev/null 2>&1 && echo "[smoke] 截图: $SHOT" || \
+        echo "[smoke] 截图失败（不计入判定）"
+    fi
+  fi
   if ! kill -0 "$PID" 2>/dev/null; then
     wait "$PID" 2>/dev/null
     EXIT_CODE=$?
@@ -81,15 +93,8 @@ echo "[smoke] 握手: $(grep -m1 'frontend ready:' "$LOG" || echo '（无）')"
 echo "[smoke] 资产: $(grep -m1 'asset probe:' "$LOG" || echo '（无）')"
 echo "[smoke] 退出码: $EXIT_CODE"
 
-# 截图（macOS 最有价值——runner 有 GUI session，可截真实窗口；失败仅记日志，
-# **不计入**判定：截图是证据，不是判据）。
-if [ -n "$SHOT" ]; then
-  if [ "${RUNNER_OS:-}" = "macOS" ] || [ "$(uname -s)" = "Darwin" ]; then
-    if command -v screencapture >/dev/null 2>&1; then
-      screencapture -x "$SHOT" 2>/dev/null && echo "[smoke] 截图: $SHOT" || \
-        echo "[smoke] 截图失败（不计入判定）"
-    fi
-  fi
+if [ -n "$SHOT" ] && [ "$SHOTTEN" = "0" ]; then
+  echo "[smoke] 未在应用存活期完成截图（不计入判定）"
 fi
 
 if [ "$EXIT_CODE" != "0" ]; then

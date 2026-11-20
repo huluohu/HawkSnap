@@ -249,8 +249,13 @@ fn seed_media(
 }
 
 /// 收尾：汇总行已落日志，按结果给退出码（CI 门禁判据）。
+///
+/// **先留 8s 窗口期再退出**：CI 的目视取证（截图）需要应用**还活着**——主面板
+/// 是零窗口架构下的临时窗口，应用一退就没了；这 8s 让冒烟脚本能拍到真实界面
+/// （2026-11-20 实测：退出后再截只会拍到 runner 桌面）。
 fn finish(app: &AppHandle, ok: bool) {
-    // 退出码：Tauri 的 app.exit(code) → 进程退出码（Linux/macOS 可观测）。
-    // Windows runner 同样可见（CI 脚本按退出码判定）。
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    // 退出码：Tauri 的 app.exit(code) → 进程退出码（Linux/macOS/Windows 可观测），
+    // CI 脚本按它判定门禁。
     app.exit(if ok { 0 } else { 1 });
 }
