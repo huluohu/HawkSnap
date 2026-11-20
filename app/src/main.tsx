@@ -34,10 +34,55 @@ const route = new URLSearchParams(window.location.search).get("window");
 // `[hawksnap] frontend ready: <window>`。它是「CSP 放行了 script + connect-src
 // 放行了 IPC」的运行时证据（CSP 写错时页面会加载但空白，日志里**没有**这行）。
 // 失败（invoke 被拦/后端不可用）只记 console——握手不该影响任何功能。
-void invoke("frontend_ready", { window: route ?? "main" }).catch(() => {
-  // 握手失败不阻断渲染；仅提示（真机排障线索）。
-  console.warn("[hawksnap] frontend_ready 握手未成功");
-});
+//
+// 回执 ack.smoke = 后端处于自检模式（HAWKSNAP_SMOKE=1）→ 此时**额外**做一次
+// 资产探测：等历史瓦片里的缩略图出现并真的 onload → 回报（证明 asset 协议的
+// img-src 在真实 webview 上放行）。**非自检模式不做任何额外事**（生产零开销）。
+void invoke<{ smoke: boolean }>("frontend_ready", { window: route ?? "main" })
+  .then((ack) => {
+    // 只有主面板做资产探测（它渲染历史缩略图 → asset: URL）；编辑器/设置窗
+    // 没有缩略图，探测它们只会误报 fail。
+    if (ack?.smoke && (route ?? "main") === "main") probeAssetProtocol(route ?? "main");
+  })
+  .catch(() => {
+    // 握手失败不阻断渲染；仅提示（真机排障线索）。
+    console.warn("[hawksnap] frontend_ready 握手未成功");
+  });
+
+/** 自检模式：探测 asset 协议加载（历史缩略图 → asset: URL → img-src）。 */
+function probeAssetProtocol(windowLabel: string) {
+  const report = (result: string) => {
+    void invoke("frontend_ready", { window: windowLabel, asset: result }).catch(() => {});
+  };
+  const settle = (img: HTMLImageElement) => {
+    // load 事件不重放：已完成且有自然宽 → 立即判 ok。
+    if (img.complete && img.naturalWidth > 0) {
+      report(`ok:${img.naturalWidth}x${img.naturalHeight}`);
+      return;
+    }
+    img.addEventListener("load", () => report(`ok:${img.naturalWidth}x${img.naturalHeight}`), {
+      once: true,
+    });
+    img.addEventListener("error", () => report("fail"), { once: true });
+  };
+  const tryBind = () => {
+    const img = document.querySelector<HTMLImageElement>(".hs-thumb img");
+    if (!img) return false;
+    settle(img);
+    return true;
+  };
+  if (tryBind()) return;
+  // 历史是懒加载的：等 DOM 里出现缩略图（MutationObserver，无需轮询）。
+  const obs = new MutationObserver(() => {
+    if (tryBind()) obs.disconnect();
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+  // 兜底：15s 后若仍未见缩略图（历史为空等），回报 fail（自检据此判红）。
+  window.setTimeout(() => {
+    obs.disconnect();
+    if (!document.querySelector(".hs-thumb img")) report("fail:no-thumb");
+  }, 15000);
+}
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

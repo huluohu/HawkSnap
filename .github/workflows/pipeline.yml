@@ -169,8 +169,20 @@ jobs:
       # localhost:1420）→ 启动即白屏、门必红（2026-10-19 战役记录的老坑）。
       - name: Build app (custom-protocol)
         run: cargo build -p hawksnap --features tauri/custom-protocol
+      # 自检（断言：前端握手 / 资产协议加载 / 编辑器窗口 / 白名单放行与拒绝）。
+      # macOS 额外截屏（runner 有 GUI session）——截图是**证据**供人工/AI 目视复核，
+      # 截图失败不计入判定（判据是应用退出码）。
       - name: Launch smoke (frontend handshake = CSP + IPC alive)
         run: bash scripts/smoke-launch.sh
+        env:
+          SMOKE_SHOT: ${{ runner.os == 'macOS' && 'smoke-macos.png' || '' }}
+      - name: Upload smoke screenshot (macOS evidence)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: smoke-screenshot-macos
+          path: smoke-macos.png
+          if-no-files-found: ignore
 
   size:
     # G1 体积断言（≤15MB dmg，plan D2 落地、D6 起为正式门）。tauri build 慢是预期；
