@@ -1,90 +1,68 @@
 # 真机验收说明（v1.2.1 审计轮）
 
 > 2026-11-20 第二轮审计战役（86 条发现 → 六波修复）后的验收说明。
-> 记录**哪些已在真机验证、哪些需要你本机确认、怎么确认**。
+> **验收已自动化**：CI 三平台真机 runner 现在自己跑完整验收（启动冒烟 + OCR 端到端），
+> 并产出目视证据（截图）。本文件记录**验了什么、怎么验的、还剩什么只能人看**。
 
 ---
 
-## 一、已在真机验证的部分（CI 三平台真机 runner）
+## 一、CI 真机门（已生效，长期自动运行）
 
-CI 的 `smoke` job 在 **macos-15 / ubuntu-24.04 / windows-2022** 上启动真实应用
-（真实 WKWebView / WebKitGTK / WebView2），判定依据是前端握手日志
-`[hawksnap] frontend ready: main`。
+CI 的 runner 就是真机：macos-15 = 真实 WKWebView，ubuntu-24.04 = 真实 WebKitGTK，
+windows-2022 = 真实 WebView2。
 
-**已实证**：
+### 1. `smoke`（三平台）：启动冒烟 —— 5 项断言
 
-| 验收项 | 证据 | 结果 |
+| 断言 | 验什么 | 怎么判 |
 |---|---|---|
-| CSP 不导致白屏（script-src 放行 bundle） | 三平台均出现握手行 | ✅ |
-| CSP 放行 IPC（connect-src） | 握手本身是一次 invoke 往返 | ✅ |
-| 应用启动无 panic、进程存活 | 脚本判据 | ✅ |
-| Linux 托盘/DBus/Xvfb 环境可启动 | Linux 腿握手成功 | ✅ |
-| 媒体路径白名单逻辑 | `validate_media_path_in` 单测 ×5（三平台跑） | ✅ |
-| 错误码与词典双向对齐 | `check-i18n` errcode 门（162 码 ↔ 162 键） | ✅ |
+| `frontend=true` | **CSP 放行 script-src**（bundle 真的执行了）**且 connect-src**（IPC invoke 往返成功） | 前端挂载后握手 → 后端落日志行 |
+| `asset=Some(true)` | **asset 协议 img-src 运行时实证**：真实缩略图真的 onload | 自检模式造 PNG+缩略图+历史行 → 前端回报 `ok:320x200` |
+| `editor=true` | 第二个窗口（编辑器）的 CSP + 白名单装载链路 | 编辑器窗口同样握手 |
+| `allow_ok=true` | 白名单：应用落盘根内的路径被放行 | 应用内断言 |
+| `allow_blocked=true` | 白名单：应用落盘根外的路径被拒 | 应用内断言 |
 
-**尚未运行时实证**（需要真实素材，CI 里没有）：
+应用自检结束后**以退出码表态**（0 = 全过）→ CI 门禁判据。macOS 额外截屏上传
+artifact（目视证据；截图失败不改变判定）。
 
-| 验收项 | 为什么 CI 验不了 | 怎么确认 |
+### 2. `ocr-e2e`（三平台）：OCR 端到端 —— 真模型
+
+自带 5×7 点阵字体现场渲染带文字的图（不依赖字体文件、不依赖网络图片），断言：
+
+- 小图（单块路径）识别出非空文本；
+- 大图（3200×900 → **分块路径**）识别出文本，且**框坐标落在原图范围内**
+  （实测 `box0=(506,307)` ≈ 文字原点 `(500,300)` → 分块坐标映射正确）；
+- 隐含覆盖：模型下载 → SHA256 双层校验 → zip 解包 → ORT 装载 → 推理 → 坐标。
+
+三平台各用**不同的运行时源**（因此三腿都必须跑）：Linux/Windows = PyPI 官方 wheel，
+macOS = NuGet 官方 `Microsoft.ML.OnnxRuntime` 包（PyPI 的 macOS wheel 没有独立
+dylib）。
+
+---
+
+## 二、这两个门抓到过的真实缺陷（单测与 mock 全都看不见）
+
+| 缺陷 | 后果 | 为什么只有 e2e 能抓 |
 |---|---|---|
-| 历史网格缩略图加载（`img-src` 的 asset 协议） | CI 里历史库为空，无图可加载 | 历史里有图 → 打开主面板看缩略图 |
-| 覆盖层冻结帧加载（`fetch` asset 协议） | CI 无屏幕录制权限，抓不到帧 | 按 F1 → 覆盖层应显示冻结帧 |
-| 媒体白名单的**端到端**路径（重编辑/贴图/OCR） | 需要真实截图文件 | 历史里任一张 → 重新编辑 / 贴图 / OCR |
+| `github.com/microsoft/onnxruntime` 的 releases **整体下线** | **所有用户首次 OCR 必失败**（HTTP 404） | 单测 mock 了 HTTP；产品从未真下载过 |
+| 解包用 `tar -xf` 读 **zip** | **Linux 上 OCR 必装不上运行时**（GNU tar 不认 zip，只有 macOS/Windows 的 bsdtar 认） | 打包在 macOS 上做，跨平台解包从未被跑过 |
+
+修复后：ORT 换源（PyPI wheel / NuGet 包，版本 1.19.2，双层 SHA256），zip 解包改用
+Rust 的 `zip` crate。顺带**Intel macOS 获得 OCR 支持**（NuGet 含 osx-x64）——五语
+README 与官网的「Intel 不支持 OCR」声明已随之删除。
 
 ---
 
-## 二、你本机的验收脚本（我不代跑）
+## 三、只剩「人看」的部分
 
-按项目约定，构建/启动/录屏类操作**不在你的工作机上跑**（会占屏、抢焦点、抢 CPU）。
-所以验收动作已写成自包含脚本，你方便时跑一次即可：
+自动化已覆盖功能正确性；以下必须人眼（CI 无对应环境）：
 
-```bash
-cd /path/to/HawkSnap
-bash scripts/acceptance-mac.sh            # 构建 + 启动 + 采集（默认 debug 构建）
-bash scripts/acceptance-mac.sh --no-build # 复用已有构建
-```
+| 项 | 为什么 CI 做不了 | 怎么验 |
+|---|---|---|
+| **录屏**（MP4/GIF）产物 | CI 无屏幕录制权限，录不到真实画面 | macOS 上录一段 → 播放看内容/音画 |
+| **贴图窗**观感 | 贴图是 macOS 原生 NSWindow（CI 无 GUI 语义） | macOS 上贴一张 → 看窗口行为 |
+| **真实截图流程**（覆盖层冻结帧、吸附） | 需屏幕录制授权 | macOS 上按 F1 → 选区 → 确认 |
+| **OCR 识别质量**（真实文本，非点阵字） | e2e 用的是点阵字体，只验链路不验质量 | macOS 上截一段文字 → OCR |
+| **视觉审美**（间距/层级/动效手感） | 机器无法判断"好看" | 看主面板/设置/编辑器三个界面 |
 
-产物落在 `/tmp/hawksnap-acceptance-<时间戳>/`：
-
-| 文件 | 内容 |
-|---|---|
-| `REPORT.md` | 自动汇总：前端握手是否出现、进程是否存活、panic/错误行、**6 条人工确认项** |
-| `app.log` | 应用 stdout/stderr（含握手行） |
-| `panel.png` | 主面板截图 |
-| `perms.txt` | 截图/缩略图/录屏产物的权限位（期望 `-rw-------`） |
-
-**跑完把结果告诉我**（贴 `REPORT.md` 内容，或把整个目录打包给我），我据此判读。
-
-### 人工确认项（脚本无法自动判定）
-
-1. 设置窗内容正常渲染（不是空白页）——CSP 覆盖第二个窗口
-2. 历史里任一张 → 「重新编辑」→ 编辑器加载出图（媒体白名单路径）
-3. 历史里任一张 → 「贴图」→ 贴图窗显示（macOS 专属）
-4. 历史里任一张 → 「OCR」→ 识别出文字（白名单 + 错误码双语）
-5. 故意触发失败（把保存目录设成不可写再截图）→ 横幅是**当前语言**文案，不是中文/原始哨兵
-6. 触发错误横幅后等 ~10s → 横幅自动消失
-
----
-
-## 三、CI 里的真机冒烟门（已合入，长期生效）
-
-```
-smoke (macos-15 / ubuntu-24.04 / windows-2022)
-  ├─ npm ci → 前端 build
-  ├─ cargo build -p hawksnap --features tauri/custom-protocol   ← 缺该 feature 会回落 devUrl → 必白屏
-  └─ bash scripts/smoke-launch.sh
-        ├─ HAWKSNAP_SMOKE=1 启动（自动打开主面板）
-        ├─ 等 [hawksnap] frontend ready: main（≤45s）
-        ├─ 判进程存活 + 无 panic
-        └─ 收尾（Linux 走 xvfb-run + dbus-run-session）
-```
-
-`HAWKSNAP_SMOKE=1` 是自检开关（沿用仓库既有 `HAWKSNAP_BENCH` / `HAWKSNAP_G4` 约定），
-生产运行零影响。零窗口架构下启动只起托盘，没有这个开关就无从观察「前端跑起来没有」。
-
----
-
-## 四、已知未修项（审计登记，本轮未做）
-
-详见项目记忆的「登记未修」清单，要点：GIF 32MB 队列预算截断（长录制 GIF 只剩最后
-~1 秒）、收尾链未 spawn_blocking 化、抓帧整帧 PNG 白编码、`editor_save` 走 base64
-过 IPC、贴图窗口图像双份驻留等。
+前四项可用 `scripts/acceptance-mac.sh` 一次性采集（构建 + 启动 + 截图 + 权限位 +
+报告），但**功能正确性已不再依赖它**——它现在只是「给人看的证据采集器」。
